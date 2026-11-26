@@ -23,6 +23,7 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
     MT5_SERVER_UNKNOWN_DETAIL,
+    MT5_SIGN_IN_REFUSED_DETAIL,
     MT5_TERMINAL_BUSY_DETAIL,
     MT5_TERMINAL_NOT_READY_DETAIL,
 )
@@ -30,6 +31,7 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5AccountMismatchError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
@@ -188,6 +190,11 @@ _MT5_VALIDATE_STAGE_TIMEOUT_S: Final[float] = MT5_VALIDATE_REQUEST_TIMEOUT_S + 5
 # Env-overridable following the mt5_concurrency.py derived-constant convention, so
 # Phase 155 can retune from measurement without a deploy of new code.
 _MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_S", "75.0"))
+
+# Phase 225 (SIGNINREFUSED) - MT5 `last_error` -6, `RES_E_AUTH_FAILED` ("authorization
+# failed", MT5 Python docs `mt5lasterror_py`). The validate arm answers a login-stage -6
+# with the honest `MT5_SIGN_IN_REFUSED`; every other login-stage code keeps SIGN_IN_FAILED.
+_MT5_AUTH_FAILED_CODE: Final[int] = -6
 
 # Phase 218 (SELFHEAL) - the event-loop bound on the owed gate's inline scrub (the W-1
 # wait plus the blocking scrub together), about 5 x the measured 6 s scrub, per
@@ -914,6 +921,7 @@ async def _validate_mt5_key_probe(
                     investor_pw=investor_pw,
                     server=server,
                     log_prefix="validate_key",
+                    site=SITE_VALIDATE_WIZARD,
                 )
             finally:
                 # Set by THIS thread when `run_probe` exits, however it exits.
@@ -981,18 +989,31 @@ async def _validate_mt5_key_probe(
                 detail=NETWORK_ERROR_DETAIL,
                 recoverable=True,
             )
-        except Mt5AccountMismatchError:
+        except Mt5AccountMismatchError as exc:
             # D-07 part 2: another actor switched the terminal mid-probe. No park.
-            probe_disqualified = "probe_account_mismatch"
-            # RED-TEAM: a concurrent validate re-logged the shared terminal onto
-            # another account mid-probe — an INFRA/concurrency fault, never the
-            # user's key. Fail CLOSED transient (never valid, never auth-failed,
-            # never a wrong-account verdict). No account values in the log line.
-            logger.warning(
-                "validate_key: MT5 terminal account mismatch mid-probe "
-                "(concurrent validate) — failing closed transient"
-            )
-            trace.outcome = "transient"
+            if isinstance(exc, Mt5ServerMismatchError):
+                # WR-02 (225 PR-2c): the SERVER bracket refused — the session is on
+                # another broker server than requested. Not a concurrency race, and
+                # it must not read as one in the log, the trace or the park alert
+                # (Task 3's revert gate reads this line). No login, no server value.
+                probe_disqualified = "probe_server_mismatch"
+                logger.warning(
+                    "validate_key: MT5 session not on the requested broker server "
+                    "— failing closed transient"
+                )
+                trace.outcome = "transient_server_mismatch"
+            else:
+                probe_disqualified = "probe_account_mismatch"
+                # RED-TEAM: a concurrent validate re-logged the shared terminal
+                # onto another account mid-probe — an INFRA/concurrency fault,
+                # never the user's key. Fail CLOSED transient (never valid, never
+                # auth-failed, never a wrong-account verdict). No account values
+                # in the log line.
+                logger.warning(
+                    "validate_key: MT5 terminal account mismatch mid-probe "
+                    "(concurrent validate) — failing closed transient"
+                )
+                trace.outcome = "transient"
             # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
             raise VenueTransientHTTPException(
                 status_code=424,
@@ -1159,6 +1180,26 @@ async def _validate_mt5_key_probe(
             # shared terminal are the operation implicated in wedging and account
             # eviction (164.6.5 / 164.6.6) — so offering one would be the harmful
             # action, not merely a useless one (D-08).
+            # ⭐ Phase 225 (SIGNINREFUSED) — a login-stage `last_error` of exactly -6
+            # is `RES_E_AUTH_FAILED`, "authorization failed" (MT5 Python docs,
+            # `mt5lasterror_py`). MEASURED on PROD 2026-11-25: a wrong broker server
+            # with a real investor password answered -6 within ~0.5 s, so the broker
+            # ANSWERED and refused, and `SIGN_IN_FAILED_DETAIL`'s "did not complete"
+            # was false for it. Same shape (424, `recoverable=False`, same reasoning),
+            # new wire code and an honest detail. -6 is identical for a wrong login, a
+            # wrong investor password and a wrong server, so neither the detail nor the
+            # wizard copy claims one. ⛔ VALIDATE SURFACE ONLY: the holdings poll,
+            # ingestion and the job worker classify -6 through
+            # `is_mt5_login_refusal` / `classify_mt5_login_error`, which this branch
+            # does not touch. Every other login-stage code (0, -10005, …) falls
+            # through to `SIGN_IN_FAILED` below, byte-unchanged.
+            if e.code == _MT5_AUTH_FAILED_CODE:
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="MT5_SIGN_IN_REFUSED",
+                    detail=MT5_SIGN_IN_REFUSED_DETAIL,
+                    recoverable=False,
+                )
             raise VenueTransientHTTPException(
                 status_code=424,
                 code="SIGN_IN_FAILED",

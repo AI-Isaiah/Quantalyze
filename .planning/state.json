@@ -4,24 +4,14 @@
   "milestone": "v1.22 — TRUTH — data you can trust",
   "phases": [
     {
-      "number": "155.2",
-      "name": "LIVEPARITY",
-      "status": "in_progress"
-    },
-    {
-      "number": "157",
-      "name": "FOUNDER-CONFIRM",
-      "status": "in_progress"
-    },
-    {
       "number": "222",
       "name": "ALERTTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "223",
       "name": "FLOWKINDS",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "225",
@@ -46,7 +36,7 @@
     {
       "number": "229",
       "name": "MT5DERIVE2",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "230",
@@ -56,12 +46,12 @@
     {
       "number": "231",
       "name": "BYBITREADS",
-      "status": "in_progress"
+      "status": "complete"
     },
     {
       "number": "232",
       "name": "OKXTRADES",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "233",
@@ -71,7 +61,7 @@
     {
       "number": "234",
       "name": "NOCAPITAL",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "235",
@@ -81,12 +71,12 @@
     {
       "number": "236",
       "name": "FIGUREMATH",
-      "status": "pending"
+      "status": "in_progress"
     },
     {
       "number": "237",
       "name": "FACTSHEETHONEST",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "238",
@@ -96,23 +86,43 @@
     {
       "number": "239",
       "name": "SURFACECACHE",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "240",
       "name": "CONNECTTRUTH",
-      "status": "pending"
+      "status": "complete"
     },
     {
       "number": "241",
       "name": "DEMOCREDS",
+      "status": "pending"
+    },
+    {
+      "number": "250",
+      "name": "BINANCEFILLS",
+      "status": "pending"
+    },
+    {
+      "number": "251",
+      "name": "SYNCSTORE",
+      "status": "pending"
+    },
+    {
+      "number": "252",
+      "name": "DERIBITOPTIONS",
+      "status": "in_progress"
+    },
+    {
+      "number": "253",
+      "name": "BINANCECURSOR",
       "status": "pending"
     }
   ],
   "next": {
     "command": "/gsd-progress --next",
     "label": "Advance to the next step",
-    "reason": "Phase 5 of 21 · 10% · executing"
+    "reason": "Phase 1 of 23 · 48% · executing"
   },
-  "updated_at": "2026-11-25T08:29:29.275Z"
+  "updated_at": "2026-11-25T23:19:07.581Z"
 }

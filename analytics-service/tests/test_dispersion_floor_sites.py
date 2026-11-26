@@ -28,6 +28,7 @@ from services.allocated_capital import _annualised_sharpe
 from services.analytics_runner import _compute_derived_trade_metrics
 from services.csv_validator import validate_csv
 from services.dispersion import residue_floor
+from services.figure_conventions import PERIODS_PER_YEAR_TRADITIONAL
 from services.optimizer import optimize_weights
 from services.portfolio_optimizer import _compute_sharpe, find_improvement_candidates
 from services.portfolio_risk import compute_risk_decomposition
@@ -262,7 +263,7 @@ def _as_pairs(s: pd.Series) -> list[tuple[str, float]]:
 def test_s6_optimizer_constant_yield_column_is_constant_series(daily_yield):
     const = _residue_yield(daily_yield)
     series = {"const": _as_pairs(const), "noisy": _as_pairs(_noisy(const.index, 1664))}
-    out = optimize_weights(series)
+    out = optimize_weights(series, periods_per_year=PERIODS_PER_YEAR_TRADITIONAL)
     assert out.ok is False
     assert out.reason == "constant-series"
     assert out.weights is None

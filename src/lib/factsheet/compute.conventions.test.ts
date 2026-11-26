@@ -12,6 +12,25 @@ import { compute } from "./compute";
  *
  * APPEND-ONLY: never run `-u` on this file, never edit a frozen line. New cases
  * go below the frozen block.
+ *
+ * ONE reviewed exception (Phase 236 plan 10, F-5 / Q1, FIG-05): the CAGR year length is
+ * the whole days from the first to the last date over 365, so `years`, `cagr` and `calmar`
+ * moved in the three fixtures below (edited by hand, never with `-u`). Each new value is
+ * the Q1 span written out from the dates (A and B 29 days, C 35 days, over 365) and the
+ * snapshot's own frozen `cum_ret` and `max_dd`: `(1 + cum_ret) ^ (365 / days) - 1`, and
+ * `cagr / |max_dd|`. Every other line is untouched.
+ *
+ * A SECOND reviewed exception (Phase 236 plan 05, F-5 "ddof 1 everywhere", FIG-05): `ann_vol`
+ * and `sharpe` moved in the same three fixtures, from the population sd to the sample sd
+ * (edited by hand, never with `-u`). Each new value comes from a standalone script that imports
+ * nothing from the repo: it rebuilds the 30 returns from `baseReturn`, takes the mean, the sum
+ * of squared deviations over n - 1 = 29, `ann_vol = sd * sqrt(365)` and
+ * `sharpe = mean * 365 / (sd * sqrt(365))`. The same script's POPULATION values equal the old
+ * frozen lines to the last digit (A 0.13018299107383202 and 3.190590934087568, B
+ * 0.11757149566205052 and 2.3721427668612827, C 0.13434996646165637 and 2.3065394136537356),
+ * which validates the oracle against the frozen history. Old to new: ann_vol is x sqrt(30 / 29),
+ * sharpe is x sqrt(29 / 30). Nothing else moved: skew, kurt, sortino, cagr and every
+ * window are population-moment or sd-free.
  */
 
 const P = 365;
@@ -49,7 +68,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
   it("fixture A: a trending series", () => {
     expect(compute(TREND_RETS, TREND_DATES, 0, P)).toMatchInlineSnapshot(`
       {
-        "ann_vol": 0.13018299107383202,
+        "ann_vol": 0.13240850255903883,
         "avg_loss": -0.006055680613517227,
         "avg_win": 0.005933744477927336,
         "best_day": 0.013335760777443011,
@@ -57,8 +76,8 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "best_quarter": 0.0339892190644242,
         "best_week": 0.020162638186289605,
         "best_year": 0.0339892190644242,
-        "cagr": 0.5234445469627809,
-        "calmar": 20.27835940200425,
+        "cagr": 0.5230056434477635,
+        "calmar": 20.261356181181778,
         "common_sense_ratio": 1.5342570191507563,
         "cum_ret": 0.0339892190644242,
         "cvar95": -0.011901035706018574,
@@ -141,7 +160,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "pain_index": 0.010268042949934124,
         "profit_factor": 1.4697962598990828,
         "recovery_factor": 1.3167499861849872,
-        "sharpe": 3.190590934087568,
+        "sharpe": 3.1369637377129056,
         "skew": -0.1731354262707745,
         "sortino": 5.019977944237869,
         "start": "2024-01-01",
@@ -157,7 +176,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "yearly": {
           "2024": 0.0339892190644242,
         },
-        "years": 0.07939767282683094,
+        "years": 0.07945205479452055,
         "ytd": 0.0339892190644242,
       }
     `);
@@ -166,7 +185,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
   it("fixture B: a series with zero-return days", () => {
     expect(compute(ZERO_RETS, ZERO_DATES, 0, P)).toMatchInlineSnapshot(`
       {
-        "ann_vol": 0.11757149566205052,
+        "ann_vol": 0.11958141041182332,
         "avg_loss": -0.006124735564049107,
         "avg_win": 0.0060121675145779095,
         "best_day": 0.013335760777443011,
@@ -174,8 +193,8 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "best_quarter": 0.022598300507845392,
         "best_week": 0.018470252571972434,
         "best_year": 0.022598300507845392,
-        "cagr": 0.32505419329474794,
-        "calmar": 14.857582645243307,
+        "cagr": 0.32479895370976886,
+        "calmar": 14.845916149913016,
         "common_sense_ratio": 1.2825993784842245,
         "cum_ret": 0.022598300507845392,
         "cvar95": -0.011901035706018574,
@@ -258,7 +277,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "pain_index": 0.008973673730504986,
         "profit_factor": 1.374269049232962,
         "recovery_factor": 1.0329235074131304,
-        "sharpe": 2.3721427668612827,
+        "sharpe": 2.332271981600751,
         "skew": -0.11360716852722537,
         "sortino": 3.645527545583594,
         "start": "2024-01-01",
@@ -274,7 +293,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "yearly": {
           "2024": 0.022598300507845392,
         },
-        "years": 0.07939767282683094,
+        "years": 0.07945205479452055,
         "ytd": 0.022598300507845392,
       }
     `);
@@ -283,7 +302,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
   it("fixture C: a series with interior calendar gaps", () => {
     expect(compute(GAP_RETS, GAP_DATES, 0, P)).toMatchInlineSnapshot(`
       {
-        "ann_vol": 0.13434996646165637,
+        "ann_vol": 0.13664671345549362,
         "avg_loss": -0.005955826733994135,
         "avg_win": 0.006052683745174569,
         "best_day": 0.013335760777443011,
@@ -291,8 +310,8 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "best_quarter": 0.025026681312998678,
         "best_week": 0.031139830713601935,
         "best_year": 0.025026681312998678,
-        "cagr": 0.29428276694257405,
-        "calmar": 11.400580536188231,
+        "cagr": 0.29405426630540665,
+        "calmar": 11.391728370145135,
         "common_sense_ratio": 1.3898060302762072,
         "cum_ret": 0.025026681312998678,
         "cvar95": -0.011901035706018574,
@@ -375,7 +394,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "pain_index": 0.010426628955924692,
         "profit_factor": 1.3289587370435494,
         "recovery_factor": 0.9695392592187879,
-        "sharpe": 2.3065394136537356,
+        "sharpe": 2.2677712842892355,
         "skew": 0.036844507138639,
         "sortino": 3.6720722932906,
         "start": "2024-01-01",
@@ -391,7 +410,7 @@ describe("compute() with no conventions argument is byte-identical to the pre-ch
         "yearly": {
           "2024": 0.025026681312998678,
         },
-        "years": 0.09582477754962354,
+        "years": 0.0958904109589041,
         "ytd": 0.025026681312998678,
       }
     `);

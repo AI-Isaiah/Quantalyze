@@ -2,6 +2,7 @@ import logging
 import math
 import warnings
 from collections.abc import Callable
+from datetime import date as _Date
 
 import numpy as np
 import pandas as pd
@@ -1460,13 +1461,19 @@ def test_qstats_scalars_time_in_market_excludes_nan_rows():
     """Specialist red-team: pandas evaluates `NaN != 0` as True, so the naive
     `(returns != 0).sum() / len` counts upstream-CSV gap days as 'in market',
     inflating the fraction. Mirrors qs.stats.exposure's NaN-exclusion predicate.
+
+    FIG-03 (decision row `time_in_market`, CONTEXT A3): the denominator is the
+    OBSERVED count, quantstats 0.0.86's `_exposure` form. A gap day is no
+    observation, so it is not a day out of the market either. Expected value by
+    hand: 2 active days over 5 observed days (10 rows less 5 NaN) = 0.4. It was
+    2/10 = 0.2 against the 0.0.81 `len(returns)` denominator.
     """
     dates = pd.bdate_range("2024-01-01", periods=10)
-    # 2 active days, 3 zero days, 5 NaN gap days → true exposure = 2/10.
+    # 2 active days, 3 zero days, 5 NaN gap days → 2 active of 5 observed = 2/5.
     values = np.array([0.01, 0.0, np.nan, np.nan, 0.02, 0.0, np.nan, np.nan, np.nan, 0.0])
     returns = pd.Series(values, index=dates, name="returns")
     result = compute_qstats_scalars(returns, None)
-    assert result["time_in_market"] == pytest.approx(0.2, abs=1e-9)
+    assert result["time_in_market"] == pytest.approx(0.4, abs=1e-9)
 
 
 def test_qstats_scalars_r_squared_status_ok_when_benchmark_present(
@@ -2695,12 +2702,14 @@ def _rank05_benign_mixed() -> pd.Series:
     return pd.Series(vals, index=dates, name="returns").astype("float64")
 
 
-def test_rank05_quantstats_pin_is_still_0_0_81():
-    """D-04 prohibition: the fix must not move the quantstats pin. Every math
-    mirror below cites 0.0.81 source; a version bump silently invalidates them."""
-    assert qs.__version__ == "0.0.81", (
-        f"quantstats pin moved to {qs.__version__}; the RANK-05 inline mirrors "
-        "cite 0.0.81 source and must be re-derived against the new version."
+def test_rank05_quantstats_pin_is_still_0_0_86():
+    """D-04 prohibition: nothing moves the quantstats pin silently. Every math
+    mirror below cites 0.0.86 source (FIG-03, plan 236-06 re-derived them from
+    0.0.81); a version bump silently invalidates them."""
+    assert qs.__version__ == "0.0.86", (
+        f"quantstats pin moved to {qs.__version__}; the RANK-05 and Q166 inline "
+        "mirrors cite 0.0.86 source and must be re-derived against the new version "
+        "with a per-metric decision row (236-QUANTSTATS-DECISIONS.md)."
     )
 
 
@@ -2857,6 +2866,138 @@ def test_stored_var_and_cvar_are_the_historical_helper_on_a_benign_series():
     var, cvar = _historical_var_cvar(s)
     assert mj["var_1d_95"] == pytest.approx(var, rel=1e-12)
     assert mj["cvar"] == pytest.approx(cvar, rel=1e-12)
+
+
+def test_stored_cvar_is_null_below_the_total_record_floor():
+    """F-6 / CONTEXT Q2 (founder 2026-11-25, "Total record only"): the stored CVaR is null when
+    the total record has fewer than 60 non-NaN returns, and shown at 60. VaR is not floored.
+
+    Hand-derived: the three smallest returns are the literals below, so on 60 days
+    k = floor(0.05 * 60) = 3 and CVaR = (-0.06 - 0.05 - 0.04) / 3 = -0.05 exactly; on 59 days
+    k = 2 and VaR is the third smallest, -0.04. The 59-day series is the 60-day one minus its
+    last (positive) day, so the only thing that differs is the record length."""
+    def build(n: int) -> pd.Series:
+        vals = [-0.06, -0.05, -0.04] + [0.01] * (n - 3)
+        return pd.Series(vals, index=pd.date_range("2025-01-01", periods=n, freq="D"))
+
+    short = compute_all_metrics(build(59))["metrics_json"]
+    assert short["cvar"] is None, short["cvar"]
+    assert short["var_1d_95"] == pytest.approx(-0.04, abs=1e-12)
+
+    full = compute_all_metrics(build(60))["metrics_json"]
+    assert full["cvar"] == pytest.approx(-0.05, abs=1e-12)
+    assert full["var_1d_95"] == pytest.approx(0.01, abs=1e-12)
+
+
+def _smart_ratios_by_hand(r: list[float], periods: int) -> tuple[float, float]:
+    """smart_sharpe and smart_sortino from first principles, with `math` and plain loops only.
+
+    Rebuilt from the RANK-05 comment's formula in metrics.py, importing no metrics.py helper:
+    mean, ddof-1 sample sd, downside RMS over n, and the autocorrelation penalty
+    sqrt(1 + 2 * sum_{x=1}^{n-1} ((n - x) / n) * coef ** x), coef = |corr(r[:-1], r[1:])|."""
+    n = len(r)
+    mean = sum(r) / n
+    sd = math.sqrt(sum((x - mean) ** 2 for x in r) / (n - 1))
+    a, b = r[:-1], r[1:]
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    cov = sum((x - ma) * (y - mb) for x, y in zip(a, b))
+    va = sum((x - ma) ** 2 for x in a)
+    vb = sum((y - mb) ** 2 for y in b)
+    coef = abs(cov / math.sqrt(va * vb))
+    penalty = math.sqrt(1.0 + 2.0 * sum(((n - x) / n) * coef**x for x in range(1, n)))
+    downside = math.sqrt(sum(x * x for x in r if x < 0.0) / n)
+    scale = math.sqrt(periods)
+    return mean / (sd * penalty) * scale, mean / (downside * penalty) * scale
+
+
+def _autocorrelated_returns(n: int = 180) -> pd.Series:
+    rng = np.random.default_rng(236)
+    vals = [float(x) for x in rng.normal(0.001, 0.01, n)]
+    for i in range(1, n):
+        vals[i] += 0.3 * vals[i - 1]  # a real autocorrelation, so the penalty is not 1
+    return pd.Series(vals, index=pd.date_range("2025-01-01", periods=n, freq="D"))
+
+
+@pytest.mark.parametrize("periods", [252, 365])
+def test_smart_sharpe_and_sortino_annualize_on_the_frequency_clock(periods: int):
+    """F-5 / CONTEXT A4: risk annualizes by frequency (crypto 365, traditional 252), so
+    smart_sharpe and smart_sortino ride `periods_per_year`, never a fixed 252. A crypto
+    strategy's stored value is the 252 value times sqrt(365 / 252); the closed form below
+    is computed with `math` alone."""
+    s = _autocorrelated_returns()
+    mj = compute_all_metrics(s, periods_per_year=periods)["metrics_json"]
+    want_sharpe, want_sortino = _smart_ratios_by_hand([float(x) for x in s], periods)
+    assert mj["smart_sharpe"] == pytest.approx(want_sharpe, rel=1e-9)
+    assert mj["smart_sortino"] == pytest.approx(want_sortino, rel=1e-9)
+
+
+def test_smart_ratios_oracle_distinguishes_the_two_clocks():
+    """The hand oracle itself can fail: the 365 and 252 closed forms differ by sqrt(365/252)."""
+    r = [float(x) for x in _autocorrelated_returns()]
+    s252, _ = _smart_ratios_by_hand(r, 252)
+    s365, _ = _smart_ratios_by_hand(r, 365)
+    assert s365 / s252 == pytest.approx(math.sqrt(365 / 252), rel=1e-12)
+
+
+def test_cagr_span_keys_are_the_suffix_first_and_last_days():
+    """CONTEXT Q1 (founder 2026-11-25): the factsheet states the span CAGR covers.
+    `cagr_start` / `cagr_end` are the ISO first and last dates of the CAGR suffix, the days
+    after the last interior break. Hand-derived: 120 daily returns from 2025-01-01, a NaN at
+    row 30 (2025-01-31) breaks the chain, so the suffix is rows 31..119 = 2025-02-01 to
+    2025-04-30 (31 + 28 + 31 = 90 days to 04-01, plus 29), 88 whole days, 89 returns."""
+    vals = [0.002] * 120
+    vals[30] = float("nan")
+    s = pd.Series(vals, index=pd.date_range("2025-01-01", periods=120, freq="D"))
+    mj = compute_all_metrics(s)["metrics_json"]
+    assert mj["cagr_start"] == "2025-02-01"
+    assert mj["cagr_end"] == "2025-04-30"
+    elapsed = (_Date.fromisoformat(mj["cagr_end"]) - _Date.fromisoformat(mj["cagr_start"])).days
+    assert elapsed == 88
+    # The span the keys state is the span the stored CAGR used: 89 returns of 0.002, 88 days.
+    assert compute_all_metrics(s)["cagr"] == pytest.approx((1.002**89) ** (365 / 88) - 1.0, rel=1e-12)
+
+
+def test_cagr_span_keeps_an_emptied_stretch_inside_it():
+    """Q1 "Emptied stretches stay in the span": rows missing from the middle (no NaN, so no
+    break) leave the span as first-to-last observed date. 2025-01-01..01-30 and 2025-03-01..
+    03-31, a 30-day hole: 2025-01-01 to 2025-03-31 is 31 + 28 + 30 = 89 days."""
+    idx = pd.date_range("2025-01-01", "2025-01-30", freq="D").append(
+        pd.date_range("2025-03-01", "2025-03-31", freq="D")
+    )
+    s = pd.Series([0.001] * len(idx), index=idx)
+    mj = compute_all_metrics(s)["metrics_json"]
+    assert (mj["cagr_start"], mj["cagr_end"]) == ("2025-01-01", "2025-03-31")
+    assert (_Date.fromisoformat(mj["cagr_end"]) - _Date.fromisoformat(mj["cagr_start"])).days == 89
+
+
+def test_cagr_span_keys_are_none_when_there_is_no_cagr():
+    """A one-row suffix has no CAGR, and the keys are None with it (both, never one)."""
+    vals = [0.002] * 40
+    vals[38] = float("nan")  # the chain restarts at the very last row
+    s = pd.Series(vals, index=pd.date_range("2025-01-01", periods=40, freq="D"))
+    out = compute_all_metrics(s)
+    assert out["cagr"] is None
+    assert out["metrics_json"]["cagr_start"] is None
+    assert out["metrics_json"]["cagr_end"] is None
+
+
+def test_cagr_span_keys_are_the_observed_span_on_the_simple_convention():
+    """CONTEXT "Simple (capital-reset, arithmetic) convention" (phase agent 2026-11-25): the
+    CAGR there is `mean * periods_per_year`, which uses no span, so the keys state the first
+    and last observed dates of the series the mean is taken over. 100 daily rows from
+    2025-01-01 end on 2025-04-10 (31 + 28 + 31 = 90 days to 04-01, plus 9)."""
+    s = pd.Series([0.001] * 100, index=pd.date_range("2025-01-01", periods=100, freq="D"))
+    mj = compute_all_metrics(s, cumulative_method="simple")["metrics_json"]
+    assert (mj["cagr_start"], mj["cagr_end"]) == ("2025-01-01", "2025-04-10")
+
+
+def test_cagr_span_on_the_simple_convention_follows_the_active_day_basis():
+    """On the active day basis the mean is over the nonzero days, so the span runs from the
+    first to the last NONZERO day, not the record's edges (idle first and last weeks)."""
+    vals = [0.0] * 7 + [0.002, -0.001] * 20 + [0.0] * 7
+    s = pd.Series(vals, index=pd.date_range("2025-01-01", periods=len(vals), freq="D"))
+    mj = compute_all_metrics(s, cumulative_method="simple", day_basis="active")["metrics_json"]
+    assert (mj["cagr_start"], mj["cagr_end"]) == ("2025-01-08", "2025-02-16")
 
 
 def test_rank05_drawdown_series_matches_live_quantstats_on_a_benign_series():
@@ -3123,18 +3264,40 @@ def _q166_golden_with_nan_days(s: pd.Series) -> pd.Series:
     return out
 
 
-# (metrics_json key, LIVE quantstats 0.0.81 oracle on the raw series). On the
+def _q166_live_serenity_historical(s: pd.Series) -> float:
+    """Serenity with the HISTORICAL CVaR leg, recomposed from live 0.0.86 pieces.
+
+    FIG-03 decision row `_serenity_index` (CONTEXT A2): 0.0.86's own
+    `serenity_index` calls `cvar(dd)`, whose default is now PARAMETRIC, so it is
+    not the oracle for a mirror that keeps CVaR historical (F-6). The oracle is
+    the 0.0.86 body with `cvar(dd, method="historical")` swapped in, every other
+    piece a live quantstats call: `to_drawdown_series`, `ulcer_index`, `cvar`
+    (which honours `prepare_returns=False`, `test_fig03_cvar_honours_prepare_returns_false`),
+    and the raw `std` and `sum`. The undefined arms follow 0.0.86's own guards.
+    """
+    std = s.std()
+    if std == 0:
+        return float("nan")
+    dd = qs.stats.to_drawdown_series(s)
+    pitfall = -qs.stats.cvar(dd, method="historical", prepare_returns=False) / std
+    denominator = qs.stats.ulcer_index(s) * pitfall
+    if denominator == 0:
+        return float("nan")
+    return float(s.sum() / denominator)
+
+
+# (metrics_json key, LIVE quantstats 0.0.86 oracle on the raw series). On the
 # benign fixtures below the price guess cannot fire, so live quantstats is the
 # non-self-referential correctness anchor (D-08). The first four rows are the
 # drawdown family (plan 166-03), the last three the loss family (plan 166-04).
-# probabilistic_sharpe_ratio has NO row: D-16 corrects 0.0.81's kurtosis term,
-# so live quantstats is no longer its anchor. Its anchor is the published
-# formula, in test_q166_psr_matches_the_published_formula.
+# serenity_index's row is the historical-CVaR recomposition above. PSR has its
+# own live arm, `test_fig03_live_psr_matches_mirror`, because 0.0.86 adopted the
+# D-16 kurtosis term that 0.0.81 carried wrongly.
 _Q166_PARITY_SITES = (
     ("recovery_factor", lambda s: qs.stats.recovery_factor(s)),
     ("ulcer_index", lambda s: qs.stats.ulcer_index(s)),
     ("upi", lambda s: qs.stats.ulcer_performance_index(s)),
-    ("serenity_index", lambda s: qs.stats.serenity_index(s)),
+    ("serenity_index", _q166_live_serenity_historical),
     ("kelly_criterion", lambda s: qs.stats.kelly_criterion(s)),
     ("common_sense_ratio", lambda s: qs.stats.common_sense_ratio(s)),
     ("cpc_index", lambda s: qs.stats.cpc_index(s)),
@@ -3170,7 +3333,7 @@ def test_q166_parity_every_mirror_matches_live_quantstats(
 ):
     """BENIGN PARITY (D-08), one collected case per (site, fixture). On these
     series quantstats' price guess cannot fire (mixed sign, max < 1, or both),
-    so a mirror that is "0.0.81 minus the guess" must equal live 0.0.81 to rel
+    so a mirror that is "0.0.86 minus the guess" must equal live 0.0.86 to rel
     1e-12. The value is read through `compute_qstats_scalars`, so the dispatch
     table wiring is part of what is proven. A miss is a defect in the mirror,
     never a tolerance to loosen.
@@ -3184,7 +3347,7 @@ def test_q166_parity_every_mirror_matches_live_quantstats(
     else:
         assert actual is not None, f"{key}: mirror undefined, live quantstats gave {expected}"
         assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
-            f"{key} on {fixture_name} drifted from live quantstats 0.0.81"
+            f"{key} on {fixture_name} drifted from live quantstats 0.0.86"
         )
 
 
@@ -3194,13 +3357,18 @@ def test_q166_parity_every_mirror_matches_live_quantstats(
         ("recovery_factor", 0.9517263110721105),
         ("ulcer_index", 0.09511182002853455),
         ("upi", 1.583422458226051),
-        ("serenity_index", 0.143686058754821),
+        # FIG-03 A2: was 0.143686058754821 (0.0.81's mixed-estimator CVaR leg). The
+        # historical tail, recomputed independently in closed form with numpy
+        # (drawdown path, 5% quantile, mean of the days at or below it), is below.
+        ("serenity_index", 0.1494210488068295),
     ],
 )
 def test_q166_parity_benign_mixed_reproduces_the_research_anchor(key, anchor):
     """The benign-mixed values live quantstats returned when the phase was
-    researched (166-RESEARCH §Q4). Pinned as numbers so a future quantstats
-    change that moved BOTH the oracle and the mirror would still be caught."""
+    researched (166-RESEARCH §Q4); `serenity_index` moved under FIG-03 A2 to its
+    historical-CVaR value (236-QUANTSTATS-DECISIONS.md). Pinned as numbers so a
+    future quantstats change that moved BOTH the oracle and the mirror would
+    still be caught."""
     actual = compute_qstats_scalars(_rank05_benign_mixed(), None)[key]
     assert actual == pytest.approx(anchor, rel=1e-12, abs=0.0)
 
@@ -3883,23 +4051,30 @@ def test_q166_rolling_greeks_alpha_is_the_windowed_intercept_full_precision(
     ), f"rolling alpha on {pair_name} is not the windowed intercept"
 
 
-def test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form(
+def test_fig03_live_rolling_alpha_matches_the_mirror(
     golden_returns, benchmark_returns
 ):
-    """ANTI-VACUITY for D-17: on the benign golden pair (where beta is
-    bit-identical to live quantstats) at least one alpha point differs from
-    0.0.81's full-sample form `mean(r_all) - beta_t * mean(b_all)`. If this
-    passed vacuously, the D-17 change would be a no-op and the golden
-    `sibling.rolling_alpha` move would be unexplained."""
+    """FIG-03 (decision row `_rolling_greeks` alpha, ALREADY-ADOPTED): 0.0.86's
+    `rolling_greeks` takes each window's own intercept
+    (`means = df.rolling(periods).mean()`), the D-17 form the mirror adopted
+    early. So on the benign golden pair every defined alpha point equals live at
+    rel 1e-12, with the undefined warm-up points on the same dates.
+
+    This replaces `test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form`,
+    which asserted a gap to 0.0.81's full-sample form (measured max gap
+    0.003406719654229685 against 0.0.81). Under 0.0.81 this arm is RED, so it
+    cannot pass vacuously.
+    """
     r, b = golden_returns.align(benchmark_returns, join="inner")
     live = qs.stats.rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
     mine = _rolling_greeks(r, b, _Q166_ROLLING_WINDOW)["alpha"]
-    both = live.notna() & mine.notna()
-    assert int(both.sum()) > 0
-    gap = (mine[both] - live[both]).abs()
-    assert float(gap.max()) > 1e-12, (
-        f"windowed alpha equals the full-sample form on every point (max gap {gap.max()})"
-    )
+    assert mine.index.equals(live.index)
+    assert (mine.isna() == live.isna()).all(), "undefined alpha points moved"
+    defined = live.notna()
+    assert int(defined.sum()) > 0
+    assert mine[defined].to_numpy() == pytest.approx(
+        live[defined].to_numpy(), rel=1e-12, abs=0.0
+    ), "rolling alpha drifted from live quantstats 0.0.86"
 
 
 # ---------------------------------------------------------------------------
@@ -4316,6 +4491,12 @@ _Q166R2_UNDEFINED_CASES: dict[str, tuple[Callable[[], pd.Series], str]] = {
     "common_sense_no_loss": (_rank05_trigger_series, "common_sense_ratio"),
     "common_sense_q05_zero": (_q166r2_q05_zero_with_a_loss, "common_sense_ratio"),
     "psr_constant": (lambda: _q166r_constant_series(0.001, 120), "probabilistic_sharpe_ratio"),
+    # A constant OBSERVED series with NaN gaps: the mirror reads O(r), whose sd is 0, so it is
+    # undefined; the zero-filled P(r) alternates 0.001 and 0 and used to look like real dispersion.
+    "psr_gapped_constant": (
+        lambda: _q166r2_s([0.001, float("nan")] * 60),
+        "probabilistic_sharpe_ratio",
+    ),
     "psr_nav_constant_yield": (
         lambda: _q166r2_nav_constant_yield(1e-4),
         "probabilistic_sharpe_ratio",
@@ -4327,7 +4508,10 @@ _Q166R2_UNDEFINED_CASES: dict[str, tuple[Callable[[], pd.Series], str]] = {
     ),
     "serenity_no_loss": (_rank05_trigger_series, "serenity_index"),
     "serenity_constant_losing": (lambda: _q166r_constant_series(-0.002, 250), "serenity_index"),
-    "serenity_flat_drawdown": (lambda: _q166r2_s([-0.1, 0.0, 0.0, 0.0, 0.0]), "serenity_index"),
+    # `serenity_flat_drawdown` ([-0.1, 0, 0, 0, 0]) left this table under FIG-03 A2: it was
+    # undefined only because 0.0.81's parametric VaR needs a positive scale on the
+    # drawdown series. The historical tail defines it (-0.4 by hand,
+    # `test_fig03_serenity_flat_drawdown_is_defined`).
 }
 
 
@@ -4355,6 +4539,34 @@ def test_q166r2_each_mirror_precondition_is_necessary(build, key, caplog):
     caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
     compute_qstats_scalars(s, None)
     assert [line for line in _q166r_suspect_lines(caplog) if key in line] == []
+
+
+def test_fig03_common_sense_precondition_reads_the_observed_quantile(caplog, monkeypatch):
+    """The 5% quantile conjunct reads O(r), the series the mirror reads: gap days are not zeros.
+
+    3 losing days in 40 observed rows (7.5%) put O(r)'s 5% quantile at -0.01, so the ratio is
+    finite. 100 NaN gap days dilute the zero-filled P(r) to 2.1% losing days, whose 5% quantile
+    is exactly 0, so a precondition read off P(r) called the ratio undefined and a broken mirror
+    here would have logged nothing.
+    """
+    import services.metrics as metrics_module
+
+    s = _q166r2_s([-0.01] * 3 + [0.01] * 37 + [float("nan")] * 100)
+    assert float(metrics_module._prepared_returns_no_guess(s).quantile(0.05)) == 0.0
+    assert float(metrics_module._observed_returns_no_guess(s).quantile(0.05)) == -0.01
+    mirror = dict(metrics_module._QSTATS_SINGLE_ARG_SCALARS)["common_sense_ratio"]
+    assert _safe_float(mirror(s)) is not None, "the mirror must be finite for the case to prove anything"
+    assert "common_sense_ratio" in metrics_module._mirror_keys_defined_by(s)
+
+    broken = tuple(
+        (k, (lambda r: float("nan")) if k == "common_sense_ratio" else fn)
+        for k, fn in metrics_module._QSTATS_SINGLE_ARG_SCALARS
+    )
+    monkeypatch.setattr(metrics_module, "_QSTATS_SINGLE_ARG_SCALARS", broken)
+    caplog.set_level(logging.WARNING, logger="quantalyze.analytics.metrics")
+    compute_qstats_scalars(s, None)
+    lines = _q166r_suspect_lines(caplog)
+    assert len(lines) == 1 and "common_sense_ratio" in lines[0], lines
 
 
 def test_q166r2_high_win_rate_strategy_keeps_the_broken_mirror_signal(caplog, monkeypatch):
@@ -4484,3 +4696,182 @@ def test_q166r2_a_pair_labelled_in_different_zones_is_refused_not_shifted(caplog
         metrics_module._greeks_no_guess(r_tokyo, b_tokyo, 365),
         metrics_module._r_squared(r_tokyo, b_tokyo),
     ) == naive
+
+
+# ---------------------------------------------------------------------------
+# Phase 236 plan 06 (FIG-03): live 0.0.86 arms, one per decision row in
+# 236-QUANTSTATS-DECISIONS.md. Each arm that pins an ADOPT or ALREADY-ADOPTED row
+# is RED against quantstats 0.0.81 (measured), so none can pass vacuously.
+# ---------------------------------------------------------------------------
+
+
+def _fig03_gappy_series() -> pd.Series:
+    """20 rows: 10 observed (5 active, 5 zero) and 10 NaN gap days, hand-countable."""
+    nan = np.nan
+    vals = [
+        0.01, nan, 0.0, nan, -0.02, nan, 0.0, nan, 0.03, nan,
+        0.0, nan, 0.02, nan, 0.0, nan, 0.0, nan, -0.01, nan,
+    ]
+    dates = pd.bdate_range("2024-01-01", periods=20)
+    return pd.Series(vals, index=dates, name="returns").astype("float64")
+
+
+@pytest.mark.parametrize("fixture_name", _Q166_BENIGN_FIXTURES)
+def test_fig03_live_psr_matches_mirror(fixture_name, request):
+    """Decision row PSR: 0.0.86 `probabilistic_ratio` is the published formula
+    (non-excess kurtosis) on the OBSERVED series, so the mirror equals live at
+    rel 1e-12 on all four fixtures, including the NaN-carrying one (measured
+    0.35603160170583026 live and mirror; 0.35644 against the zero-filled base).
+    RED under 0.0.81, whose PSR carries the double-subtracted kurtosis."""
+    s = _q166_benign_fixture(fixture_name, request)
+    expected = _safe_float(qs.stats.probabilistic_ratio(s, base="sharpe"))
+    actual = compute_qstats_scalars(s, None)["probabilistic_sharpe_ratio"]
+    if expected is None:
+        assert actual is None, f"live PSR undefined, mirror gave {actual}"
+    else:
+        assert actual is not None, f"mirror PSR undefined, live gave {expected}"
+        assert actual == pytest.approx(expected, rel=1e-12, abs=0.0), (
+            f"PSR on {fixture_name} drifted from live quantstats 0.0.86"
+        )
+
+
+def test_fig03_win_rate_is_nan_invariant(request):
+    """Decision row `win_rate` (ADOPT, no value move): 0.0.86's `_win_rate` drops
+    NaN first, and a zero return is excluded from the non-zero denominator, so
+    the raw series and the zero-filled `P(r)` the kelly and cpc mirrors read give
+    the identical ratio. RED under 0.0.81, whose win rate counts a NaN gap day in
+    the denominator."""
+    s = _q166_benign_fixture("golden_returns_with_nan_days", request)
+    assert int(s.isna().sum()) == 3, "fixture must carry NaN gap days"
+    on_raw = qs.stats.win_rate(s, prepare_returns=False)
+    on_filled = qs.stats.win_rate(
+        _q166_prepared(s), prepare_returns=False
+    )
+    assert on_raw == on_filled
+
+
+def _q166_prepared(s: pd.Series) -> pd.Series:
+    from services.metrics import _prepared_returns_no_guess
+
+    return _prepared_returns_no_guess(s)
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    (*_Q166_BENIGN_FIXTURES, "fig03_gappy"),
+)
+def test_fig03_time_in_market_is_the_unrounded_observed_exposure(fixture_name, request):
+    """Decision row `time_in_market`: the repo value is active days over OBSERVED
+    days (0.0.86 `_exposure`), unrounded (H-0724). Live `qs.stats.exposure` is the
+    same fraction rounded UP to a percent, so ceil-to-percent of the repo value
+    must equal live exactly. The gappy fixture discriminates the denominator: 5
+    active of 10 observed is 0.5 (0.25 over `len`, whose ceil would be 0.25)."""
+    s = (
+        _fig03_gappy_series()
+        if fixture_name == "fig03_gappy"
+        else _q166_benign_fixture(fixture_name, request)
+    )
+    tim = compute_qstats_scalars(s, None)["time_in_market"]
+    assert tim is not None
+    assert math.ceil(tim * 100) / 100 == qs.stats.exposure(s)
+    if fixture_name == "fig03_gappy":
+        assert tim == pytest.approx(0.5, abs=1e-12), "5 active days of 10 observed"
+
+
+def test_fig03_time_in_market_of_an_all_nan_series_is_none_not_zero():
+    """0.0.86's `_exposure` answers 0.0 when nothing was observed. A figure with no
+    observation behind it is undefined (no invented data), so the repo keeps None
+    there (a recorded divergence, 236-QUANTSTATS-DECISIONS.md `time_in_market`)."""
+    s = pd.Series(np.nan, index=pd.bdate_range("2024-01-01", periods=10), name="returns")
+    assert compute_qstats_scalars(s, None)["time_in_market"] is None
+
+
+def test_fig03_live_greeks_and_r_squared_on_a_strategy_gap_pair():
+    """Decision row `_greeks_no_guess` / `_r_squared` (ALREADY-ADOPTED): 0.0.86
+    pairs the observations (`_paired_observations`) instead of letting a NaN
+    poison `np.cov`, which is what the interval-pair mirror (166.4 D-A) already
+    did. On a pair with NaN gap days on the strategy leg only, alpha, beta and
+    R^2 equal live at rel 1e-12. Under 0.0.81 `greeks` raises ValueError here
+    (measured), so this arm is impossible there. A BENCHMARK gap is deliberately
+    not pinned: 0.0.86 still rebuilds benchmark prices and zero-fills, and the
+    mirror keeps the D-A interval pair (decision row, KEEP)."""
+    rng = np.random.default_rng(7)
+    dates = pd.bdate_range("2024-01-01", periods=250)
+    s = pd.Series(rng.normal(0.0006, 0.013, 250), index=dates)
+    b = pd.Series(np.random.default_rng(9).normal(0.0003, 0.02, 250), index=dates)
+    s.iloc[[10, 50, 100]] = np.nan
+    live = qs.stats.greeks(s, b)
+    alpha, beta = _fig03_greeks(s, b)
+    assert beta == pytest.approx(float(live["beta"]), rel=1e-12, abs=0.0)
+    assert alpha == pytest.approx(float(live["alpha"]), rel=1e-12, abs=0.0)
+    from services.metrics import _r_squared
+
+    assert _r_squared(s, b) == pytest.approx(
+        float(qs.stats.r_squared(s, b)), rel=1e-12, abs=0.0
+    )
+
+
+def _fig03_greeks(s: pd.Series, b: pd.Series) -> tuple[float, float]:
+    from services.metrics import _greeks_no_guess
+
+    alpha, beta = _greeks_no_guess(s, b, 252)
+    assert alpha is not None and beta is not None
+    return alpha, beta
+
+
+def test_fig03_live_sortino_matches_the_skipna_count(request):
+    """Decision row headline sortino (ALREADY-ADOPTED): 0.0.86's downside divides
+    by `returns.count()`, the observed count the repo's `_downside_rms` already
+    uses. On the NaN-carrying fixture the mirror composition equals live at rel
+    1e-12; under 0.0.81 (zero-fill, `len` denominator) it is RED."""
+    from services.metrics import _downside_rms
+
+    s = _q166_benign_fixture("golden_returns_with_nan_days", request)
+    mine = (s.mean() * 252) / (_downside_rms(s) * math.sqrt(252))
+    assert mine == pytest.approx(float(qs.stats.sortino(s)), rel=1e-12, abs=0.0)
+
+
+def test_fig03_stored_cvar_keeps_the_repo_floor_index_rule():
+    """Decision row stored `cvar` (KEEP, F-6): the repo's estimator is the mean of
+    the `max(1, floor(0.05 n))` lowest days, with no interpolation. On
+    `benign_mixed` (n = 250: 12 lowest days) it equals that closed form, and it is
+    neither 0.0.86's parametric default nor its `method="historical"` (which
+    includes the 13th day at the interpolated quantile)."""
+    from services.metrics import _historical_var_cvar
+
+    s = _rank05_benign_mixed()
+    _, cvar = _historical_var_cvar(s)
+    ordered = np.sort(s.to_numpy())
+    expected = float(ordered[: max(1, math.floor(0.05 * len(ordered)))].mean())
+    assert cvar == pytest.approx(expected, rel=1e-12, abs=0.0)
+    for method in ("parametric", "historical"):
+        upstream = float(qs.stats.cvar(s, method=method, prepare_returns=False))
+        assert abs(cvar - upstream) > 1e-4, (method, cvar, upstream)
+
+
+def test_fig03_serenity_is_the_historical_tail_not_the_parametric_default(request):
+    """Decision row `_serenity_index` (CONTEXT A2, F-6): the mirror equals the
+    historical-CVaR recomposition and is NOT 0.0.86's `serenity_index`, whose
+    default CVaR is parametric (measured gap 0.0191 on `benign_mixed`)."""
+    s = _q166_benign_fixture("benign_mixed", request)
+    mine = compute_qstats_scalars(s, None)["serenity_index"]
+    assert mine == pytest.approx(_q166_live_serenity_historical(s), rel=1e-12, abs=0.0)
+    assert abs(mine - float(qs.stats.serenity_index(s))) > 1e-3
+
+
+def test_fig03_serenity_flat_drawdown_is_defined():
+    """FIG-03 A2: one -10% day then four flat days holds the drawdown at -0.1. It
+    was undefined under 0.0.81 (a parametric VaR over a constant series has no
+    scale) and is defined under the historical tail. By hand: sum = -0.1; std
+    (ddof 1) = sqrt(0.008 / 4) = 0.044721359549995794; ulcer =
+    sqrt(5 * 0.01 / 4) = 0.11180339887498948; historical tail = -0.1, so the
+    pitfall is 0.1 / 0.044721... = 2.23606797749979 and the denominator is
+    0.11180339887498948 * 2.23606797749979 = 0.25; serenity = -0.1 / 0.25 = -0.4."""
+    import services.metrics as metrics_module
+
+    s = _q166r2_s([-0.1, 0.0, 0.0, 0.0, 0.0])
+    assert metrics_module._serenity_index(s) == pytest.approx(-0.4, rel=1e-12, abs=0.0)
+    assert "serenity_index" in metrics_module._mirror_keys_defined_by(s)
+    assert compute_qstats_scalars(s, None)["serenity_index"] == pytest.approx(
+        -0.4, rel=1e-12, abs=0.0
+    )

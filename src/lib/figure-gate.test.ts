@@ -35,6 +35,9 @@ import {
   windowNeedsTitle,
   withheldCellTitle,
   withheldReason,
+  widenedWithheldReason,
+  gateDelta,
+  gateRollingWindow,
   type FigureRecord,
 } from "./figure-gate";
 
@@ -403,5 +406,100 @@ describe("one definition: TS constants equal the Python constants (text-read pin
 
   it("ONE_YEAR_DAYS is a calendar year", () => {
     expect(ONE_YEAR_DAYS).toBe(365);
+  });
+});
+
+// Phase 252 (DERIBITOPTIONS) plan 03: the options-book marker. WHY: an options book's stored
+// figures are measured on the cash wallet, which leaves out the market value of open option
+// positions, so no record length can make them honest. The marker must beat a long, readable,
+// cleared record at every gate, and its sentences must name the measurement (never a length, a
+// day count or a flag name). Every sentence below is typed by hand (oracle independence).
+describe("252 withheldBy: the options-book marker never clears", () => {
+  const LONG = { seriesStart: "2025-01-01", seriesEnd: "2026-02-09", observations: 400, periodsPerYear: 365 };
+  const marked = figureRecord({ ...LONG, withheldBy: "options_cash_wallet" });
+  const unmarked = figureRecord(LONG);
+
+  it("withholds a 400-day crypto record that would otherwise be full", () => {
+    expect(gateAnnualized(unmarked)).toBe("full");
+    expect(recordClears(marked)).toBe(false);
+    expect(gateAnnualized(marked)).toBe("withheld");
+    expect(gateAnnualized(marked, 900)).toBe("withheld");
+  });
+
+  it("withholds a non-crypto record whose observation count clears", () => {
+    const rec = figureRecord({ ...LONG, periodsPerYear: 252, observations: 500, withheldBy: "options_cash_wallet" });
+    expect(recordClears(rec)).toBe(false);
+    expect(gateAnnualized(rec)).toBe("withheld");
+  });
+
+  it("withholds a delta, a rolling window and a short-record rank through the same refusal", () => {
+    expect(gateDelta(marked, unmarked, 400)).toBe("withheld");
+    expect(gateDelta(unmarked, marked, 400)).toBe("withheld");
+    const dates = Array.from({ length: 400 }, (_, i) => new Date(Date.UTC(2025, 0, 1 + i)).toISOString().slice(0, 10));
+    expect(gateRollingWindow(marked, dates, { rows: 90 }, true)).toEqual({
+      state: "withheld",
+      days: marked.spanDays,
+      cause: "gate",
+    });
+    expect(gateRollingWindow(unmarked, dates, { rows: 90 }, true).state).not.toBe("withheld");
+  });
+
+  it("an unmarked record is byte-identical to today: no withheldBy key at all", () => {
+    expect("withheldBy" in unmarked).toBe(false);
+    expect(Object.keys(unmarked).sort()).toEqual(["crypto", "observations", "spanDays"]);
+    expect(Object.keys(marked).sort()).toEqual(["crypto", "observations", "spanDays", "withheldBy"]);
+  });
+
+  it("names the cash-wallet measurement in every reason sentence", () => {
+    expect(withheldReason("record", marked)).toBe(
+      "Annualized figures are not shown: this record is measured on the cash wallet, which leaves out the market value of open option positions.",
+    );
+    expect(withheldReason("blend", marked)).toBe(
+      "Annualized figures are not shown: the blend's record is measured on the cash wallet, which leaves out the market value of open option positions.",
+    );
+    expect(withheldCellTitle(marked)).toBe(
+      "Withheld: measured on the cash wallet, which leaves out open option positions.",
+    );
+    expect(widenedWithheldReason("delta", marked)).toBe(
+      "Changes in annualized figures are not shown: the record is measured on the cash wallet, which leaves out open option positions.",
+    );
+    expect(widenedWithheldReason("overlap", marked)).toBe(
+      "Alpha, information ratio, Treynor and tracking error are not shown: the record is measured on the cash wallet, which leaves out open option positions.",
+    );
+    expect(widenedWithheldReason("rolling", marked)).toBe(
+      "Rolling annualized figures are not shown: the record is measured on the cash wallet, which leaves out open option positions.",
+    );
+    expect(widenedWithheldReason("rolling-record", marked)).toBe(
+      "Rolling annualized figures are not shown: the record is measured on the cash wallet, which leaves out open option positions.",
+    );
+    expect(widenedWithheldReason("half", marked)).toBe(
+      "Half-record annualized figures are not shown: the record is measured on the cash wallet, which leaves out open option positions.",
+    );
+  });
+
+  it("no marked sentence carries a day count, a record-length phrase or a flag name", () => {
+    const sentences = [
+      withheldReason("record", marked),
+      withheldReason("blend", marked),
+      withheldCellTitle(marked),
+      ...(["delta", "overlap", "rolling", "rolling-record", "half"] as const).map((k) => widenedWithheldReason(k, marked)),
+    ];
+    for (const t of sentences) {
+      expect(t).not.toMatch(/\d/);
+      expect(t).not.toContain("record reaches");
+      expect(t).not.toContain("unsmoothed_options_book");
+      expect(t).not.toContain("mtm_gated_reason");
+    }
+  });
+
+  it("the marker wins over an unreadable record's sentence (the measurement is the stronger fact)", () => {
+    const both = figureRecord({ ...LONG, seriesEnd: "not-a-date", withheldBy: "options_cash_wallet" });
+    expect(both.unreadable).toBe(true);
+    expect(withheldCellTitle(both)).toBe("Withheld: measured on the cash wallet, which leaves out open option positions.");
+  });
+
+  it("figure-gate.ts never value-imports the headline-basis module (it would close an import cycle)", () => {
+    const src = readFileSync(resolve(__dirname, "figure-gate.ts"), "utf8");
+    expect(src).not.toMatch(/from\s+["']@\/lib\/factsheet\/headline-basis["']/);
   });
 });

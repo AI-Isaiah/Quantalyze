@@ -84,3 +84,7 @@ The ship deletes `TODOS.md` entry A-3 (`venue_account_id` is the MT5 login alone
 ## Hold (2026-11-25)
 
 PR-3 is held on review finding CR-01 (`225-REVIEW-PR3.md`). After the index admits one owner's same login on two servers, the derive's login-only identity token refuses that owner's book. CONN-03 is complete at the index and at reconnect, but it must not ship until the same-owner readers are server-aware. That change needs a founder rule for a NULL-server key on a login with two or more set servers. Re-run four checks before PR-3 opens: the migration-name rule, gate A5, the 155.2 freeze, and the check for open PRs touching migrations.
+
+## Rename (2026-11-26, plan 225-19)
+
+Migration B and its rollback were renamed from `20261125083433` to `20261126102346` (UTC at the rename, later than every migration on origin/main at v0.133.89.0) so the migration-policy backdated-addition gate passes once plans 13 and 16 apply to PROD. The old name stays above as lineage; every non-planning reference moved in the same merge.

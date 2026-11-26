@@ -154,6 +154,16 @@ const EXPECTED: Readonly<
     wireRecoverable: false,
     envelopeRecoverable: false,
   },
+  // Phase 225 (SIGNINREFUSED) - a login-stage MT5 `last_error` -6, the broker's own
+  // refusal, case C5 `mt5_sign_in_refused`. Both `recoverable` columns AGREE and are
+  // false: the wizard entry carries NEITHER member of `RECOVERABLE_ACTIONS`, so no Retry
+  // control renders. Like `SIGN_IN_FAILED` it is therefore NOT a second permitted
+  // divergence (`DIVERGENT_WIRE_CODE` stays at one).
+  MT5_SIGN_IN_REFUSED: {
+    wizardCode: "KEY_MT5_SIGN_IN_REFUSED",
+    wireRecoverable: false,
+    envelopeRecoverable: false,
+  },
   // 164.6.6.3 plan 05 (STATUS_CONTRACT S-29) — the known-server pre-check's
   // 424, case C8. Both `recoverable` columns AGREE (`clear_and_retry` is in
   // `RECOVERABLE_ACTIONS`), so it is not a second permitted divergence.
@@ -245,11 +255,18 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * `DISTINCT_WIRE_CODES` 10 → 11 ("expected 11 to be 10", read off that guard's own failure
  * message). `TOTAL_CASES` did NOT move (still 18): C9 was re-pointed, not added. Both
  * non-recoverable counts did not move either.
+ *
+ * ⚠️ Phase 225 (SIGNINREFUSED) added ONE case at the SAME site C5, `mt5_sign_in_refused`,
+ * with a NEW NON-recoverable code `MT5_SIGN_IN_REFUSED` (a login-stage -6): `TOTAL_CASES`
+ * 18 → 19, `DISTINCT_WIRE_CODES` 11 → 12, `NON_RECOVERABLE_WIRE_CASES` 3 → 4 and
+ * `NON_RECOVERABLE_WIRE_CODES` 2 → 3, each read off its own guard's failure message
+ * ("expected 19 to be 18", "expected 4 to be 3"). The C5 pin on `SIGN_IN_FAILED` below
+ * still holds: it filters by code, so it still sees ONE case at ONE site.
  */
-const TOTAL_CASES = 18;
-const DISTINCT_WIRE_CODES = 11;
-const NON_RECOVERABLE_WIRE_CASES = 3;
-const NON_RECOVERABLE_WIRE_CODES = 2;
+const TOTAL_CASES = 19;
+const DISTINCT_WIRE_CODES = 12;
+const NON_RECOVERABLE_WIRE_CASES = 4;
+const NON_RECOVERABLE_WIRE_CODES = 3;
 
 /**
  * Build the throwable the seam client puts in front of the classifier: a plain

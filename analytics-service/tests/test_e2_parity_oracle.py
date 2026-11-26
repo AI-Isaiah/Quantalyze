@@ -485,14 +485,16 @@ def test_oracle_8_withdrawal_dominant_mwr_includes_terminal():
         ).mwr
         assert mwr is not None and math.isfinite(mwr)
         solved[ev] = mwr
-        # Independent NPV at the solved annualised rate (compute_mwr uses 365.25).
+        # Independent NPV at the solved annualised rate. The year is the 365-day calendar year
+        # (Phase 236 CONTEXT A5 / F-5), written here as a literal so the oracle shares nothing
+        # with the engine's constant.
         flows = [
             (t0, -begin),                                   # investor invests
             (date.fromisoformat("2026-03-15"), 150000.0),   # withdrawal -> investor
             (end_date, ev),                                 # terminal wealth
         ]
         npv = sum(
-            amt / (1.0 + mwr) ** ((dd - t0).days / 365.25) for dd, amt in flows
+            amt / (1.0 + mwr) ** ((dd - t0).days / 365.0) for dd, amt in flows
         )
         assert npv == pytest.approx(0.0, abs=1e-2)
 

@@ -53,6 +53,7 @@ Phase-137 hardening (MT5CONC-01/02):
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from contextlib import ExitStack
@@ -3507,3 +3508,64 @@ async def test_a_mapped_server_with_no_tick_continues_without_a_page(monkeypatch
     assert row["verdict"] == "unmeasured" and row["reason"] == "no_tick"
     assert row["configured_rule"] == "fixed"
     page.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# 225-20 (PR-2c0) — the derive's deal-ledger read writes ONE server-verdict line
+# per poll and changes nothing the job stores. Measured before PR-2c's bracket may
+# refuse a session on the same predicate (CONTEXT Q6 item 2).
+# ---------------------------------------------------------------------------
+_VERDICT_KEY_ID = "b2c3d4e5-0000-4000-8000-0000000000cd"
+
+
+async def _derive_reporting_server(
+    monkeypatch, caplog: pytest.LogCaptureFixture, reported_server: str
+):
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 110_500.0, "balance": 110_500.0, "currency": "USD",
+            "login": 123456, "server": reported_server,
+        },
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    ctx.key_row["id"] = _VERDICT_KEY_ID
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"), _apply(
+        _patches(ctx)
+    ):
+        result = await run_derive_broker_dailies_job(_job())
+    verdicts = [
+        r.getMessage() for r in caplog.records if "mt5 poll server verdict" in r.getMessage()
+    ]
+    return result, capture, verdicts
+
+
+@pytest.mark.asyncio
+async def test_a_derive_poll_on_another_server_logs_false_and_stores_what_a_match_stores(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """THE tracer. A poll whose session the terminal reports on ANOTHER server of the
+    same broker is a measurement, not a refusal: the job's outcome and every row it
+    persists equal those of the same run on the matching server. Exactly one verdict
+    line per poll, naming the derive site and this key, and no server value."""
+    matching = await _derive_reporting_server(monkeypatch, caplog, "Broker-Live")
+    other = await _derive_reporting_server(monkeypatch, caplog, "Broker-Demo-7")
+
+    assert matching[0].outcome == DispatchOutcome.DONE
+    assert other[0].outcome == matching[0].outcome
+    assert _csv_rows(other[1]) == _csv_rows(matching[1]) != {}
+    assert other[1]["upserts"] == matching[1]["upserts"]
+    assert other[1]["updates"] == matching[1]["updates"]
+    assert other[1]["rpc_calls"] == matching[1]["rpc_calls"]
+
+    assert len(matching[2]) == 1, matching[2]
+    assert len(other[2]) == 1, other[2]
+    assert "session_server_matches_requested=True" in matching[2][0]
+    assert "session_server_matches_requested=False" in other[2][0]
+    for line in (matching[2][0], other[2][0]):
+        assert "site=derive_broker_dailies" in line
+        assert f"holder={_VERDICT_KEY_ID}" in line
+        for secret in ("broker-live", "broker-demo", "123456", "pw"):
+            assert secret not in line.casefold(), (secret, line)

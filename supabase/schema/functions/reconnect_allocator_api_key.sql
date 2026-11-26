@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261125083433_api_keys_venue_server_index.sql
+-- source migration: 20261126102346_api_keys_venue_server_index.sql
 -- --------------------------------------------------------------------------
 -- STEP 2 - reconnect_allocator_api_key, re-based on 20260925120000, + the wildcard.
 -- --------------------------------------------------------------------------

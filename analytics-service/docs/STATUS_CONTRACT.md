@@ -172,6 +172,17 @@ bracket over the same probe function) — the first site in this class to be rea
 two endpoints. The arm's other raise keeps the pre-167 `NETWORK_UNAVAILABLE`,
 `recoverable=True` answer for every fault that is not a login-stage refusal (167 WR-01).
 
+**⭐ Phase 225 (SIGNINREFUSED) splits the `SIGN_IN_FAILED` raise once more, BY SYMBOL.** In the
+same `_validate_mt5_key_probe()` arm, a login-stage refusal whose `last_error` is exactly
+`-6` (`RES_E_AUTH_FAILED`, "authorization failed") now answers `MT5_SIGN_IN_REFUSED`
+(424, `recoverable=False`, `MT5_SIGN_IN_REFUSED_DETAIL` in `services/closed_sets.py`) instead
+of `SIGN_IN_FAILED`: the broker answered and refused, so "did not complete" was untrue for it.
+Every other login-stage code (`0`, `-10005`, …) keeps `SIGN_IN_FAILED` byte-unchanged. It is a
+VALIDATE-surface answer only: the holdings poll, ingestion and the job worker classify `-6`
+through `is_mt5_login_refusal` / `classify_mt5_login_error` exactly as before. Same endpoints
+as S-27, same CALLER'S EXCHANGE class, one more `VenueTransientHTTPException` construction
+(`EXPECTED_SUBCLASS_CONSTRUCTION_SITES` 27 → 28 in `tests/test_raw_5xx_census.py`).
+
 The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
 `correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's

@@ -932,8 +932,13 @@ export type FactsheetCommon = {
      * "Headline figures are being recomputed." for the first and says nothing for
      * the second, because the page already states the failed status once. A
      * payload cached before this field reads as absent, i.e. the original note.
+     *
+     * Phase 252 DERIBITOPTIONS: `options_cash_wallet` is the third cause. The row's
+     * `mtm_gated_reason` names an options book measured on the cash wallet, so the
+     * note says that and nothing about a chain break; the row need not be chain-broken
+     * (then {@link twrChainBroken} is absent). Absent still means the original cause.
      */
-    headlineWithheldCause?: "recomputing" | "failed";
+    headlineWithheldCause?: "recomputing" | "failed" | "options_cash_wallet";
     /**
      * Phase 164.6.6.3.3 (D-01) — present only on a chain-broken row whose stored
      * cash headline is overlaid and that has at least one guard reason (Dated and
@@ -1100,6 +1105,16 @@ export type FactsheetCommon = {
    * never on a range. Absent means unknown and reads as the `null` figure state.
    */
   figureRecord?: FigureRecord | null;
+  /**
+   * Phase 236 plan 11 (CONTEXT Q1) - the ISO first and last day the STORED CAGR covers
+   * (`metrics_json.cagr_start` / `cagr_end`, written by the analytics engine beside the CAGR). On a
+   * Dated row that is the retained suffix, not the record. Null on a row stored before the keys
+   * existed (until the fleet re-derive), and on any payload not built from a stored row; the
+   * factsheet then states no span rather than inventing one. Read at full history only: a
+   * selected range states its own window.
+   */
+  cagrStart?: string | null;
+  cagrEnd?: string | null;
 };
 
 /**

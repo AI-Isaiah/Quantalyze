@@ -299,10 +299,19 @@ async def _drive_sync_trades_enqueue_failed() -> _Outcome:
             stub.execute.return_value = MagicMock(data=[])
             return stub
 
+        # 222-REVIEW SFH-01: the failed write is a conditional UPDATE (so it cannot
+        # overwrite a row published after the publish read); record its payload too.
+        def _update(payload: dict[str, Any], **_kw: Any) -> MagicMock:
+            if name == "strategy_analytics":
+                upserts.append(dict(payload))
+            return tbl.update.return_value  # type: ignore[no-any-return]
+
         tbl.upsert.side_effect = _upsert
-        tbl.update.return_value.eq.return_value.execute.return_value = MagicMock(
-            data=[]
-        )
+        tbl.update.side_effect = _update
+        # Phase 222 ERRC-03: the handler reads the publish state before writing.
+        # No row -> nothing published -> it writes the failed row and returns FAILED.
+        tbl.select.return_value.eq.return_value.maybe_single.return_value.execute \
+            .return_value = MagicMock(data=None)
         return tbl
 
     ctx.supabase.table.side_effect = _table
@@ -319,7 +328,7 @@ async def _drive_sync_trades_enqueue_failed() -> _Outcome:
         new=AsyncMock(side_effect=lambda fn: fn()),
     ), patch("services.job_worker._RAW_TRADE_INGESTION_ENABLED", False):
         result = await run_sync_trades_job(job)
-    assert result.outcome == DispatchOutcome.DONE
+    assert result.outcome == DispatchOutcome.FAILED
     return _Outcome(
         failed_payloads=_failed(upserts),
         logger_name=_WORKER_LOGGER,

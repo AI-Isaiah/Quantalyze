@@ -65,7 +65,7 @@
 -- create_wizard_strategy canary — so a migration EDIT aborts the apply instead of
 -- reaching the gate. The `sql` steps drift the LIVE object after apply, which is
 -- what this gate exists to catch: state that was correct once and is not now.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125083433_api_keys_venue_server_index.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125132334_api_keys_venue_server_owner_read.sql","supabase/migrations/20261126102346_api_keys_venue_server_index.sql"]}
 
 DO $$
 DECLARE
@@ -1026,18 +1026,36 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (6v-omitted): a call that omitted p_venue_server stored venue_server % — the omitted parameter must store NULL, the wildcard every app fence reads', v_srv225;
   END IF;
 
-  -- ----- 6v-no-grant. the browser roles hold nothing on the column ----------------
+  -- ----- 6v-owner-read. the owner may READ the column through the column grant -----
+  -- Phase 225 plan 13 (CONTEXT Q6 item 1; founder answer "Owner-only read (Recommended)",
+  -- 2026-11-25) REVERSES plan 01's no-grant posture: the TypeScript identity twin reads
+  -- api_keys.venue_server as `authenticated`, so the column grant is now REQUIRED. Row
+  -- scope stays the existing owner-only RLS on api_keys, which this arm does not touch.
+  -- has_column_privilege is TRUE for a table-level grant as well as a column grant, so a
+  -- future table-level grant also satisfies it; the write and anon halves live in
+  -- 6v-no-grant below.
+  -- RED-UNDER: REVOKE SELECT (venue_server) from `authenticated` on the LIVE database —
+  --            the column is unreadable again and every TypeScript key read that selects
+  --            it answers 42501.
+  -- RED-UNDER-M: {"arm":"6v-owner-read","apply":[{"kind":"sql","stmt":"REVOKE SELECT (venue_server) ON public.api_keys FROM authenticated"}]}
+  IF NOT has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'SELECT') THEN
+    RAISE EXCEPTION 'TEST FAILED (6v-owner-read): authenticated holds no SELECT on api_keys.venue_server — the owner cannot read their key''s broker server, so the TypeScript identity twin cannot become server-aware (CONN-03, CONTEXT Q6). The column grant of migration 20261125132334 was dropped or revoked';
+  END IF;
+
+  -- ----- 6v-no-grant. no browser write, and nothing at all for anon ---------------
+  -- The browser roles never WRITE the column (the analytics worker and the service-role
+  -- connect writers are its only writers, CONTEXT Q2), and anon holds nothing on it.
   -- api_keys has no table-level SELECT for the browser roles, only a per-column
-  -- allowlist, and this column is deliberately not on it. has_column_privilege is
-  -- TRUE for a table-level grant as well, so it catches that route too.
-  -- RED-UNDER: GRANT SELECT (venue_server) to `authenticated` on the LIVE database —
-  --            the "the key card could show the server" shortcut that would put the
-  --            column into the browser's reach.
-  -- RED-UNDER-M: {"arm":"6v-no-grant","apply":[{"kind":"sql","stmt":"GRANT SELECT (venue_server) ON public.api_keys TO authenticated"}]}
-  IF has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'SELECT')
-     OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'INSERT')
+  -- allowlist; has_column_privilege is TRUE for a table-level grant as well, so it
+  -- catches that route too. authenticated SELECT is NOT asserted false here since plan 13:
+  -- it is asserted TRUE by 6v-owner-read.
+  -- RED-UNDER: GRANT UPDATE (venue_server) to `authenticated` on the LIVE database —
+  --            the "let the browser edit the broker server" shortcut that would let an
+  --            owner spoof which server an identity token is built from.
+  -- RED-UNDER-M: {"arm":"6v-no-grant","apply":[{"kind":"sql","stmt":"GRANT UPDATE (venue_server) ON public.api_keys TO authenticated"}]}
+  IF has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'INSERT')
      OR has_column_privilege('authenticated', 'public.api_keys', 'venue_server', 'UPDATE') THEN
-    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): authenticated holds a privilege on api_keys.venue_server — the browser must never read or write the broker server (CONN-03, founder ruling Q2). A column grant was added, or a table-level grant returned';
+    RAISE EXCEPTION 'TEST FAILED (6v-no-grant): authenticated holds INSERT or UPDATE on api_keys.venue_server — a browser role must never write the broker server (CONN-03, CONTEXT Q2). A column grant was added, or a table-level grant returned';
   END IF;
   IF has_column_privilege('anon', 'public.api_keys', 'venue_server', 'SELECT')
      OR has_column_privilege('anon', 'public.api_keys', 'venue_server', 'INSERT')
@@ -1141,5 +1159,5 @@ BEGIN
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes) and a tab/newline-only login or server stores NULL (6v-writes-ws), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank) and a tab/newline-only one (6v-check-ws), and the browser roles hold no privilege on api_keys.venue_server (6v-no-grant); two null servers on one login are refused by the identity index (6s-null-null), the same login on two servers is admitted (6s-two-servers) and on one server refused by name (6s-same-server), a null server beside a set one is admitted (6s-null-vs-set), and two owners on one login and server are both admitted (6s-two-owners).';
+  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes) and a tab/newline-only login or server stores NULL (6v-writes-ws), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank) and a tab/newline-only one (6v-check-ws), the owner may read api_keys.venue_server through the column grant (6v-owner-read), and the browser roles may not write it nor anon read it (6v-no-grant); two null servers on one login are refused by the identity index (6s-null-null), the same login on two servers is admitted (6s-two-servers) and on one server refused by name (6s-same-server), a null server beside a set one is admitted (6s-null-vs-set), and two owners on one login and server are both admitted (6s-two-owners).';
 END $behavioural$;

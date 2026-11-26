@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { computeOgHeadline } from "./og-metrics";
+import { computeOgHeadline, OG_CARD_VERSION } from "./og-metrics";
+import { compute } from "./compute";
 
 // A day in ms, for building calendar-spaced date axes.
 const DAY = 86_400_000;
@@ -58,6 +59,26 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(crypto.sharpe / trad.sharpe).toBeCloseTo(Math.sqrt(365 / 252), 10);
   });
 
+  it("Sharpe is the SAMPLE-sd one (F-5, 236-05): [+0.02, -0.01] x 50 at 252 = 0.005 / (0.015 x sqrt(100/99)) x sqrt(252)", () => {
+    // Inline oracle, no production import: every deviation is exactly +-0.015, so the sum of
+    // squares is 100 x 0.015^2 and the sample sd divides it by n - 1 = 99.
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      date: iso(Date.parse("2023-01-01") + i * DAY),
+      value: i % 2 === 0 ? 0.02 : -0.01,
+    }));
+    const sampleSd = 0.015 * Math.sqrt(100 / 99);
+    const got = computeOgHeadline(rows, "traditional");
+    expect(got.sharpe).toBeCloseTo((0.005 / sampleSd) * Math.sqrt(252), 12);
+    // The card and the factsheet headline are one figure: compute() reads the same series.
+    const headline = compute(
+      rows.map((r) => r.value),
+      rows.map((r) => String(r.date)),
+      0,
+      252,
+    );
+    expect(got.sharpe).toBeCloseTo(headline.sharpe, 12);
+  });
+
   it("CAGR is asset-class-invariant (calendar clock): crypto == traditional", () => {
     // 55 weekly rows spanning ~378 days (> 1 calendar year), all positive → cum > 0.
     const rows = Array.from({ length: 55 }, (_, i) => ({
@@ -87,11 +108,11 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(stored.cagr).toBe(0.2);
 
     // The computed fallback (stored key absent): 150 pairs of +0.2% then -0.1% compound to
-    // (1.002 * 0.999)^150, over 299 elapsed days on the 365.25-day calendar clock.
+    // (1.002 * 0.999)^150, over 299 whole elapsed days, annualized on a 365-day year.
     const { sharpe, cagr } = computeOgHeadline(rows, "crypto");
     expect(Number.isFinite(sharpe)).toBe(true);
     expect(Number.isFinite(cagr)).toBe(true);
-    const expected = Math.pow(Math.pow(1.002 * 0.999, 150), 365.25 / 299) - 1;
+    const expected = Math.pow(Math.pow(1.002 * 0.999, 150), 365 / 299) - 1;
     expect(cagr).toBeCloseTo(expected, 10);
   });
 
@@ -131,7 +152,7 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
     expect(Number.isFinite(sharpe)).toBe(true);
     expect(Number.isFinite(maxDd)).toBe(true);
     expect(maxDd).toBeLessThanOrEqual(0);
-    const expected = Math.pow(Math.pow(1.002, 15) * Math.pow(0.999, 14), 365.25 / 28) - 1;
+    const expected = Math.pow(Math.pow(1.002, 15) * Math.pow(0.999, 14), 365 / 28) - 1;
     expect(cagr).toBeCloseTo(expected, 8);
   });
 
@@ -143,7 +164,7 @@ describe("computeOgHeadline — #597 OG headline metrics", () => {
   });
 
   it("a computed CAGR that overflows is NaN, never Infinity (a huge gain over a one-day span)", () => {
-    // 1e6 growth in one day annualizes to 1e6^365.25, past the largest double.
+    // 1e6 growth in one day annualizes to 1e6^365, past the largest double.
     const rows = [
       { date: "2023-01-01", value: 0.01 },
       { date: "2023-01-02", value: 1e6 },
@@ -400,5 +421,15 @@ describe("computeOgHeadline — persisted scalars for a rankable row (169.4.1)",
       const got = computeOgHeadline(rows, "crypto", { ...COMPUTING, computation_status: "failed" }, true);
       expect(got.sharpe).toBe(computed.sharpe);
     });
+  });
+});
+
+describe("OG_CARD_VERSION - the card's figure rules are versioned in its URL", () => {
+  // Phase 236 FIGUREMATH moved the card's computed CAGR, Calmar and Sharpe. A rendered card is
+  // cached for 24 h at the CDN plus 7 days of stale-while-revalidate, and unfurlers key a card by
+  // URL, so the only way a card cached under the old rules stops answering is a new ?v= value.
+  // Moving the value back to "3" would serve those cards again under the same URL.
+  it("is past 3, the version whose card carried the 365.25-day year and the population sd", () => {
+    expect(Number(OG_CARD_VERSION)).toBeGreaterThanOrEqual(4);
   });
 });

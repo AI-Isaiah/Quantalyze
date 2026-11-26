@@ -44,10 +44,13 @@ import pandas as pd
 
 from services.dispersion import dispersion_is_residue
 from services.external_flows import USD_FAMILY
+from services.figure_conventions import PERIODS_PER_YEAR_CRYPTO, SD_DDOF
 
 # Trading days per year — the √365 annualiser (crypto trades every calendar day;
-# zavara's headline uses the 365-day convention, not 252).
-_ANNUALISATION_DAYS: float = 365.0
+# zavara's headline uses the 365-day convention, not 252). Phase 236: this is the RISK clock
+# (sqrt of periods per year), so it is `PERIODS_PER_YEAR_CRYPTO`, not the calendar-days-per-year
+# constant; the value is unchanged.
+_ANNUALISATION_DAYS: float = float(PERIODS_PER_YEAR_CRYPTO)
 
 DENOMINATOR_ALLOCATED_CAPITAL: str = "allocated_capital"
 _VALID_DENOMINATORS: frozenset[str] = frozenset({DENOMINATOR_ALLOCATED_CAPITAL})
@@ -478,7 +481,7 @@ def _annualised_sharpe(returns: pd.Series) -> float:
     """
     if len(returns) < 2:
         return float("nan")
-    sd = float(returns.std(ddof=1))
+    sd = float(returns.std(ddof=SD_DDOF))
     if not np.isfinite(sd) or dispersion_is_residue(sd, float(returns.mean())):
         return float("nan")
     return float(returns.mean()) / sd * float(np.sqrt(_ANNUALISATION_DAYS))

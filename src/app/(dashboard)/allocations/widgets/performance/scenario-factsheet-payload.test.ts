@@ -10,12 +10,14 @@ import {
 } from "@/lib/scenario";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import { gateAnnualized, widenedWithheldReason, withheldReason } from "@/lib/figure-gate";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
+import { windowView } from "@/app/factsheet/[id]/v2/basis-context";
 import { buildScenarioFactsheetPayload } from "./scenario-factsheet-payload";
 
 // ── Deterministic fixtures (no Math.random) ──────────────────────────
 // The payload is SINGLE-AXIS off the engine's `portfolio_daily_returns` (daily
 // RETURN form, decimal) — WR-01. `value` here is a daily return, NOT cumulative
-// wealth. UTC ISO dates so compute()'s 365.25-CAGR axis is reproducible.
+// wealth. UTC ISO dates so compute()'s whole-day / 365 CAGR axis is reproducible.
 const ymd = (i: number) =>
   new Date(Date.UTC(2025, 0, i + 1)).toISOString().slice(0, 10);
 
@@ -164,13 +166,13 @@ describe("buildScenarioFactsheetPayload — convention pins", () => {
 
 // ── Phase 39: complete-payload parity (PAYLOAD-01..05) ────────────────
 // Deterministic returns-form blends (daily RETURN, decimal). UTC ISO dates,
-// consecutive calendar days, so compute()'s 365.25-CAGR axis is reproducible.
+// consecutive calendar days, so compute()'s whole-day / 365 CAGR axis is reproducible.
 // NO Math.random — bootstrapCI is internally seeded (seed=42).
 const ymdUTC = (i: number) =>
   new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10);
 
 // 30-day blend → n=30 → the n<252 caveat is ON. Alternating ±, net-positive
-// (mirrors compute.metrics.test.ts): mean = 0.0025, population σ = 0.0075 exactly.
+// (mirrors compute.metrics.test.ts): mean = 0.0025, every deviation exactly 0.0075 (population σ 0.0075, sample σ 0.0075·√(30/29)).
 const BLEND_30: DailyPoint[] = Array.from({ length: 30 }, (_, i) => ({
   date: ymdUTC(i),
   value: i % 2 === 0 ? 0.01 : -0.005,
@@ -195,6 +197,9 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     // the yearly map asserted separately) must round-trip to 6 decimals.
     for (const k of Object.keys(ref) as (keyof typeof ref)[]) {
       if (k === "eq" || k === "dd" || k === "yearly") continue;
+      // cvar95 is the one figure the 30-day blend does not carry: it is under CVAR_MIN_OBS (see the
+      // floor describe below, which pins it NaN here and compute()'s value at the floor).
+      if (k === "cvar95") continue;
       const refVal = ref[k];
       if (typeof refVal === "number") {
         expect(
@@ -209,19 +214,19 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
     expect(p.strategyMetrics.yearly).toEqual(ref.yearly);
   });
 
-  // ── PAYLOAD-03 convention-drift pin (mutation-falsifiable) ──────────────
-  // WHY THIS MATTERS (CLAUDE.md Rule 9): compute.ts uses POPULATION stdev
-  // (÷ n). scenario-blend-panels.ts uses SAMPLE stdev (÷ n−1). For the 30-day
-  // fixture the population σ is exactly 0.0075, so ann_vol = 0.0075·√252. A
-  // sample-std bleed yields σ = √(SS/29) → ann_vol ≈ 0.12110, which differs at
-  // the 3rd decimal and FAILS this 6-decimal assertion loudly. Mutating the
-  // adapter to feed a sample-std rolling/metric source turns this test RED —
-  // that is the whole point of pinning the population value here.
-  it("ann_vol is the POPULATION-std value 0.0075·√252 — a sample-std bleed fails", () => {
+  // ── PAYLOAD-03 convention pin (mutation-falsifiable) ────────────────────
+  // WHY THIS MATTERS (CLAUDE.md Rule 9): since Phase 236 (F-5, "ddof 1 everywhere") compute()
+  // and the Scenario engine both divide by n - 1. For the 30-day fixture every deviation is
+  // exactly 0.0075, so the sum of squares is 30 x 0.0075^2 and the SAMPLE sd is
+  // 0.0075 x sqrt(30/29); ann_vol = that x sqrt(252). A population-sd bleed (divide by n) yields
+  // exactly 0.0075 x sqrt(252), which differs at the 4th decimal and FAILS this 9-decimal
+  // assertion loudly. The pin moved with 236-05: it was 0.0075 x sqrt(252) while compute() was
+  // the one engine on the population sd; the expected value is the closed form above, not engine output.
+  it("ann_vol is the SAMPLE-sd value 0.0075 x sqrt(30/29) x sqrt(252): a population-sd bleed fails", () => {
     const p = buildScenarioFactsheetPayload({
       portfolioDaily: BLEND_30,
     });
-    expect(p.strategyMetrics.ann_vol).toBeCloseTo(0.0075 * Math.sqrt(252), 6);
+    expect(p.strategyMetrics.ann_vol).toBeCloseTo(0.0075 * Math.sqrt(30 / 29) * Math.sqrt(252), 9);
   });
 
   // ── PAYLOAD-04: n = true overlap count (= portfolioDaily.length) ──
@@ -418,7 +423,7 @@ describe("buildScenarioFactsheetPayload — complete-payload parity (Phase 39)",
 // NOTE (parity_contract_clarification, 56-01-PLAN): we do NOT assert the payload
 // metrics equal `m.volatility`/`m.sharpe`/`m.cagr`. `computeScenario` uses SAMPLE
 // stdev + a 252-trading-day CAGR year; `compute.ts` uses POPULATION stdev + a
-// 365.25-calendar-day year. They differ field-for-field BY DESIGN. The LOCKED
+// 365-day calendar year (whole days). They differ field-for-field BY DESIGN. The LOCKED
 // invariant is single-source-of-truth of the SERIES: same series → same
 // `compute()` → parity by construction.
 
@@ -538,6 +543,8 @@ describe("buildScenarioFactsheetPayload — coverage-window parity (Phase 56, PA
     // on the windowed path.
     for (const k of Object.keys(ref) as (keyof typeof ref)[]) {
       if (k === "eq" || k === "dd" || k === "yearly") continue;
+      // The 30-day windowed blend is the payload's whole record, under CVAR_MIN_OBS (CR-04).
+      if (k === "cvar95") continue;
       const refVal = ref[k];
       if (typeof refVal === "number") {
         expect(
@@ -547,6 +554,8 @@ describe("buildScenarioFactsheetPayload — coverage-window parity (Phase 56, PA
       }
     }
     expect(p.strategyMetrics.yearly).toEqual(ref.yearly);
+    expect(winRets.length).toBeLessThan(CVAR_MIN_OBS);
+    expect(Number.isNaN(p.strategyMetrics.cvar95)).toBe(true);
 
     // WR-01 single-axis: equity/drawdown are cumEq(rets)/drawdowns(cumEq(rets))
     // on the SAME windowed series, to fp precision.
@@ -618,7 +627,7 @@ describe("buildScenarioFactsheetPayload — coverage-window parity (Phase 56, PA
 // #597 single-strategy threading. This plan ADDS the knob only — the default 252
 // path MUST stay byte-identical (T-84-02: a silently shifted default fails the
 // full-payload deep-equal pin). RISK metrics ride √periodsPerYear; CAGR rides the
-// CALENDAR clock (days/365.25) and is asset-class-INVARIANT (the two-clocks ruling).
+// CALENDAR clock (whole days / 365) and is asset-class-INVARIANT (the two-clocks ruling).
 describe("buildScenarioFactsheetPayload — periodsPerYear knob (#597 part 2)", () => {
   it("default (no-arg) deep-equals explicit 252 — the ENTIRE payload (byte-identity)", () => {
     const dflt = buildScenarioFactsheetPayload({ portfolioDaily: BLEND_252 });
@@ -662,7 +671,7 @@ describe("buildScenarioFactsheetPayload — periodsPerYear knob (#597 part 2)", 
       portfolioDaily: BLEND_30,
       periodsPerYear: 365,
     });
-    // compute()'s CAGR rides days/365.25 — byte-identical across the basis.
+    // compute()'s CAGR rides whole days / 365 — byte-identical across the basis.
     expect(at365.strategyMetrics.cagr).toBe(at252.strategyMetrics.cagr);
     expect(at365.strategyMetrics.cum_ret).toBe(at252.strategyMetrics.cum_ret);
   });
@@ -799,5 +808,44 @@ describe("buildScenarioFactsheetPayload: the stress block follows the record ver
       p = buildScenarioFactsheetPayload({ portfolioDaily: bad, periodsPerYear: 365 });
     }).not.toThrow();
     expect(p!.stressWindows).toEqual(WITHHELD);
+  });
+});
+
+// ── Phase 236 FIG-03 (A6, CONTEXT Q2, review CR-04): the blend's CVaR floor ──────────────────────
+// WHY THIS MATTERS: the Scenario composer's factsheet prints this payload's CVaR through
+// MetricsColumn. Q2 (founder 2026-11-25, "Total record only") nulls CVaR when the blend's TOTAL
+// record has fewer than CVAR_MIN_OBS observations, and a zoomed window always shows it.
+const cvarBlend = (n: number): DailyPoint[] =>
+  Array.from({ length: n }, (_, i) => ({
+    date: ymdUTC(i),
+    value: i % 5 === 0 ? -0.02 - 0.0001 * i : 0.003,
+  }));
+
+describe("buildScenarioFactsheetPayload — CVaR floor on the blend's total record (CR-04)", () => {
+  it("CVAR_MIN_OBS - 1 blend days: CVaR is NaN while VaR still shows", () => {
+    const blend = cvarBlend(CVAR_MIN_OBS - 1);
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: blend });
+    expect(p.strategyMetrics.n).toBe(CVAR_MIN_OBS - 1);
+    expect(Number.isNaN(p.strategyMetrics.cvar95)).toBe(true);
+    expect(Number.isFinite(p.strategyMetrics.var95)).toBe(true);
+  });
+
+  it("CVAR_MIN_OBS blend days: CVaR shows, equal to compute()'s own figure", () => {
+    const blend = cvarBlend(CVAR_MIN_OBS);
+    const ref = compute(
+      blend.map((x) => x.value),
+      blend.map((x) => x.date),
+    );
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: blend });
+    expect(Number.isFinite(p.strategyMetrics.cvar95)).toBe(true);
+    expect(p.strategyMetrics.cvar95).toBeCloseTo(ref.cvar95, 9);
+  });
+
+  it("a narrowed window inside a blend under the floor still shows CVaR", () => {
+    const p = buildScenarioFactsheetPayload({ portfolioDaily: cvarBlend(CVAR_MIN_OBS - 1) });
+    expect(Number.isNaN(p.strategyMetrics.cvar95)).toBe(true);
+    const w = windowView(p, 5, 34);
+    expect(w.strategyMetrics.n).toBe(30);
+    expect(Number.isFinite(w.strategyMetrics.cvar95)).toBe(true);
   });
 });

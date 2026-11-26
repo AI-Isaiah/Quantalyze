@@ -393,6 +393,23 @@ function strategySharpeCell(row: StrategyRow) {
   return text;
 }
 
+/**
+ * Phase 252 (review WR-01): MTD and Max DD of a strategy measured on an options book's cash wallet
+ * are withheld like its Sharpe: a toneless `—` carrying the named sentence as title and sr-only
+ * text. Every other row keeps its figure (or the plain `—` for a null).
+ */
+function strategyCashFigureCell(row: StrategyRow, value: number | null) {
+  if (row.sharpeRecord.withheldBy) {
+    const reason = withheldCellTitle(row.sharpeRecord);
+    return (
+      <span title={reason}>
+        —<span className="sr-only">{reason}</span>
+      </span>
+    );
+  }
+  return value == null ? "—" : formatPercent(value);
+}
+
 function StrategyRowsTable({
   rows,
   hasAnyStrategies,
@@ -578,13 +595,13 @@ function StrategyRowsTable({
                   )}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
-                  {row.mtd == null ? "—" : formatPercent(row.mtd)}
+                  {strategyCashFigureCell(row, row.mtd)}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
                   {strategySharpeCell(row)}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
-                  {row.maxDd == null ? "—" : formatPercent(row.maxDd)}
+                  {strategyCashFigureCell(row, row.maxDd)}
                 </td>
                 <td className="px-4 py-2 text-right tabular-nums">
                   {formatDays(row.age)}

@@ -16,6 +16,7 @@
  */
 
 import type { RollWindowPick } from "./types";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { ONE_YEAR_DAYS, coveredDays, spanDays } from "@/lib/figure-gate";
 import { mean } from "@/lib/portfolio-math-utils";
 import { beta, dispersion, sharpe } from "@/lib/return-stats";
@@ -85,10 +86,10 @@ export function rollingVol(
   const sqrtN = Math.sqrt(periodsPerYear);
   for (let i = window - 1; i < rets.length; i++) {
     const w = rets.slice(i - window + 1, i + 1);
-    // The shared population sd (SFH-M7): bitwise `stdDev(w, false)` except that
+    // The shared sample sd (F-5, SFH-M7): bitwise `stdDev(w, true)` except that
     // a float-residue window reads exactly 0, as `compute`'s ann_vol does, not
     // about 1e-15.
-    out[i] = dispersion(w, 0).sd * sqrtN;
+    out[i] = dispersion(w, SD_DDOF).sd * sqrtN;
   }
   return out;
 }
@@ -101,9 +102,9 @@ export function rollingSharpe(
   const out: Array<number | null> = new Array(rets.length).fill(null);
   for (let i = window - 1; i < rets.length; i++) {
     // The window's Sharpe comes from `@/lib/return-stats` (Phase 166.2 D-17),
-    // population sd: a residue window answers as an all-zero window does (D-07),
+    // sample sd (F-5): a residue window answers as an all-zero window does (D-07),
     // and both are a gap, null (D7).
-    out[i] = sharpe(rets.slice(i - window + 1, i + 1), { periodsPerYear, ddof: 0 });
+    out[i] = sharpe(rets.slice(i - window + 1, i + 1), { periodsPerYear, ddof: SD_DDOF });
   }
   return out;
 }
@@ -157,10 +158,11 @@ export const ROLL_WINDOW_1Y_DAYS = ONE_YEAR_DAYS;
  * returns are skipped inside a window (pandas skipna), and the downside root divides by
  * the window's own count.
  *
- * ONE definition, the producer's (D-01; A-194-D14-02): the SAMPLE standard deviation
- * (ddof 1), so a point is not the factsheet's row-window figure, which stays on the
- * population standard deviation (ddof 0). Sharpe is null where the standard deviation
- * does not clear the residue floor; Sortino is null where no return is below 0 (MAR).
+ * ONE definition, the producer's (D-01; F-5): the SAMPLE standard deviation (ddof 1). The
+ * 126- and 30-row windows above are on it too, so a row window and this calendar window
+ * read the same sd on the same returns (A-194-D14-02, closed by Phase 236). Sharpe is null
+ * where the standard deviation does not clear the residue floor; Sortino is null where no
+ * return is below 0 (MAR).
  */
 export function rollingCalendarStats(
   rets: number[],
@@ -190,9 +192,9 @@ export function rollingCalendarStats(
     if (!Number.isFinite(spanDays(dates[start], dates[i]))) continue;
     const w = rets.slice(start, i + 1).filter(Number.isFinite);
     if (w.length < 2) continue;
-    const { sd } = dispersion(w, 1);
+    const { sd } = dispersion(w, SD_DDOF);
     vol[i] = sd * sqrtN;
-    sharpeOut[i] = sharpe(w, { periodsPerYear, ddof: 1 });
+    sharpeOut[i] = sharpe(w, { periodsPerYear, ddof: SD_DDOF });
     let downSq = 0;
     let hasNeg = false;
     for (const x of w) {

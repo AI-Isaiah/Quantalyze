@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { hasBasisHeadline, overlayBasisScalars, overlayStoredFigureDefs } from "./basis-metrics";
 import type { StoredFigureDefs } from "./basis-metrics";
+import { FIGURE_DEFS_VERSION } from "@/lib/figure-gate";
 
 /**
  * Round-2 H-1/M-1 — the availability criterion + the STRICT by-basis overlay.
@@ -129,14 +130,14 @@ describe("H-1 overlayBasisScalars — STRICT: null/non-finite scalar → NaN, ne
 
 /**
  * Phase 194 (D-01, T-194-07): the stored 6 Month, 3 Month, VaR 95% and CVaR 95% win at
- * full history only behind `figure_defs_version >= 2`. A row written before the
+ * full history only behind `figure_defs_version >= FIGURE_DEFS_VERSION`. A row written before the
  * recompute stores VaR/CVaR under the old definition, so overlaying it would show a
  * figure whose meaning differs from the one the page labels.
  */
 describe("overlayStoredFigureDefs (194 D-01)", () => {
   const COMPUTED = { p6m: 0.11, p3m: 0.05, var95: -0.02, cvar95: -0.03, cagr: 0.3 };
   const stored = (over: Partial<StoredFigureDefs> = {}): StoredFigureDefs => ({
-    figureDefsVersion: 2,
+    figureDefsVersion: FIGURE_DEFS_VERSION,
     sixMonth: 0.2,
     threeMonth: 0.1,
     var95: -0.04,
@@ -165,6 +166,9 @@ describe("overlayStoredFigureDefs (194 D-01)", () => {
   it.each([
     ["marker absent (null)", stored({ figureDefsVersion: null })],
     ["marker below the current version", stored({ figureDefsVersion: 1 })],
+    // Phase 236 (T-236-02): a row written under version 2 carries the pre-F-5 stored figures
+    // (T-236-02), so it is OLD. It stays old by construction: one below the current version.
+    ["marker one below the current version (a pre-236 row)", stored({ figureDefsVersion: FIGURE_DEFS_VERSION - 1 })],
   ])("%s: the computed figures stand", (_label, s) => {
     expect(overlayStoredFigureDefs(COMPUTED, s)).toBe(COMPUTED);
   });

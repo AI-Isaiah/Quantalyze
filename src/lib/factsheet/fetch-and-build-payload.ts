@@ -320,7 +320,8 @@ async function resolveFactsheetInputs(
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
          cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance,
          six_month_return, figure_defs_version:metrics_json->figure_defs_version, three_month:metrics_json->three_month,
-         var_1d_95:metrics_json->var_1d_95, cvar:metrics_json->cvar, record_observations:metrics_json->record_observations )`,
+         var_1d_95:metrics_json->var_1d_95, cvar:metrics_json->cvar, record_observations:metrics_json->record_observations,
+         cagr_start:metrics_json->cagr_start, cagr_end:metrics_json->cagr_end )`,
     )
     .eq("id", id);
   const { data: strategy, error } = await visibility(
@@ -748,7 +749,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v27", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v29", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -964,6 +965,20 @@ async function buildFromResolved(
     };
   }
 
+  // Phase 236 plan 11 (CONTEXT Q1): the span the STORED CAGR covers, two ISO days the engine wrote
+  // beside it. They describe the stored headline, so they ride only when that headline was
+  // admitted (the same condition as the stored figures above); otherwise the CAGR shown is
+  // compute()'s and no stored span describes it. A row stored before the keys existed, or a value
+  // that is not a day, states no span (both null, never one of the two).
+  const isoDayOrNull = (v: unknown): string | null =>
+    typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
+  const storedCagrStart = buildOpts.metricsByBasis?.cash_settlement ? isoDayOrNull(a?.cagr_start) : null;
+  const storedCagrEnd = buildOpts.metricsByBasis?.cash_settlement ? isoDayOrNull(a?.cagr_end) : null;
+  const cagrSpan =
+    storedCagrStart !== null && storedCagrEnd !== null
+      ? { cagrStart: storedCagrStart, cagrEnd: storedCagrEnd }
+      : { cagrStart: null, cagrEnd: null };
+
   // FINDING-5 (b06-silentfailure): Never fall back to "now" for a missing
   // computed_at — that would make FreshnessChip show a green "fresh" badge
   // for a strategy with no real analytics data. Use the epoch sentinel so
@@ -1062,7 +1077,7 @@ async function buildFromResolved(
     benchmark: strategy.benchmark ?? null,
     assetClass: strategy.asset_class ?? null,
   };
-  const built = buildFactsheetPayload(strategyArg, dailyReturns, { ...buildOpts, reportUnreadable: true });
+  const built = { ...buildFactsheetPayload(strategyArg, dailyReturns, { ...buildOpts, reportUnreadable: true }), ...cagrSpan };
   // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the day recorded equity
   // begins, read from the PUBLISHED analytics flag and parsed once by the one
   // reader. By spread, only when present, so a strategy with no marks (and a

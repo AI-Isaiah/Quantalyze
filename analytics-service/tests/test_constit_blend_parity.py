@@ -63,7 +63,7 @@ import pytest
 
 _FIXTURE_DIR = Path(__file__).parent / "fixtures"
 _PPY = 365  # all-crypto blend basis (#597)
-_CALENDAR_DAYS_PER_YEAR = 365.25  # scenario.ts calendarYears (closed-sets.ts:179)
+_CALENDAR_DAYS_PER_YEAR = 365  # scenario.ts calendarYears: whole days over 365 (F-5 / Q1)
 
 # Curve parity: same float arithmetic, same op order → machine-precision.
 _CURVE_ATOL = 1e-9
@@ -176,8 +176,9 @@ def _cumulative(port_daily: pd.Series) -> np.ndarray:
 
 
 def _calendar_years(first: str, last: str) -> float:
-    ms = (pd.Timestamp(last) - pd.Timestamp(first)).total_seconds() * 1000.0
-    return ms / (_CALENDAR_DAYS_PER_YEAR * 86_400_000.0) if ms > 0 else 0.0
+    # Whole days first to last date (floor, Timedelta.days) over 365, 0 when non-positive.
+    days = (pd.Timestamp(last) - pd.Timestamp(first)).days
+    return days / _CALENDAR_DAYS_PER_YEAR if days > 0 else 0.0
 
 
 def _kpis(port_daily: pd.Series, axis: list[str]) -> dict:

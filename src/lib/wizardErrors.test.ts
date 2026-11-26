@@ -2359,8 +2359,13 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * neither in `DESTRUCTIVE_ACTIONS`, so the destructive class is unchanged. The value
    * was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 104"), never
    * counted, and it moves in lockstep with the declaration in the SEAMUX-04 block.
+   * ⚠️ 104 → 105 (2026-11-25, Phase 225 SIGNINREFUSED): one arrival,
+   * `KEY_MT5_SIGN_IN_REFUSED`. Its actions are `request_call` and `expand_log`, neither
+   * in `DESTRUCTIVE_ACTIONS`, so the destructive class is unchanged. The value was READ
+   * OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 105 to be 104"), never counted, and
+   * it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 104;
+  const EXPECTED_TABLE_SIZE = 105;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3183,8 +3188,14 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * both emitting arms (a return before any write, or an INSERT the index refused). The
    * value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 103 to be 104"), never
    * counted, and it moves in lockstep with the declaration in the TRAP-4 block.
+   * ⚠️ 104 → 105 (2026-11-25, Phase 225 SIGNINREFUSED): one arrival,
+   * `KEY_MT5_SIGN_IN_REFUSED`. It takes no `FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`
+   * exemption: it makes no stored-state or notification claim (the broker's refusal is
+   * the only fact it states). The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
+   * ("expected 105 to be 104"), never counted, and it moves in lockstep with the
+   * declaration in the TRAP-4 block.
    */
-  const EXPECTED_TABLE_SIZE = 104;
+  const EXPECTED_TABLE_SIZE = 105;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -3831,7 +3842,7 @@ describe("[140.5-02 / SEAMPROSE-03] the four scope/permission wire codes, answer
     expect(
       classifyKeyValidationError(
         seamThrow(
-          "Key validation failed unexpectedly. Contact support if this persists.",
+          "Key validation failed unexpectedly. Use the contact form if this persists.",
           "VALIDATION_UNEXPECTED",
         ),
       ),
@@ -6999,7 +7010,11 @@ describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path t
     // Finish setup contradicts.
     expect(entry.cause).not.toMatch(/cannot build a new strategy/);
     expect(entry.cause).toMatch(/credentials again is refused until the saved key is disconnected/);
-    expect(entry.fix[1]).toMatch(/Where that row offers “Finish setup”, it builds the strategy from the stored key/);
+    // ⛔ SUPERSEDED 2026-11-25 (founder: entering a stored key means "I want to
+    // finalize the setup"): the Finish setup remedy now LEADS, as fix[0], and the
+    // "different account" bullet follows it. The intent stands: the cause names
+    // the act that fails and the fix still offers Finish setup.
+    expect(entry.fix[0]).toMatch(/Where that row offers “Finish setup”, it builds the strategy from the stored key/);
   });
 
   it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
@@ -7142,8 +7157,12 @@ describe("201 D-07: the wizard names the Strategies page, never My Strategies", 
     // conditional "If your account includes the Strategies page, look for this
     // account there…" is gone, because every role that reaches this refusal now
     // has that page. The 201 D-07 intent stands: the sentence names "Strategies".
+    // ⛔ SUPERSEDED 2026-11-25: the sentence now leads the list and says where the
+    // row sits ("below your strategies, on the last page if the list is paged",
+    // `StrategyTable.tsx` renders placeholders only on the last page). It still
+    // names "Strategies".
     expect(WIZARD_ERROR_COPY.KEY_ORPHANED.fix).toContain(
-      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
     );
     expect(WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.fix).toContain(
       "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
@@ -7216,6 +7235,42 @@ describe("[212-04] recogniseValidateAndEncryptCode — status decides who thrott
       ).toEqual({ code: expected, recognised: true });
     },
   );
+
+  // Phase 225 (SIGNINREFUSED) - the ONE named 424 the recogniser admits. Hand-typed (wire
+  // code, status) -> expected. The negatives are what make it a named exception rather
+  // than a status rule: the sibling `SIGN_IN_FAILED` and `MT5_TERMINAL_BUSY` stay
+  // unrecognised at 424, and the SAME wire code at a 5xx or a 400 does not take the arm.
+  it("MT5_SIGN_IN_REFUSED at 424 answers KEY_MT5_SIGN_IN_REFUSED, recognised, and only there", () => {
+    expect(
+      recogniseValidateAndEncryptCode({ code: "MT5_SIGN_IN_REFUSED" }, 424),
+    ).toEqual({ code: "KEY_MT5_SIGN_IN_REFUSED", recognised: true });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "MT5_SIGN_IN_REFUSED" }, 500),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "MT5_SIGN_IN_REFUSED" }, 400),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+    expect(
+      recogniseValidateAndEncryptCode({ code: "SIGN_IN_FAILED" }, 424),
+    ).toEqual({ code: "UNKNOWN", recognised: false });
+  });
+
+  it("KEY_MT5_SIGN_IN_REFUSED is not recoverable (no Retry) and says the broker refused, naming all three causes", () => {
+    const env = buildEnvelope("KEY_MT5_SIGN_IN_REFUSED", "corr-225");
+    expect(env.recoverable).toBe(false);
+    expect(env.human_message).toBe("Your broker refused this sign-in.");
+    // -6 cannot tell a wrong login, a wrong investor password and a wrong server
+    // apart, so the copy must not claim the server is the cause.
+    const text = [env.cause, ...env.debug_context].join(" ").toLowerCase();
+    expect(text).toContain("account number");
+    expect(text).toContain("investor");
+    expect(text).toContain("server");
+    expect(env.cause).not.toMatch(/did not (get far enough|complete)/i);
+    expect(env.cause).toContain("we cannot tell you which to check first");
+    // -6 also covers a refusal none of the three explains (a disabled account), so
+    // the card keeps the contact-form route its KEY_SIGN_IN_FAILED predecessor had.
+    expect(text).toContain("through the contact form");
+  });
 
   it("a verdict outside the caller-fault set, or at a 5xx, is UNKNOWN and NOT recognised", () => {
     // 424 transients keep the curated-cause path (their copy is un-audited on

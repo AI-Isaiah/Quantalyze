@@ -6,11 +6,11 @@ import { Term } from "@/components/ui/Term";
 import type { TermKey } from "@/lib/glossary";
 import { formatDay, formatMonth } from "@/lib/utils";
 import type { ComparatorBlock, ComparatorSummary, FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
-import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { formatCagrSpan, formatRecordLength } from "@/lib/factsheet/record-length";
 import { recordCoversWindow } from "@/lib/factsheet/compute";
 import { COMPARATOR_CALENDARS, isPastCoverage, startsAfterCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
-import { joinGuardPhrases } from "@/lib/factsheet/headline-basis";
+import { OPTIONS_CASH_WALLET_CAUSE, OPTIONS_CASH_WALLET_PHRASES, joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 import {
@@ -27,9 +27,10 @@ import {
   type FigureState,
   type RollingVerdict,
 } from "@/lib/figure-gate";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 import { pct, pctSigned, ppDelta, ratio, signed } from "./format";
 import { usePayload, useActiveComparator, useXRange } from "./factsheet-context";
-import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope } from "./basis-context";
+import { useBasisOrCash, useBasisSeriesView, useWindowedView, useAppliedLeverage, leverageApplies, type Basis, type RangeScope, type WindowedView } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
@@ -48,7 +49,12 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentManda
  *
  * Gates (UI-SPEC 1.1): the basis is cash settlement (under mark-to-market or
  * smoothed the figures come from that basis's series, not the stored headline),
- * and `twrChainBroken === true`. Then, once (UI-SPEC 1.3):
+ * and `twrChainBroken === true`, except for the one cause that needs no chain break:
+ * Phase 252 DERIBITOPTIONS, `headlineWithheldCause === "options_cash_wallet"`, an
+ * options book measured on the cash wallet. That arm is checked first and returns
+ * the "structural" variant (a withheld note that does not heal on its own: muted,
+ * no glyph) with the cause's own sentences, never the chain-break wording. Then,
+ * once (UI-SPEC 1.3):
  *   1. `headlineWithheld === true`  -> "withheld": a legacy mixed-basis row whose
  *      figures the read path has already nulled. Strip and Main Metrics only.
  *      D-14 (R2-03): `headlineWithheldCause` picks the sentence: "recomputing"
@@ -65,18 +71,23 @@ import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentManda
 export type HeadlineNoteSlot = "strip" | "stripRelative" | "main" | "returns" | "maxdd" | "cumulative" | "panel";
 
 export interface HeadlineNote {
-  variant: "dated" | "withheld";
+  variant: "dated" | "withheld" | "structural";
   text: string;
 }
 
 /** The warning glyph (U+26A0 and a space): rendered on the "withheld" variant only. */
 const WITHHELD_GLYPH = "⚠ ";
 
-/** Muted for a Dated note (a broken chain is permanent), amber for a Withheld one (recoverable). */
+/**
+ * Muted for a Dated note (a broken chain is permanent) and for a structural one (an options
+ * book measured on the cash wallet does not heal on its own), amber for a Withheld one
+ * (recoverable). DESIGN.md reserves the warning colour for transient recoverable states.
+ */
 export function headlineNoteColor(variant: HeadlineNote["variant"]): string {
   return variant === "withheld" ? "var(--color-warning, #B45309)" : "var(--color-text-muted, #64748B)";
 }
 
+/** The warning glyph is for the recoverable "withheld" variant only; "dated" and "structural" carry none. */
 export function headlineNoteGlyph(variant: HeadlineNote["variant"]): string {
   return variant === "withheld" ? WITHHELD_GLYPH : "";
 }
@@ -97,7 +108,21 @@ function coveredFromDate(dataQuality: NonNullable<FactsheetPayload["dataQuality"
  * the cells can never disagree about which rows are Withheld.
  */
 export function isHeadlineWithheld(dataQuality: FactsheetPayload["dataQuality"], basis: Basis): boolean {
-  return basis === "cash_settlement" && dataQuality?.twrChainBroken === true && dataQuality.headlineWithheld === true;
+  // Phase 252: no `twrChainBroken` conjunct. `headlineWithheld` was never set without it before,
+  // so existing rows read the same; the options-book cause withholds an intact chain too.
+  return basis === "cash_settlement" && dataQuality?.headlineWithheld === true;
+}
+
+/**
+ * Phase 252 (orchestrator decision 2026-11-25, revision round 1, W3) — the one withhold that
+ * ALSO holds inside a selected range: the options-book cause on the cash basis. Every slice of
+ * an options book's cash-wallet series carries the same artefact (open option positions left
+ * out of the valuation), so a slice cannot heal it, while a chain-broken Withheld row of any
+ * other cause keeps D-78's slice figures (a slice can start after the break). The strip, the
+ * rail, the benchmark cells and the range note all read this, so they cannot disagree.
+ */
+export function isRangeWithheld(dataQuality: FactsheetPayload["dataQuality"], basis: Basis): boolean {
+  return isHeadlineWithheld(dataQuality, basis) && dataQuality?.headlineWithheldCause === OPTIONS_CASH_WALLET_CAUSE;
 }
 
 /**
@@ -122,6 +147,16 @@ export function headlineCoverageNote(
   opts: { benchShown?: boolean } = {},
 ): HeadlineNote | null {
   if (basis !== "cash_settlement") return null;
+  // Phase 252 DERIBITOPTIONS: the options-book cause names its own reason and needs no chain
+  // break, so it is answered BEFORE the chain-broken early return and never reaches
+  // `joinGuardPhrases` (the chain-break wording cannot print over an intact chain).
+  if (isHeadlineWithheld(dataQuality, basis) && dataQuality?.headlineWithheldCause === OPTIONS_CASH_WALLET_CAUSE) {
+    if (slot === "panel") return { variant: "structural", text: OPTIONS_CASH_WALLET_PHRASES.panel };
+    if (slot === "strip" || slot === "stripRelative" || slot === "main") {
+      return { variant: "structural", text: OPTIONS_CASH_WALLET_PHRASES.headline };
+    }
+    return null;
+  }
   if (dataQuality?.twrChainBroken !== true) return null;
   const reasons = joinGuardPhrases(dataQuality.headlineGuardReasons ?? []);
   if (isHeadlineWithheld(dataQuality, basis)) {
@@ -226,6 +261,10 @@ export function PanelWithheldNote({
  *
  * Same gates as {@link headlineCoverageNote}. A chain-broken row with neither a
  * valid date nor the withheld flag (the unreachable arm 3) gets none.
+ *
+ * Phase 252 (W3): the options-book cause is withheld inside a range as well, with the named
+ * cash-wallet sentence (variant `structural`: muted, no glyph), whatever the range start. It
+ * needs no chain break and is answered first.
  */
 export function windowCoverageNote(
   dataQuality: FactsheetPayload["dataQuality"],
@@ -233,6 +272,11 @@ export function windowCoverageNote(
   rangeStart: string,
 ): HeadlineNote | null {
   if (basis !== "cash_settlement") return null;
+  // Phase 252 (W3): the options-book cause is withheld inside a range too, and needs no chain
+  // break, so it is answered before the chain-broken early return. Muted, no glyph.
+  if (isRangeWithheld(dataQuality, basis)) {
+    return { variant: "structural", text: OPTIONS_CASH_WALLET_PHRASES.range };
+  }
   if (dataQuality?.twrChainBroken !== true) return null;
   if (dataQuality.headlineWithheld === true) {
     return {
@@ -256,6 +300,8 @@ export function windowCoverageNote(
  * {@link headlineCoverageNote}: the cash basis, a chain-broken row, full history.
  *   - a Withheld row has no measured span to compare against: `null`, so every headline
  *     benchmark cell prints "—";
+ *   - the options-book cause (Phase 252) is Withheld on an intact chain too and ALSO inside a
+ *     selected range (`isRangeWithheld`), so its cells print "—" in both scopes;
  *   - a Dated row reads `summarySince`, the comparator over the covered returns from
  *     `{D}`. A block without the member (a re-derived view, whose strategy figures are
  *     whole-record too) keeps the whole-record summary;
@@ -269,7 +315,10 @@ export function headlineBenchSource(
   selected: boolean,
   block: ComparatorBlock,
 ): ComparatorSummary | null {
-  if (selected || basis !== "cash_settlement" || dataQuality?.twrChainBroken !== true) return block.summary;
+  if (basis !== "cash_settlement") return block.summary;
+  // Phase 252 (W3): the options-book cause is withheld inside a range as well as at full history.
+  if (isRangeWithheld(dataQuality, basis)) return null;
+  if (selected || dataQuality?.twrChainBroken !== true) return block.summary;
   if (dataQuality.headlineWithheld === true) return null;
   return block.summarySince !== undefined ? block.summarySince : block.summary;
 }
@@ -353,8 +402,15 @@ export function MetricsColumn({
   // panels that read the windowed view and keep their slice figure inside a zoom. Both come
   // from here, once, so no panel decides Withheld for itself.
   const fullHistoryWithheld = useFullHistoryWithheld();
-  const wholeRecordWithheld = !selected && fullHistoryWithheld;
+  // Phase 252 (W3, orchestrator decision 2026-11-25): the options-book cause is the one withhold
+  // that ALSO holds inside a selected range (`isRangeWithheld`): every slice of a cash-wallet
+  // series carries the artefact. This stays the one gate; no panel decides for itself.
+  const wholeRecordWithheld = fullHistoryWithheld && (!selected || isRangeWithheld(payload.dataQuality, railBasis));
   const wr = (formatted: string) => dashIf(wholeRecordWithheld, formatted);
+  // Phase 252 (W3): the seven headline scalars read the WINDOWED view inside a range (they are
+  // dashed at full history by the read path's nulls, not by `wr`), so for the options-book cause
+  // they get their own dash here, on the same `isRangeWithheld` verdict as `wholeRecordWithheld`.
+  const rw = (formatted: string) => dashIf(selected && isRangeWithheld(payload.dataQuality, railBasis), formatted);
   // Phase 237 FACT-01 (founder Q1): Worst 10 Drawdowns withholds its whole body on this same
   // verdict, decided once here. Inside a zoom (`wholeRecordWithheld` false) it keeps its own
   // windowed slice. The failed cause has no note, so the panel is not mounted at all.
@@ -438,6 +494,28 @@ export function MetricsColumn({
         ? shortTrackNote(scenarioMode ? "blend" : selected ? "range" : "record", gateWindowSpan ?? figureRec.spanDays ?? 0)
         : null;
   const gv = (value: number | null | undefined) => gatedValue(value, gateState);
+  // Phase 236 plan 11 (FIG-04, CONTEXT Q1): the span CAGR covers, one muted line under the CAGR
+  // row, only while the CAGR itself shows. A selected range states its own window, the first and
+  // last dates compute() annualized on. At full history the span is the one the engine stored
+  // beside the stored CAGR (the retained suffix on a Dated row); the stored keys describe the cash
+  // headline, so another basis never prints it. Review CR-03 (Q1: "the factsheet states the span
+  // CAGR covers"): where no stored span describes the CAGR shown, the span is the first and last
+  // dates of the figures the CAGR was computed over, `m.start` / `m.end` (compute() annualizes
+  // over exactly those two dates, so an emptied stretch between them stays counted). That covers
+  // the allocator book, the mark-to-market and smoothed bases, a row whose headline was not
+  // admitted, an older row without the keys, the USD view and the Scenario composer. One case
+  // states nothing: a stored cash headline with no stored keys on a chain-broken record, because
+  // that stored CAGR covers the post-break suffix while `m.start` is the whole record's first day.
+  const storedCashHeadline = railBasis === "cash_settlement" && payload.metricsByBasis?.cash_settlement != null;
+  const storedSuffixUnknown = storedCashHeadline && payload.dataQuality?.twrChainBroken === true;
+  // Phase 252's `rw` dashes CAGR inside a range on an options-book row; the span line never prints under a dash.
+  const cagrSpanText =
+    gv(m.cagr) === null || (selected && isRangeWithheld(payload.dataQuality, railBasis))
+      ? null
+      : selected
+        ? formatCagrSpan(m.start, m.end)
+        : (railBasis === "cash_settlement" ? formatCagrSpan(payload.cagrStart, payload.cagrEnd) : null) ??
+          (storedSuffixUnknown ? null : formatCagrSpan(m.start, m.end));
   // 194 D-16 (review round 2 WR-01): the benchmark's annualized cells are measured over the
   // comparator's OWN covered span, which can be under a year while the strategy's record is not
   // (a comparator whose data starts late). Its cells then carry the same muted note, naming the
@@ -607,7 +685,7 @@ export function MetricsColumn({
           <Kpm>
             <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
             <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
@@ -718,12 +796,19 @@ export function MetricsColumn({
               column. The 170.6 "need 90 days of overlap" line is gone; the one muted note
               above stands for both columns. D-19: the benchmark cells are withheld only with the strategy's TOTAL record (the same `gv`); no overlap or window length withholds them. */}
           <Kpm>
-            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pctSigned(m.cum_ret, 2)} bench={pctSigned(hb?.cum_ret, 2)} />
-            <Row term="cagr" label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pctSigned(gv(m.cagr), 2)} bench={pctSigned(gv(hb?.cagr), 2)} />
-            <Row term="volatility" label="Ann. Volatility" value={pct(gv(m.ann_vol), 2)} bench={pct(gv(hb?.ann_vol), 2)} />
-            <Row term="sharpe" label="Sharpe" value={ratio(gv(m.sharpe))} bench={ratio(gv(hb?.sharpe))} accent />
-            <Row term="sortino" label="Sortino" value={ratio(gv(m.sortino))} bench={ratio(gv(hb?.sortino))} />
-            <Row term="calmar" label="Calmar" value={ratio(gv(m.calmar))} bench={ratio(gv(hb?.calmar))} />
+            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={rw(pctSigned(m.cum_ret, 2))} bench={pctSigned(hb?.cum_ret, 2)} />
+            <Row term="cagr" label={withUnit("CAGR", payload.returnsUnit ?? null)} value={rw(pctSigned(gv(m.cagr), 2))} bench={pctSigned(gv(hb?.cagr), 2)} />
+            {cagrSpanText && (
+              <tr data-testid="cagr-span-row">
+                <td colSpan={3} className="pb-1.5 text-fixed-10 italic text-text-muted" data-testid="cagr-span">
+                  {cagrSpanText}
+                </td>
+              </tr>
+            )}
+            <Row term="volatility" label="Ann. Volatility" value={rw(pct(gv(m.ann_vol), 2))} bench={pct(gv(hb?.ann_vol), 2)} />
+            <Row term="sharpe" label="Sharpe" value={rw(ratio(gv(m.sharpe)))} bench={ratio(gv(hb?.sharpe))} accent />
+            <Row term="sortino" label="Sortino" value={rw(ratio(gv(m.sortino)))} bench={ratio(gv(hb?.sortino))} />
+            <Row term="calmar" label="Calmar" value={rw(ratio(gv(m.calmar)))} bench={ratio(gv(hb?.calmar))} />
             <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
             <Row term="kurtosis" label="Kurtosis" value={wr(ratio(m.kurt))} bench="" />
           </Kpm>
@@ -775,10 +860,10 @@ export function MetricsColumn({
         <Panel term="max_drawdown" title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           {maxDdSpan && <p className="mb-2 text-fixed-10 italic text-text-muted">{maxDdSpan.text}</p>}
           <Kpm>
-            <Row term="max_drawdown" label="Max Drawdown" value={pct(m.max_dd, 2)} bench={pct(hb?.max_dd, 2)} accent />
+            <Row term="max_drawdown" label="Max Drawdown" value={rw(pct(m.max_dd, 2))} bench={pct(hb?.max_dd, 2)} accent />
             <Row term="dd_duration" label="Longest DD (days)" value={wr(count(m.longest_dd))} bench={wr(count(b?.longest_dd))} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row label="Avg Win" value={wr(pctSigned(m.avg_win, 2))} bench="" />
             <Row label="Avg Loss" value={wr(pctSigned(m.avg_loss, 2))} bench="" />
           </Kpm>
@@ -1056,6 +1141,7 @@ function Row({
   accent,
   windowKey,
   term,
+  note,
 }: {
   label: string;
   value: string;
@@ -1065,10 +1151,15 @@ function Row({
   term?: TermKey;
   /** Phase 169.1 (D-27): the compute() field of a record-anchored return row. */
   windowKey?: "mtd" | "ytd" | "p3m" | "p6m" | "p1y";
+  /** Phase 236 (SFH #8): one muted line under the label that says why the value is a dash. */
+  note?: string;
 }) {
   return (
     <tr className="border-b border-border/30 last:border-0" data-window-key={windowKey}>
-      <td className="py-1.5 pr-2 text-text-2">{term ? <Term k={term}>{label}</Term> : label}</td>
+      <td className="py-1.5 pr-2 text-text-2">
+        {term ? <Term k={term}>{label}</Term> : label}
+        {note && <span className="block text-fixed-10 italic text-text-muted" data-testid="cvar-floor-note">{note}</span>}
+      </td>
       <td
         className={
           "py-1.5 px-2 text-right font-mono tabular-nums " +
@@ -1276,6 +1367,20 @@ export function RangeEyebrow({
  */
 export function isoToMonthDay(iso: string): string {
   return formatDay(iso);
+}
+
+/**
+ * Phase 236 FIG-03 (SFH #8): the CVaR 95% cell prints a bare dash below CVAR_MIN_OBS observations
+ * while VaR shows beside it. The note names that cause and no other: it appears only while the
+ * figure is not a number (NaN, or the null a JSON-cached payload turns it into) AND the record is
+ * under the floor. A selected window with enough observations always shows CVaR, so it never reaches
+ * the note; a WITHHELD window (a 1-day slice, or a payload with no annualization basis) dashes every
+ * metric for that cause, so it gets no note either. The 60 is the constant, never a literal.
+ */
+function cvarFloorNote(view: WindowedView): string | undefined {
+  return view.withheld === undefined && !Number.isFinite(view.strategyMetrics.cvar95) && view.strategyReturns.length < CVAR_MIN_OBS
+    ? `Needs ${CVAR_MIN_OBS} observations`
+    : undefined;
 }
 
 /**
@@ -1548,7 +1653,7 @@ function ExtendedMetricsPanel({
             <Row term="skew" label="Skew" value={wr(signed(m.skew))} bench="" />
             <Row term="kurtosis" label="Kurtosis (excess)" value={wr(ratio(m.kurt))} bench="" accent={m.kurt > 6} />
             <Row term="var_95" label="VaR 95%" value={wr(pctSigned(m.var95, 2))} bench="" />
-            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" />
+            <Row term="cvar_95" label="CVaR 95%" value={wr(pctSigned(m.cvar95, 2))} bench="" note={cvarFloorNote(view)} />
             <Row term="percentile" label="P5 (daily)" value={wr(pctSigned(q.p05, 2))} bench="" />
             <Row term="percentile" label="P95 (daily)" value={wr(pctSigned(q.p95, 2))} bench="" />
             <Row label="Median (daily)" value={wr(pctSigned(q.p50, 2))} bench="" />

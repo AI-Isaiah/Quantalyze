@@ -372,7 +372,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       wrapper: "optimizeScenarioWeights",
       budgetKey: "optimize-weights",
       path: "/api/optimize-weights",
-      invoke: (m) => m.optimizeScenarioWeights({}, "min_vol", WIRING_TENANT),
+      invoke: (m) => m.optimizeScenarioWeights({}, "min_vol", 252, WIRING_TENANT),
     },
     {
       // ZERO production callers today (VALIDATION §7.5 / M-5: latent, not

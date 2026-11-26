@@ -499,6 +499,48 @@ describe("C-5(b), C-7: a row with nothing to draw is never silently dropped", ()
   });
 });
 
+describe("Phase 252: an options book's column draws no curve and the note names the cash wallet", () => {
+  // Hand-typed: the sentence is the contract, not the implementation's string.
+  const OPTIONS_NOTE = (name: string) =>
+    `${name}: measured on the cash wallet, which leaves out open option positions, so no curve is drawn.`;
+
+  /** The item as the compare page hands it for a withheld column: the marker, even with a series on it. */
+  const markedItem = (id: string) => {
+    const base = item({ id, levels: curve(20, 1, 1.2), cumulativeReturn: 0.2 });
+    return {
+      ...base,
+      analytics: { ...base.analytics, headline_withheld_cause: "options_cash_wallet" } as unknown as StrategyAnalytics,
+    };
+  };
+
+  it("a marked item gets the options note and no line, no swatch", () => {
+    const { container } = render(<CompareEquityOverlay items={[markedItem("opt")]} />);
+    expect(captured.data).toEqual([]);
+    expect(swatchCount(container)).toBe(0);
+    expect(screen.getByText(OPTIONS_NOTE("Strategy opt"))).toBeInTheDocument();
+  });
+
+  it("the same item without the marker draws its line and carries no note (control)", () => {
+    const { container } = render(
+      <CompareEquityOverlay items={[item({ id: "opt", levels: curve(20, 1, 1.2), cumulativeReturn: 0.2 })]} />,
+    );
+    expect(swatchCount(container)).toBe(1);
+    expect(lastPoint("s0")).toBeCloseTo(20, 9);
+    expect(screen.queryByText(OPTIONS_NOTE("Strategy opt"))).toBeNull();
+  });
+
+  it("a marked item beside a clean one: the clean one still draws and only the marked one is noted", () => {
+    const { container } = render(
+      <CompareEquityOverlay
+        items={[item({ id: "ok", levels: curve(20, 1, 1.2), cumulativeReturn: 0.2 }), markedItem("opt")]}
+      />,
+    );
+    expect(swatchCount(container)).toBe(1);
+    expect(screen.getByText(OPTIONS_NOTE("Strategy opt"))).toBeInTheDocument();
+    expect(screen.queryByText(OPTIONS_NOTE("Strategy ok"))).toBeNull();
+  });
+});
+
 describe("D-07 agreement: the last tooltip string equals the CompareTable Cumulative Return cell", () => {
   it("holds for a clean, a chain-broken geometric and a chain-broken simple row at once", () => {
     const g = brokenGeometricLevels();

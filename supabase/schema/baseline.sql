@@ -2900,9 +2900,10 @@ BEGIN
   --      is that day with no rows (Phase 167.1.2.1.2 D-02, empty_day and
   --      same_day_empty below);
   --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
-  --      identity: a shared non-blank venue_account_id on one exchange, or an
-  --      account_shared_with_api_key_id marker of a shared kind, joined
-  --      transitively). A key with neither is its own account. Only the keys
+  --      identity: a shared non-blank venue_account_id on one exchange AND one
+  --      broker server (Phase 225 CONN-03), or an account_shared_with_api_key_id
+  --      marker of a shared kind, joined transitively). A key with neither is its
+  --      own account. Only the keys
   --      whose reading is the account's newest, and have rows on it,
   --      contribute (SFH-C4-01);
   --   4. the contributing keys' rows at their reading day, one token per
@@ -2940,19 +2941,52 @@ BEGIN
       SELECT k.id,
              lower(btrim(k.exchange)) AS exchange_norm,
              NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             NULLIF(k.venue_server, '') AS server_norm,
              k.account_share_kind,
              k.account_shared_with_api_key_id
         FROM api_keys k
        WHERE k.user_id = p_allocator_id
     ),
+    login_servers AS (
+      -- per exchange account id on one exchange: how many distinct set servers
+      -- its keys carry, and the smallest of them (the single one when the count
+      -- is one). Computed from owner_keys only, so it never sees another owner.
+      SELECT o.exchange_norm,
+             o.venue_norm,
+             count(DISTINCT o.server_norm) AS server_ct,
+             min(o.server_norm COLLATE "C") AS only_server
+        FROM owner_keys o
+       WHERE o.venue_norm IS NOT NULL
+       GROUP BY o.exchange_norm, o.venue_norm
+    ),
+    key_identity AS (
+      -- one canonical identity per key that carries a login, the same answer as
+      -- the Python account_identity_tokens and the TypeScript accountIdentityTokens.
+      -- NULL means the key is ambiguous (no server on a login that carries two or
+      -- more), and it then joins no account by identity.
+      SELECT k.id,
+             k.exchange_norm,
+             k.venue_norm,
+             CASE
+               WHEN k.server_norm IS NOT NULL THEN k.server_norm
+               WHEN l.server_ct = 0 THEN ''
+               WHEN l.server_ct >= 2 THEN NULL
+               ELSE l.only_server
+             END AS identity_server
+        FROM owner_keys k
+        JOIN login_servers l
+          ON l.exchange_norm = k.exchange_norm
+         AND l.venue_norm    = k.venue_norm
+    ),
     account_edges AS (
-      -- one exchange account id on one exchange
+      -- one exchange account id on one exchange, on one broker server
       SELECT a.id AS a, b.id AS b
-        FROM owner_keys a
-        JOIN owner_keys b
-          ON b.exchange_norm = a.exchange_norm
-         AND b.venue_norm    = a.venue_norm
-         AND b.id           <> a.id
+        FROM key_identity a
+        JOIN key_identity b
+          ON b.exchange_norm   = a.exchange_norm
+         AND b.venue_norm      = a.venue_norm
+         AND b.identity_server = a.identity_server
+         AND b.id             <> a.id
       UNION
       -- a shared-account marker naming another key of this owner, both ways
       SELECT m.id, m.account_shared_with_api_key_id
@@ -2968,7 +3002,7 @@ BEGIN
          AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
     ),
     known_account AS (
-      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      SELECT id FROM key_identity WHERE identity_server IS NOT NULL
       UNION
       SELECT a FROM account_edges
     ),
@@ -3414,7 +3448,7 @@ $_$;
 ALTER FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. Since 20261011120100 (Phase 170.4 WR-02) a key whose service-written native_unpriced marker (allocator_equity_derived) is dated after its newest rows reads as a day with no rows, exactly as the reader does. Since 20261027120000 (Phase 167.1.2.1.2 D-02) a key whose newest poll of any outcome is a clean poll that read nothing on its rows'' own day reads as a day with no rows, as the reader does. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
+COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. Since 20261011120100 (Phase 170.4 WR-02) a key whose service-written native_unpriced marker (allocator_equity_derived) is dated after its newest rows reads as a day with no rows, exactly as the reader does. Since 20261027120000 (Phase 167.1.2.1.2 D-02) a key whose newest poll of any outcome is a clean poll that read nothing on its rows'' own day reads as a day with no rows, as the reader does. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft). Since the Phase 225 CONN-03 re-base the account grouping reads the canonical (exchange, login, server) identity, so one login on two set servers is two accounts, as in accountIdentityTokens and account_identity_tokens.';
 
 
 
@@ -3438,16 +3472,16 @@ CREATE OR REPLACE FUNCTION "public"."computation_error_copy"("p_error_kind" "tex
     -- no automatic retry has happened and none is coming. Promising a retry
     -- here would be the thing that is false.
     WHEN 'permanent' THEN
-      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.'
+      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.'
     -- 'transient' and 'unknown' SHARE an arm, and the sameness is the honest
     -- part. Neither reaches 'failed_final' except through
     -- `v_attempts >= v_max_attempts`, so the one true statement about both is
     -- that the automatic retries were used up. Splitting them would spend two
     -- sentences implying a difference the user cannot act on.
     WHEN 'transient' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     WHEN 'unknown' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     -- 'orphaned' — the WORKER DIED holding the claim; the job itself never
     -- reached a verdict. Written ONLY by the hourly reaper
     -- (retention_compute_jobs_orphaned_running, re-registered by mig
@@ -3471,7 +3505,7 @@ CREATE OR REPLACE FUNCTION "public"."computation_error_copy"("p_error_kind" "tex
     -- Anything else: NULL, or a kind added after this migration. Says only what
     -- is true of every failure and claims nothing about retries.
     ELSE
-      'Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.'
+      'Analytics could not complete for this strategy. Retry the sync, or use the contact form if this persists.'
   END
 $$;
 
@@ -3479,7 +3513,7 @@ $$;
 ALTER FUNCTION "public"."computation_error_copy"("p_error_kind" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."computation_error_copy"("p_error_kind" "text") IS 'User-facing copy for strategy_analytics.computation_error, derived from compute_jobs.error_kind. Phase 162 / HONEST-01. Takes a KIND, never an error string: the range is four fixed literals, so nothing that goes in can come out. permanent -> will not resolve by retrying; transient/unknown -> automatic retries exhausted (they reach failed_final only via v_attempts >= v_max_attempts, so they share the one statement that is true of both); orphaned -> the worker died holding the claim, so the job never reached a verdict and the failure IS retryable (retry-positive copy, added with mig 20260826140000 which widens compute_jobs_error_kind_check and re-registers the hourly reaper to write it; before that the reaper wrote permanent and told those users that retrying would not help, which was false); anything else, including NULL -> a cautious default that claims nothing about retries. The raw diagnosis stays on compute_jobs.last_error, which is operator-only and is NOT read by sync_strategy_analytics_status. Mirrors analytics-service/services/allocator_positions.py sync_error_copy.';
+COMMENT ON FUNCTION "public"."computation_error_copy"("p_error_kind" "text") IS 'User-facing copy for strategy_analytics.computation_error, derived from compute_jobs.error_kind. Phase 162 / HONEST-01. Takes a KIND, never an error string: the range is four fixed literals, so nothing that goes in can come out. permanent -> will not resolve by retrying; transient/unknown -> automatic retries exhausted (they reach failed_final only via v_attempts >= v_max_attempts, so they share the one statement that is true of both); orphaned -> the worker died holding the claim, so the job never reached a verdict and the failure IS retryable (retry-positive copy, added with mig 20260826140000 which widens compute_jobs_error_kind_check and re-registers the hourly reaper to write it; before that the reaper wrote permanent and told those users that retrying would not help, which was false); anything else, including NULL -> a cautious default that claims nothing about retries. The raw diagnosis stays on compute_jobs.last_error, which is operator-only and is NOT read by sync_strategy_analytics_status. Mirrors analytics-service/services/allocator_positions.py sync_error_copy. Since Phase 222 (mig 20261125212222) every channel-offering arm names the contact form.';
 
 
 
@@ -13827,7 +13861,7 @@ COMMENT ON COLUMN "public"."api_keys"."history_reconstruct_attempts" IS 'Phase 1
 
 
 
-COMMENT ON COLUMN "public"."api_keys"."venue_server" IS 'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. NOT granted to anon or authenticated, and not part of the browser column allowlist.';
+COMMENT ON COLUMN "public"."api_keys"."venue_server" IS 'Phase 225 ONEACCOUNTONCE (CONN-03, founder ruling Q2). The normalised broker server of an MT5 key (trimmed, lower-cased), stored beside the bare login in venue_account_id so the same login on two different brokers is two different accounts. PLAINTEXT by founder ruling: a broker server name is not a credential. NULL means "not captured yet" and every app fence treats NULL as a wildcard that matches any server; a blank or over-128-character value is refused by api_keys_venue_server_valid. MT5 only. READABLE BY authenticated through a column grant (20261125132334, plan 13, founder answer "Owner-only read" 2026-11-25), scoped to the key''s owner by the existing owner-only RLS on api_keys, so the TypeScript identity twin reads the server the way it reads venue_account_id. anon holds NO privilege on it, and no browser role may write it: the analytics worker and the service-role connect writers are its only writers.';
 
 
 
@@ -19842,6 +19876,10 @@ GRANT SELECT("history_reconstructed_at") ON TABLE "public"."api_keys" TO "authen
 
 
 GRANT SELECT("history_reconstruct_attempts") ON TABLE "public"."api_keys" TO "authenticated";
+
+
+
+GRANT SELECT("venue_server") ON TABLE "public"."api_keys" TO "authenticated";
 
 
 

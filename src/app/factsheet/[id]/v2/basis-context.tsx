@@ -401,7 +401,8 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
     // Phase 169.1 (D-27): the argument object comes from the ONE builder the window
     // arm also calls, so the two re-derives cannot drift.
-    const lb = deriveSeriesBundle(levered, rederiveArgs(base));
+    // CR-01: the levered series is the whole record, so it carries the total-record CVaR floor.
+    const lb = deriveSeriesBundle(levered, { ...rederiveArgs(base), totalRecordSeries: true });
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
     // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the
@@ -785,12 +786,16 @@ export function useAppliedLeverage(): AppliedLeverage {
  *   - `dataQuality.returnsConventionOverride` (SFH H-2): the stored figure was
  *     computed under a `simple` or active-day convention the re-derive cannot
  *     reproduce.
+ *   - `dataQuality.headlineWithheld` (Phase 252, any cause): a withheld headline has no
+ *     stored figure for the re-derive to agree with, so the what-if is withheld as for a
+ *     chain-broken row. Composites are already ineligible; this closes the single-key case.
  * The view then returns `base` by reference at every L, as for a composite.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
     payload.dataQuality?.twrChainBroken !== true &&
+    payload.dataQuality?.headlineWithheld !== true &&
     payload.dataQuality?.returnsConventionOverride !== true &&
     payload.periodsPerYear != null &&
     !(
@@ -904,7 +909,11 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // the range pointed past EOF — every past-EOF citation into that file is
       // that ONE event, not one independent rot per citer. Anchored on the symbol
       // instead: a name survives the next shrink, a coordinate does not.
-      return "Mark-to-market unavailable: composites that include options positions report cash settlement only.";
+      //
+      // Phase 252 (DERIBITOPTIONS): this reason also withholds the cash-wallet headline, so the
+      // earlier wording (that such composites report their cash basis) was false beside it. The sentence now says
+      // so. Steady tone (`mtmReasonTone`), and no flag name.
+      return "Mark-to-market unavailable: this strategy's open option positions are not valued at market prices, so its headline figures measured on the cash wallet are withheld.";
     case "mtm_basis_unavailable_for_venue":
       return "Mark-to-market unavailable for this venue.";
     case "mtm_summary_coverage_incomplete":

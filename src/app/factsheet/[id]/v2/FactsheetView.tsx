@@ -84,6 +84,7 @@ import {
   headlineBenchSource,
   headlineNoteGlyph,
   isHeadlineWithheld,
+  isRangeWithheld,
   useFullHistoryWithheld,
   windowCoverageNote,
 } from "./MetricsColumn";
@@ -1044,7 +1045,9 @@ function PerformanceCharts({ variant = "all" }: { variant?: PerformanceVariant }
   // avg the rail dashes. The `view` passed is the basis view `TimeSeriesChart` slices over.
   const { xRange } = useXRange();
   const zoomed = resolveRangeScope(xRange, payload.dates.length, view).kind === "selected";
-  const railAvgWithheld = fullHistoryWithheld && !zoomed;
+  // Phase 252 (review WR-02): the options-book cause also holds inside a range (`isRangeWithheld`),
+  // the rail's own `wholeRecordWithheld` term, so the label and the rail dash the same figure.
+  const railAvgWithheld = fullHistoryWithheld && (!zoomed || isRangeWithheld(payload.dataQuality, basisForNote));
   // Phase 237 FACT-01 (CONTEXT "Follow-ons of the FACT-01 ruling", UI-SPEC 1.6 rows 3 and 4): the
   // Worst 10 chart's bands are the whole record even inside a zoom, the same drawdowns the rail's
   // Worst 10 table withholds at full history, so its gate is `fullHistoryWithheld` (NOT the
@@ -2187,7 +2190,12 @@ function KpiStrip({
         ann_vol: pct(gv(hb?.ann_vol), 1),
       }
     : null;
-  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean; bench?: string; term?: TermKey }> = [
+  // Phase 252 (W3, orchestrator decision 2026-11-25): inside a selected range the options-book
+  // cause withholds the seven cells (and alpha and IR, below) with the same named reason as at
+  // full history, because every slice of a cash-wallet series carries the artefact. A
+  // chain-broken Withheld row of another cause keeps its slice figures (D-78).
+  const rangeWithheld = selected && isRangeWithheld(payload.dataQuality, basis);
+  const rawItems: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean; bench?: string; term?: TermKey }> = [
     { label: withUnit("Cum. Return", returnsUnit), value: formatSignedPercent(m.cum_ret, 1), tone: percentTone(m.cum_ret, 1), unitLabel, bench: benchLines?.cum_ret },
     { label: withUnit("CAGR", returnsUnit), value: formatSignedPercent(gv(m.cagr), 1), tone: percentTone(gv(m.cagr), 1), unitLabel, bench: benchLines?.cagr, term: "cagr" },
     { label: "Sharpe", value: num(gv(m.sharpe)), bench: benchLines?.sharpe, term: "sharpe" },
@@ -2196,6 +2204,7 @@ function KpiStrip({
     { label: "Max DD", value: formatUnsignedPercent(m.max_dd, 1), tone: percentTone(m.max_dd, 1) === "negative" ? "negative" : undefined, bench: benchLines?.max_dd, term: "max_drawdown" },
     { label: "Ann. Vol", value: pct(gv(m.ann_vol), 1), bench: benchLines?.ann_vol, term: "volatility" },
   ];
+  const items = rangeWithheld ? rawItems.map((it) => ({ ...it, value: "—", tone: undefined })) : rawItems;
   // Hoisted from the α/IR block below: the flat-leg line under the strip is shown only
   // when those cells show the joint, so it reads the same predicate.
   const suppressRelative =
@@ -2208,7 +2217,9 @@ function KpiStrip({
   // scope as the note's slot: not inside a selected window (D-78: there the note is
   // `windowCoverageNote`'s and the cells are the slice's own joint) and not under a
   // what-if (a chain-broken row is not leverage-eligible, so this mirrors `spanNote`).
-  const relativeWithheld = !selected && !leverageApplied && isHeadlineWithheld(payload.dataQuality, basis);
+  //
+  // Phase 252 (W3): `rangeWithheld` adds the one cause withheld inside a range too.
+  const relativeWithheld = (!selected || rangeWithheld) && !leverageApplied && isHeadlineWithheld(payload.dataQuality, basis);
   if ((j || jointWithheld || keepRelativeSlots) && cmpKey !== "none") {
     // F5 (phase 103) + Phase 107 (LEV-BB): α / β / IR FOLLOW the active basis AND
     // leverage via the view's joint (above), matching §IV. At L≠1 the view re-derives

@@ -54,10 +54,12 @@ import sentry_sdk
 
 from services.mt5_client import (
     HOLDER_HOUSE,
+    HOLDER_VALIDATION,
     Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
     Mt5LoginRefusedError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     _note_terminal_holder,
 )
@@ -304,6 +306,54 @@ def assert_expected_login(info: dict[str, Any], *, login: int) -> None:
         raise Mt5AccountMismatchError(login, _actual)
 
 
+def assert_expected_server(info: dict[str, Any], *, login: int, server: str) -> None:
+    """Phase 225 plan 18 (CONTEXT Q6 item 2) — the SERVER bracket, run beside every
+    ``assert_expected_login``: the session just opened must be on the REQUESTED
+    broker server as well as the requested login, or nothing is stored.
+
+    Why the login bracket alone is not enough: ``login(login, password, server)``
+    returning success does not prove which server the terminal ended up on. The MT5
+    Python docs leave the already-connected case open:
+
+      * ``login`` (https://www.mql5.com/en/docs/python_metatrader5/mt5login_py) —
+        ``server`` is optional, "if no server is set, the last used server is
+        applied automatically"; the return is True on a successful connection.
+      * ``initialize`` (.../mt5initialize_py) — with no server, the one saved in
+        the terminal database for that account is applied; the page says nothing
+        about a terminal that is already connected.
+      * ``account_info`` (.../mt5accountinfo_py) — a named tuple whose fields
+        include ``login`` and ``server``, or None on error.
+      * ``last_error`` (.../mt5lasterror_py) — the error-code table; this module
+        quotes no code from it (``mt5_validation`` stays authoritative).
+
+    So the session's own ``account_info().server`` is the proof, compared through
+    ``normalise_mt5_server`` (trim + case-fold, the known-server pre-check's own
+    normaliser) so a correct server spelled with other case or surrounding spaces
+    still passes. A missing, non-string or blank server FAILS LOUD, exactly as a
+    missing login does. A mismatch raises ``Mt5ServerMismatchError`` — a subclass
+    of ``Mt5AccountMismatchError``, so both callers' existing transient, no-park,
+    never-valid disposition applies without a new arm. The raise carries only the
+    login; no server value is ever formatted into it or logged here.
+    """
+    if mt5_session_server_verdict(info, server=server) is not True:
+        raise Mt5ServerMismatchError(login)
+
+
+def mt5_session_server_verdict(info: dict[str, Any], *, server: str) -> bool | None:
+    """Is the session's ``account_info().server`` the requested server?
+
+    True or False when the reported server is a non-blank ``str`` (compared through
+    ``normalise_mt5_server``); None when it is absent, non-string or blank. The one
+    predicate behind both ``assert_expected_server`` (which refuses anything but
+    True) and ``mt5_read.log_mt5_poll_server_verdict`` (which only logs it). Total
+    over every shape of ``info["server"]``; never mutates ``info``.
+    """
+    reported = info.get("server")
+    if isinstance(reported, str) and reported.strip():
+        return normalise_mt5_server(reported) == normalise_mt5_server(server)
+    return None
+
+
 def read_terminal(client: Mt5Client, *, log_prefix: str) -> dict[str, Any] | None:
     """The terminal's own state, or ``None`` if it could not be read.
 
@@ -390,6 +440,7 @@ def run_probe(
     investor_pw: str,
     server: str,
     log_prefix: str,
+    site: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
     """Log in, read the account + terminal, and probe capability ONCE.
 
@@ -402,10 +453,26 @@ def run_probe(
     router maps them onto HTTP statuses and the adapter onto a
     ``ValidationResult`` / a propagated transient, and those dispositions
     deliberately stay at the two call sites.
+
+    ⭐ 225-20 WR-01 — ``site`` (the caller's validate-site literal) is used ONLY for
+    the one log-only server-verdict line written after the PRE login bracket.
     """
     client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
     info = client.account_info()  # proves auth + read
     assert_expected_login(info, login=login)  # PRE-probe bracket
+    # ⭐ 225-20 WR-01 — LOG-ONLY server verdict on the VALIDATION terminal, the one
+    # PR-2c's enforcement runs on (the poll sites' lines come from the worker
+    # gateway's terminal, a proxy). Written once per probe, on the snapshot whose
+    # login the bracket above just accepted. It refuses nothing itself; the
+    # ``assert_expected_server`` bracket right after it is the refusal (225-18), so
+    # a refused session still writes its verdict line first. The import is local
+    # because ``mt5_read`` imports this module.
+    from services.mt5_read import log_mt5_poll_server_verdict
+
+    log_mt5_poll_server_verdict(
+        info, requested_server=server, site=site, holder=HOLDER_VALIDATION
+    )
+    assert_expected_server(info, login=login, server=server)  # PRE, same snapshot
     # D-31: the TERMINAL's own state, read once ATTACHED (it describes the
     # terminal we are logged into) and INSIDE the PRE/POST login bracket so the
     # whole probe stays framed by the account-mismatch guard.
@@ -451,10 +518,16 @@ def run_probe(
         # The POST bracket still runs: the terminal read we are about to classify
         # on must belong to OUR account, exactly as the probe result would have
         # had to.
-        assert_expected_login(client.account_info(), login=login)
+        # Phase 225 plan 18: ONE snapshot per bracket, so login and server are
+        # judged on the same reading of the terminal.
+        post = client.account_info()
+        assert_expected_login(post, login=login)
+        assert_expected_server(post, login=login, server=server)
         return info, {}, terminal
     probe = client.order_check(mt5_probe_request())  # PROBE ONLY
-    assert_expected_login(client.account_info(), login=login)  # POST-probe bracket
+    post = client.account_info()
+    assert_expected_login(post, login=login)  # POST-probe bracket
+    assert_expected_server(post, login=login, server=server)
     return info, probe, terminal
 
 
@@ -513,6 +586,7 @@ _PARK_ALERT_CAUSES: Final[frozenset[str]] = frozenset(
         "probe_in_flight",
         "probe_session_abandoned",
         "probe_account_mismatch",
+        "probe_server_mismatch",
         "budget_exhausted",
         _PARK_ALERT_UNRECOGNISED_CAUSE,
     }
@@ -788,7 +862,7 @@ def _warn_park_bridge_glitch(*, site: str) -> None:
 
 def report_park_skipped(cause: str, *, site: str) -> None:
     """A call-site gate refused to park (``probe_in_flight``,
-    ``probe_session_abandoned``, ``probe_account_mismatch``,
+    ``probe_session_abandoned``, ``probe_account_mismatch``, ``probe_server_mismatch``,
     ``budget_exhausted``) or the park's own ceiling fired (``ceiling``). Loud,
     never silent; never raises."""
     _alert_park_failed(cause, site=site)

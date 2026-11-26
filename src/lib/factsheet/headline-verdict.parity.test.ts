@@ -4,8 +4,10 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { readSingleKeyBasisOpts } from "./composite-read-path";
+import { applyHeadlineBasis, readSingleKeyBasisOpts } from "./composite-read-path";
 import { computeOgHeadline } from "./og-metrics";
+import { BASIS_KPI_MAP } from "./basis-metrics";
+import { headlineCoverageNote, headlineNoteColor, headlineNoteGlyph } from "@/app/factsheet/[id]/v2/MetricsColumn";
 
 /**
  * Phase 164.6.6.3.3 round 2 (SFH-R2-01, D-03, D-06: "the card equals the
@@ -140,5 +142,127 @@ describe("clean and Dated rows are unchanged on both surfaces", () => {
     expect(p.dataQuality?.headlineWithheld).toBeUndefined();
     const c = card(row, {});
     expect(Number.isFinite(c.sharpe) && Number.isFinite(c.maxDd) && Number.isFinite(c.cagr)).toBe(true);
+  });
+});
+
+/**
+ * Phase 252 DERIBITOPTIONS plan 01 (SC-2): the row the founder saw on PROD, a private
+ * Deribit options composite whose cash-wallet series printed cumulative +1636172.7% under
+ * a "measured since Dec 16, 2025" note. The trigger is the producer's reason
+ * (`mtm_gated_reason: "unsmoothed_options_book"`), decided by one predicate and applied
+ * FIRST in `headlineVerdict`, so it beats `dated` and needs no chain break. No numeric
+ * input exists anywhere in it.
+ */
+describe("252 SC-2: an options book measured on the cash wallet is withheld on the page, the composite arm, the note and the card", () => {
+  const REASON = "unsmoothed_options_book";
+  const EVIDENCE = {
+    composite: true,
+    twr_chain_broken: true,
+    headline_since: "2025-12-16",
+    mtm_gated_reason: REASON,
+  };
+  const INTACT_CHAIN = { composite: true, mtm_gated_reason: REASON };
+  const NO_REASON = { composite: true, twr_chain_broken: true, headline_since: "2025-12-16" };
+
+  // The debug-session wallet-shape days, typed by hand from
+  // analytics-service/tests/fixtures/deribit_option_round_trip.py (cash daily returns
+  // -0.4839, +0.0280, +3.3339), placed at the head of an otherwise ordinary 400-day record.
+  const WALLET_SERIES = SERIES.map((r, i) => ({
+    ...r,
+    value: i === 0 ? -0.4839 : i === 1 ? 0.028 : i === 2 ? 3.3339 : r.value,
+  }));
+  const walletCard = (dqf: Row) =>
+    computeOgHeadline(WALLET_SERIES, "crypto", { ...STORED_ROW, data_quality_flags: dqf });
+
+  const HEADLINE_SENTENCE =
+    "Headline figures withheld: this strategy trades options, and its returns are measured on the cash wallet, which leaves out the market value of open option positions.";
+  const PANEL_SENTENCE =
+    "Withheld: this panel is measured on the cash wallet, which leaves out the market value of open option positions.";
+
+  it("anti-vacuity: the same series and stored row WITHOUT the reason give finite card figures and a finite page cumulative_return", async () => {
+    const noReasonIntact = { composite: true };
+    const c = walletCard(noReasonIntact);
+    expect(Number.isFinite(c.sharpe) && Number.isFinite(c.cagr) && Number.isFinite(c.maxDd)).toBe(true);
+    const p = await page(STORED_ROW, noReasonIntact);
+    expect(p.metricsByBasis?.cash_settlement?.cumulative_return).toBe(0.4);
+  });
+
+  it("the evidence shape (chain broken, dated, reason) is withheld, not dated: seven scalars null, cause named, chain flag kept", async () => {
+    const p = await page(STORED_ROW, EVIDENCE);
+    for (const { serverKey } of BASIS_KPI_MAP) {
+      expect(p.metricsByBasis?.cash_settlement?.[serverKey], serverKey).toBeNull();
+    }
+    expect(p.dataQuality).toMatchObject({
+      headlineWithheld: true,
+      headlineWithheldCause: "options_cash_wallet",
+      twrChainBroken: true,
+    });
+    expect(p.dataQuality?.headlineCoversFrom).toBeUndefined();
+  });
+
+  it("the same flags with the chain keys removed are withheld too, and carry no twrChainBroken key", async () => {
+    const p = await page(STORED_ROW, INTACT_CHAIN);
+    for (const { serverKey } of BASIS_KPI_MAP) {
+      expect(p.metricsByBasis?.cash_settlement?.[serverKey], serverKey).toBeNull();
+    }
+    expect(p.dataQuality).toMatchObject({ headlineWithheld: true, headlineWithheldCause: "options_cash_wallet" });
+    expect(p.dataQuality).not.toHaveProperty("twrChainBroken");
+  });
+
+  it("a not-applicable stored headline (failed) still withholds with the options cause, not 'failed'", async () => {
+    const row = { ...STORED_ROW, computation_status: "failed" };
+    const p = await quiet(() => page(row, INTACT_CHAIN));
+    expect(p.dataQuality?.headlineWithheldCause).toBe("options_cash_wallet");
+    expect(p.metricsByBasis?.cash_settlement?.cumulative_return).toBeNull();
+  });
+
+  it("the composite arm's own call redacts every BASIS_KPI_MAP key and names the cause", () => {
+    const headline = Object.fromEntries(BASIS_KPI_MAP.map(({ serverKey }) => [serverKey, 1.5]));
+    const applied = applyHeadlineBasis(headline, EVIDENCE, { composite: true });
+    expect(applied.redacted).toBe(true);
+    for (const { serverKey } of BASIS_KPI_MAP) expect(applied.headline[serverKey], serverKey).toBeNull();
+    expect(applied.quality.headlineWithheldCause).toBe("options_cash_wallet");
+    const intact = applyHeadlineBasis(headline, INTACT_CHAIN, { composite: true });
+    expect(intact.redacted).toBe(true);
+    expect(intact.quality).not.toHaveProperty("twrChainBroken");
+  });
+
+  it("the card prints three dashes for the evidence shape and for the intact-chain shape", () => {
+    expect(allNaN(walletCard(EVIDENCE))).toBe(true);
+    expect(allNaN(walletCard(INTACT_CHAIN))).toBe(true);
+    // The same chain break without the reason stays the dated reading (stored Sharpe kept).
+    expect(walletCard(NO_REASON).sharpe).toBe(1.5);
+  });
+
+  it("the note names the reason in muted text with no glyph, on the strip, strip-relative and Main Metrics slots", async () => {
+    const p = await page(STORED_ROW, EVIDENCE);
+    for (const slot of ["strip", "stripRelative", "main"] as const) {
+      expect(headlineCoverageNote(p.dataQuality, "cash_settlement", slot), slot).toEqual({
+        variant: "structural",
+        text: HEADLINE_SENTENCE,
+      });
+    }
+    expect(headlineCoverageNote(p.dataQuality, "cash_settlement", "panel")).toEqual({
+      variant: "structural",
+      text: PANEL_SENTENCE,
+    });
+    for (const slot of ["returns", "maxdd", "cumulative"] as const) {
+      expect(headlineCoverageNote(p.dataQuality, "cash_settlement", slot), slot).toBeNull();
+    }
+    expect(headlineNoteColor("structural")).toBe("var(--color-text-muted, #64748B)");
+    expect(headlineNoteGlyph("structural")).toBe("");
+  });
+
+  it("the intact-chain shape names the reason, never the chain-break wording", async () => {
+    const p = await page(STORED_ROW, INTACT_CHAIN);
+    const note = headlineCoverageNote(p.dataQuality, "cash_settlement", "strip");
+    expect(note?.text).toBe(HEADLINE_SENTENCE);
+    expect(note?.text).not.toMatch(/chain|earlier history/);
+  });
+
+  it("off the cash basis the note is null: a smoothed or mark-to-market basis is not the stored cash headline", async () => {
+    const p = await page(STORED_ROW, EVIDENCE);
+    expect(headlineCoverageNote(p.dataQuality, "smoothed_mtm", "strip")).toBeNull();
+    expect(headlineCoverageNote(p.dataQuality, "mark_to_market", "main")).toBeNull();
   });
 });

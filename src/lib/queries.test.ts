@@ -227,6 +227,7 @@ import {
   notSyncingIdentityPendingKeyIds,
   identityPendingKeyIds,
   deriveKeyDataGapsField,
+  marksIncludedKeys,
 } from "./queries";
 import type { SupportedExchange } from "./utils";
 import { EMPTY_ANALYTICS } from "./utils";
@@ -359,7 +360,11 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       .replace("data_quality_flags->last_success_snapshot->flags->>native_unit", "")
       // AMENDED 2026-11-07, Phase 194 plan 06 (D-15): ONE more flags scalar, the
       // date a chain-broken headline starts. A date string, never the blob.
-      .replace("data_quality_flags->>headline_since", "");
+      .replace("data_quality_flags->>headline_since", "")
+      // AMENDED 2026-11-25, Phase 252 (D-02): TWO more reason scalars, a closed-vocabulary string
+      // each, the live flags' and the snapshot's. Text scalars, never the blob or the snapshot object.
+      .replace("data_quality_flags->>mtm_gated_reason", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason", "");
     expect(withoutAllowed).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
@@ -431,6 +436,22 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
     }
   });
 
+  it("carries the options-book reason as TWO scalar aliases, each exactly once, never an object (phase 252 D-02, T-252-09)", async () => {
+    const { cols } = await captureSelect();
+    // WHY: the list judges the options-book withhold on the generation of the figures it shows, so
+    // it needs the live flags' reason and the snapshot's. Each is one `->>` text scalar of a closed
+    // vocabulary; the flags blob, the snapshot object and its `flags` object never cross to an
+    // anonymous reader (T-194-35).
+    for (const alias of [
+      "mtm_gated_reason:data_quality_flags->>mtm_gated_reason",
+      "last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
+    ]) {
+      expect(cols.split(alias).length - 1, alias).toBe(1);
+    }
+    // Both end in `->>`: a text scalar, so a nested object can never be the projected value.
+    expect(cols).not.toMatch(/mtm_gated_reason:data_quality_flags->(?!>mtm_gated_reason|last_success_snapshot->flags->>mtm_gated_reason)/);
+  });
+
   it("carries the D-15 record as exactly three scalar aliases, two dates and one count, never an array or a blob (phase 194 plan 06, T-194-10)", async () => {
     const { embed } = await captureSelect();
     // WHY: the list judges each row's TOTAL record (figure-gate.ts). That needs the
@@ -451,9 +472,11 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       [
         "data_quality_flags->>cumulative_method",
         "data_quality_flags->>headline_since",
+        "data_quality_flags->>mtm_gated_reason",
         "data_quality_flags->>native_unit",
         "data_quality_flags->last_success_snapshot->>computed_at",
         "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
+        "data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
         "data_quality_flags->last_success_snapshot->flags->>native_unit",
         "metrics_json->record_observations",
         "metrics_json->three_month",
@@ -2400,6 +2423,7 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     id: string,
     over: Partial<{
       venue_account_id: string | null;
+      venue_server: string | null;
       sync_status: string | null;
       exchange: string;
     }> = {},
@@ -2412,6 +2436,7 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     last_sync_at: "2026-10-09T00:00:00Z",
     disconnected_at: null,
     venue_account_id: "venue_account_id" in over ? over.venue_account_id! : `va-${id}`,
+    venue_server: over.venue_server ?? null,
     account_share_kind: null,
     account_shared_with_api_key_id: null,
   });
@@ -2523,6 +2548,44 @@ describe("keyDataGaps: the server derives which key is missing which days (198 D
     });
   });
 
+  // Phase 225 plan 15 (CONN-03, CONTEXT Q6): one login on two set servers is two
+  // accounts. The gap line must never name a key on another server of the login.
+  describe("duplicate_account lines read the server-aware identity (225 CONN-03)", () => {
+    const dupPhase07 = {
+      equityHistoryState: "rebuilding" as const,
+      equityHistoryRebuildReason: "duplicate_account" as const,
+      equityHistoryNotSyncingKeyIds: [],
+      failingKeyExits: [],
+      equityDailyPoints: [],
+    };
+
+    it("names only the two keys on L srv-a, never the key on L srv-b", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K2", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K3", { venue_account_id: "L1", venue_server: "srv-b", exchange: "mt5" }),
+      ];
+      const out = deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12");
+      expect(out.map((g) => g.apiKeyIds)).toEqual([["K1", "K2"]]);
+    });
+
+    it("names nobody when the two keys are the same login on two servers", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", venue_server: "srv-a", exchange: "mt5" }),
+        key("K2", { venue_account_id: "L1", venue_server: "srv-b", exchange: "mt5" }),
+      ];
+      expect(deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12")).toEqual([]);
+    });
+
+    it("does not group two exchanges that happen to share an account id", () => {
+      const keys = [
+        key("K1", { venue_account_id: "L1", exchange: "okx" }),
+        key("K2", { venue_account_id: "L1", exchange: "bybit" }),
+      ];
+      expect(deriveKeyDataGapsField(keys, dupPhase07, {}, "2026-10-12")).toEqual([]);
+    });
+  });
+
   describe("the ready arm", () => {
     it("runs a failing exit from the day after its last counted day to the curve's last day", () => {
       const keys = [key("K1"), key("K2")];
@@ -2616,5 +2679,91 @@ describe("shapeRowAnalytics — native_unit for the StrategyTable chip", () => {
       const out = shape({ computation_status, native_unit: "BTC", data_quality_flags: { native_unit: "BTC" } });
       expect(out.native_unit ?? null).toBeNull();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 225 plan 15 (CONN-03, CONTEXT Q6). marksIncludedKeys decides which
+// departed keys the drawn curve counts, with the same identity as the derive:
+// one login on two set servers is two accounts. The rows are the owner's key
+// list as getUserApiKeys returns it, so venue_server must reach the decision.
+// ---------------------------------------------------------------------------
+describe("marksIncludedKeys: the departed-history decision is server-aware (225 CONN-03)", () => {
+  const row = (
+    id: string,
+    over: { venue_server: string | null; disconnected_at?: string | null },
+  ) =>
+    ({
+      id,
+      user_id: "user-1",
+      exchange: "mt5",
+      label: id,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: null,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: over.disconnected_at ?? null,
+      venue_account_id: "L1",
+      venue_server: over.venue_server,
+      account_shared_with_api_key_id: null,
+      account_share_kind: null,
+      history_inclusion: null,
+      account_currency: null,
+      account_balance_native: null,
+      account_balance_usdt_close_date: null,
+      history_reconstructed_at: null,
+      history_reconstruct_attempts: 0,
+    }) as unknown as Parameters<typeof marksIncludedKeys>[0][number];
+  const days = (from: string, to: string) => [
+    { date: from, value: 0.01 },
+    { date: to, value: 0.01 },
+  ];
+  const GONE = "2026-03-02T00:00:00Z";
+
+  it("a departed key on L srv-a beside a live key on L srv-b is its own account, so it counts", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: "srv-a", disconnected_at: GONE }),
+        row("k-live", { venue_server: "srv-b" }),
+      ],
+      { "k-gone": days("2026-01-05", "2026-03-01"), "k-live": days("2026-01-01", "2026-03-10") },
+      ["k-live"],
+    );
+    // Under the login-only identity the live key (first day 2026-01-01) would
+    // bound the departed key to 2025-12-31 and it would not count.
+    expect(out.departedIncluded.has("k-gone")).toBe(true);
+  });
+
+  it("a departed key on the SAME server as the live key is still bounded by it", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: "srv-a", disconnected_at: GONE }),
+        row("k-live", { venue_server: "srv-a" }),
+      ],
+      { "k-gone": days("2026-01-05", "2026-03-01"), "k-live": days("2026-01-01", "2026-03-10") },
+      ["k-live"],
+    );
+    expect(out.departedIncluded.has("k-gone")).toBe(false);
+  });
+
+  it("a departed key with no server beside live keys on srv-a and srv-b is account_unknown, so it does not count", () => {
+    const out = marksIncludedKeys(
+      [
+        row("k-gone", { venue_server: null, disconnected_at: GONE }),
+        row("k-a", { venue_server: "srv-a" }),
+        row("k-b", { venue_server: "srv-b" }),
+      ],
+      {
+        "k-gone": days("2026-01-01", "2026-03-01"),
+        "k-a": days("2026-02-01", "2026-03-10"),
+        "k-b": days("2026-02-01", "2026-03-10"),
+      },
+      ["k-a", "k-b"],
+    );
+    // Login-only would bound it to the day before the live keys and count it.
+    expect(out.departedIncluded.has("k-gone")).toBe(false);
   });
 });

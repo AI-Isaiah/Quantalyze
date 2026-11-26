@@ -1,6 +1,15 @@
 -- Test for migration 20261027120000 — Phase 167.1.2.1.2 HISTORYREADER, plan 05
 -- (D-02, orchestrator decisions O-1, O-2, O-3, O-6).
 --
+-- RETARGETED 2026-11-25 by Phase 225 plan 17 (CONN-03): plan 16 re-defined
+-- commit_scenario_batch in migration 20261125151936 (server-aware account
+-- identity), later than 20261027120000. The apply list now ends with
+-- 20261123180000 (api_keys.venue_server) and 20261125151936, and the mutation
+-- edits target 20261125151936, so every arm proves the body that is live and
+-- not the superseded 20261027120000 one (same class as the 2026-10-20
+-- retarget). The find strings are unchanged: the fingerprint CTEs were copied
+-- byte for byte into the new migration. Arms and steps are the same.
+--
 -- WHAT THE MIGRATION DOES. commit_scenario_batch's fingerprint recompute (the
 -- `contributing` CTE) now applies the TypeScript reader's D-02 rule
 -- (fetchLatestHoldingsPerKey, src/lib/latest-holdings-per-key.ts, the branch
@@ -78,7 +87,7 @@
 -- Usage:
 --   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/tests/test_commit_scenario_batch_fingerprint_sameday_empty.sql
 --
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927180000_working_holder_rule_d18.sql","supabase/migrations/20261007120000_api_keys_account_currency.sql","supabase/migrations/20261009130000_revoke_truncate_anon_authenticated.sql","supabase/migrations/20261009150000_revoke_trigger_maintain_anon_authenticated.sql","supabase/migrations/20261010120000_btcusdview_native_balance.sql","scripts/pg-lane/fixtures/38-fixture-commit-scenario-batch-hosts.sql","supabase/migrations/20261011120100_commit_scenario_batch_fingerprint_unpriced.sql","supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/36-fixture-compute-jobs-claim-token.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260420213754_allocator_equity_snapshots.sql","supabase/migrations/20260422101911_api_keys_disconnected_at.sql","supabase/migrations/20260527102050_replace_allocator_equity_snapshots.sql","supabase/migrations/20260529160000_allocator_equity_pre_terminus_flag.sql","supabase/migrations/20260602183000_b5b_api_key_delete_atomicity.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260922120000_api_keys_sync_status_sign_in_failed.sql","supabase/migrations/20260925120000_api_keys_account_identity.sql","supabase/migrations/20260927180000_working_holder_rule_d18.sql","supabase/migrations/20261007120000_api_keys_account_currency.sql","supabase/migrations/20261009130000_revoke_truncate_anon_authenticated.sql","supabase/migrations/20261009150000_revoke_trigger_maintain_anon_authenticated.sql","supabase/migrations/20261010120000_btcusdview_native_balance.sql","scripts/pg-lane/fixtures/38-fixture-commit-scenario-batch-hosts.sql","supabase/migrations/20261011120100_commit_scenario_batch_fingerprint_unpriced.sql","supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql"]}
 
 -- Reap fixtures orphaned by a crashed earlier run. Age-scoped so it can never
 -- touch a concurrent run's users. Rows first: allocator_holdings.api_key_id is
@@ -146,7 +155,7 @@ BEGIN
   -- that stops dropping the key is caught from both sides.
   -- RED-UNDER: remove same_day_empty from key_day.has_rows in the migration, so
   --            key-k reads its rows again and the server set is the two tokens.
-  -- RED-UNDER-M: {"arm":"sameday-empty-dropped","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"NOT (r.unpriced_after_rows OR r.polled_after_rows OR r.same_day_empty) AS has_rows","replace":"NOT (r.unpriced_after_rows OR r.polled_after_rows) AS has_rows","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"sameday-empty-dropped","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"NOT (r.unpriced_after_rows OR r.polled_after_rows OR r.same_day_empty) AS has_rows","replace":"NOT (r.unpriced_after_rows OR r.polled_after_rows) AS has_rows","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_dropped);
   EXCEPTION WHEN OTHERS THEN
@@ -225,7 +234,7 @@ BEGIN
 
   -- RED-UNDER: remove the row_count <> 0 guard from empty_day in the migration, so a clean poll that
   --            read a row counts as a read-nothing poll and key-k is dropped.
-  -- RED-UNDER-M: {"arm":"sameday-nonempty-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"WHEN (e.newest_meta->>'row_count')::numeric <> 0 THEN NULL","replace":"WHEN FALSE THEN NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"sameday-nonempty-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"WHEN (e.newest_meta->>'row_count')::numeric <> 0 THEN NULL","replace":"WHEN FALSE THEN NULL","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_kept);
   EXCEPTION WHEN OTHERS THEN
@@ -306,7 +315,7 @@ BEGIN
 
   -- RED-UNDER: filter newest_meta to final_status 'complete' in the migration, so the subquery reads the
   --            older clean empty poll instead of the later warnings poll and key-k is dropped.
-  -- RED-UNDER-M: {"arm":"later-warnings-poll-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"-- D-02: no final_status filter: the newest poll of ANY outcome","replace":"AND al.metadata->>'final_status' = 'complete'","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"later-warnings-poll-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"-- D-02: no final_status filter: the newest poll of ANY outcome","replace":"AND al.metadata->>'final_status' = 'complete'","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_kept);
   EXCEPTION WHEN OTHERS THEN
@@ -383,7 +392,7 @@ BEGIN
 
   -- RED-UNDER: remove the final_status guard from empty_day in the migration, so a warnings poll that
   --            read zero rows counts as a clean empty poll and key-k is dropped.
-  -- RED-UNDER-M: {"arm":"warnings-empty-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"WHEN e.newest_meta->>'final_status' IS DISTINCT FROM 'complete' THEN NULL","replace":"WHEN FALSE THEN NULL","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"warnings-empty-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"WHEN e.newest_meta->>'final_status' IS DISTINCT FROM 'complete' THEN NULL","replace":"WHEN FALSE THEN NULL","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_kept);
   EXCEPTION WHEN OTHERS THEN
@@ -460,7 +469,7 @@ BEGIN
 
   -- RED-UNDER: loosen the same_day_empty equality to <= in the migration, so a clean empty poll dated
   --            before the rows' day drops key-k.
-  -- RED-UNDER-M: {"arm":"older-empty-day-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"p.empty_day COLLATE \"C\" = p.latest_day COLLATE \"C\"","replace":"p.empty_day COLLATE \"C\" <= p.latest_day COLLATE \"C\"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"older-empty-day-kept","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"p.empty_day COLLATE \"C\" = p.latest_day COLLATE \"C\"","replace":"p.empty_day COLLATE \"C\" <= p.latest_day COLLATE \"C\"","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_kept);
   EXCEPTION WHEN OTHERS THEN
@@ -543,7 +552,7 @@ BEGIN
 
   -- RED-UNDER: give a same_day_empty key a NULL day in key_day in the migration, so the emptied key no
   --            longer moves the account's newest day and key-b's older rows are counted.
-  -- RED-UNDER-M: {"arm":"sameday-empty-sibling-older","apply":[{"kind":"edit","file":"supabase/migrations/20261027120000_commit_scenario_batch_fingerprint_sameday_empty.sql","find":"ELSE p.latest_day END AS day","replace":"WHEN r.same_day_empty THEN NULL ELSE p.latest_day END AS day","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"sameday-empty-sibling-older","apply":[{"kind":"edit","file":"supabase/migrations/20261125151936_commit_scenario_batch_venue_server_identity.sql","find":"ELSE p.latest_day END AS day","replace":"WHEN r.same_day_empty THEN NULL ELSE p.latest_day END AS day","occurrences":1}]}
   BEGIN
     v_res := public.commit_scenario_batch(uid_a, v_diffs, NULL, NULL, v_fp_dropped);
   EXCEPTION WHEN OTHERS THEN

@@ -358,6 +358,35 @@ describe("AllocatorExchangeManager — departed-account history overview", () =>
     expect(csvReads.some((r) => r.keyId === "key-live" && r.ascending)).toBe(true);
   });
 
+  it("CR-01: a departed key on the same login but another server is its own account, before and after a refresh", async () => {
+    // One MT5 login on two broker servers is two accounts (225 CONN-03, CONTEXT
+    // Q6). The live key reads srv-b from June 1, the departed key reads srv-a
+    // from June 5 and was disconnected June 10. Under the login-only identity the
+    // live key would bound the departed one to May 31 and it would count nothing.
+    RETURNS_DAYS = { "key-live": ["2026-06-01", "2026-06-30"], "key-dep": ["2026-06-05", "2026-06-12"] };
+    ANCHORED = new Set(["key-dep"]);
+    const rows = () => [
+      makeKey({ id: "key-live", exchange: "mt5", venue_account_id: "L1", venue_server: "srv-b" }),
+      departed({
+        exchange: "mt5",
+        venue_account_id: "L1",
+        venue_server: "srv-a",
+        disconnected_at: "2026-06-10T15:30:00Z",
+      }),
+    ];
+    const ownAccountLine = "History included until Jun\u00a010,\u00a02026.";
+    const sharedLine = "a key you still have connected reads this account";
+    const { rerender } = render(<AllocatorExchangeManager hasHoldings={true} initialKeys={rows()} />);
+    await waitFor(() => expect(historyBlock("key-dep").textContent).toContain(ownAccountLine));
+    expect(historyBlock("key-dep").textContent).not.toContain(sharedLine);
+
+    // router.refresh() delivers a fresh initialKeys array, which merges through
+    // normalizeInitialKey(k, prev): the server must survive that copy too.
+    rerender(<AllocatorExchangeManager hasHoldings={true} initialKeys={rows()} />);
+    await waitFor(() => expect(historyBlock("key-dep").textContent).toContain(ownAccountLine));
+    expect(historyBlock("key-dep").textContent).not.toContain(sharedLine);
+  });
+
   it("WR-R2-02: a key whose saved balance is gone does not zero the key it would have covered", async () => {
     // key-a reads acct-9 from June 1 to 15 but has no saved balance, so the
     // derive cannot count it; key-b reads the same account June 5 to 10 and

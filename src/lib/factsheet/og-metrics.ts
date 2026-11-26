@@ -1,4 +1,5 @@
 import { annualizationPeriods, calendarYears } from "@/lib/closed-sets";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import { sharpe as sharpeRatio } from "@/lib/return-stats";
 import { effectiveDataQualityFlags } from "@/lib/stored-analytics-result";
 import {
@@ -19,7 +20,7 @@ import {
  *    dispersion still has no Sharpe (`return-stats`), and that NaN is "—".
  *  - Sharpe rides the FREQUENCY clock: annualized on the strategy's asset-class
  *    basis (√365 crypto / √252 traditional) via `annualizationPeriods`. #597.
- *  - CAGR rides the CALENDAR clock (elapsed days / 365.25, asset-class-invariant).
+ *  - CAGR rides the CALENDAR clock (whole days first to last date / 365, asset-class-invariant).
  *    A STORED CAGR prints at any span, as on the factsheet strip, and is subject to
  *    E2 (below) and to nothing else. A CAGR the card COMPUTES (the embed did not
  *    carry the key) needs a positive calendar span and a positive cumulative growth
@@ -153,16 +154,16 @@ export function computeOgHeadline(
   // #597 — risk metrics ride the FREQUENCY clock: annualize the headline
   // Sharpe on the strategy's asset-class basis (√365 crypto / √252
   // traditional). CAGR has no periods-per-year knob — it rides the CALENDAR
-  // clock (elapsed days / 365.25) and is asset-class-invariant. Matches
-  // compute.ts and metrics.py (TWR-05).
+  // clock (whole days first to last date / 365) and is asset-class-invariant.
+  // Matches the stored CAGR in metrics.py (TWR-05; F-5 / Q1).
   const periodsPerYear = annualizationPeriods(assetClass);
-  // Population sd through the shared module: a residue sd (a compounding
+  // Sample sd (F-5) through the shared module: a residue sd (a compounding
   // constant yield) is no dispersion, so the card hides the Sharpe exactly as
   // for an all-zero series (Phase 166.1 D-07). NaN is the card's hide value.
   sharpe =
     stored?.sharpe !== undefined
       ? storedFigure(stored.sharpe)
-      : (sharpeRatio(values, { periodsPerYear, ddof: 0 }) ?? NaN);
+      : (sharpeRatio(values, { periodsPerYear, ddof: SD_DDOF }) ?? NaN);
 
   let cum = 1;
   let peak = 1;
@@ -212,8 +213,14 @@ export function computeOgHeadline(
  * last computed figures with the Updating line, reads unit, curve and headline verdict through the
  * effective flags, and prints dashes for a terminal row with an unbound derive prestamp. A card
  * cached under "2" carries the old figure rules and is not answered under the new URL.
+ *
+ * 2026-11-25, "4" (Phase 236 FIGUREMATH): the card's computed CAGR, Calmar and Sharpe moved (the
+ * 365-day year over whole days, and the sample sd). A rendered terminal card is cached for 24 h
+ * at the CDN plus 7 days of stale-while-revalidate (`LONG_CACHE_CONTROL` in the OG route), which
+ * is far longer than the day the rule allows, so a card cached under "3" would keep the old
+ * figures. It is not answered under the new URL.
  */
-export const OG_CARD_VERSION = "3";
+export const OG_CARD_VERSION = "4";
 
 /** A stored figure as the card renders it: a finite number, else NaN ("—"),
  *  the same rule as the factsheet's strict overlay (`overlayBasisScalars`). */

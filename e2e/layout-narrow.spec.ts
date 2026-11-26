@@ -3149,6 +3149,12 @@ function compareDesktopReading(baselinePath: string, surface: Surface, after: Re
     });
   }
   problems.forEach((p) => console.log(`NARROWCHARTS-DESKTOP-CHANGE ${p}`));
+  // The whole reading, as the *_OUT mode would write it for this surface, so an intended change
+  // can be accepted from a CI log without booting the local-stack lane. A text mismatch skips the
+  // x / y comparison above, so the problem lines alone cannot rebuild the fixture.
+  if (problems.length > 0) {
+    console.log(`NARROWCHARTS-DESKTOP-READING ${path.basename(baselinePath)} ${surface} ${JSON.stringify(after)}`);
+  }
   expect(
     problems,
     `desktop ${surface} differs from ${path.relative(process.cwd(), baselinePath)} ` +

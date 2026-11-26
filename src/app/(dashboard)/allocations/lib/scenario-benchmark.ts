@@ -45,6 +45,7 @@
  */
 
 import { alignCoveredReturns, COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
+import { SD_DDOF } from "@/lib/figure-conventions";
 import type { BenchmarkPricesOpt, DailyPrice } from "@/lib/factsheet/types";
 import { computeAlphaBeta, computeTrackingError } from "@/lib/portfolio-stats";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
@@ -226,7 +227,7 @@ export function computeScenarioBenchmark(
   // The floor is a test on the daily sd → basis-invariant (fires identically at
   // 252 and 365).
   const diff = p.map((v, i) => v - b[i]);
-  const informationRatio = sharpe(diff, { periodsPerYear, ddof: 1 });
+  const informationRatio = sharpe(diff, { periodsPerYear, ddof: SD_DDOF });
 
   // Alpha and beta come straight from computeAlphaBeta, which since Phase
   // 166.2's review round 1 (founder decision D7, 2026-09-26) answers an

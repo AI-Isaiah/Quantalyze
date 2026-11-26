@@ -63,7 +63,7 @@ interface CurvePoint {
 type Point = { date: string; cumRet: number };
 
 /** Why a row draws no line; each maps to one note (UI-SPEC C-5). */
-type NoLine = "no_series" | "undatable" | "read_failed";
+type NoLine = "no_series" | "undatable" | "read_failed" | "options_cash_wallet";
 
 type Resolved =
   | { line: Point[]; measuredSince: string | null }
@@ -82,6 +82,12 @@ type Resolved =
  * start (D-07). A non-finite level is dropped, never plotted as 0.
  */
 function resolveLine(item: CompareItem): Resolved {
+  // Phase 252: an options book's stored curve is measured on the cash wallet, which leaves out
+  // open option positions. The page blanks the row and marks it; the marker is checked first, so a
+  // marked row draws nothing whatever else it carries. The page set it from the one predicate.
+  if (item.analytics.headline_withheld_cause === "options_cash_wallet") {
+    return { line: null, why: "options_cash_wallet" };
+  }
   const levels: Point[] = [];
   for (const p of item.analytics.returns_series ?? []) {
     if (typeof p.date === "string" && Number.isFinite(p.value)) {
@@ -135,7 +141,9 @@ export function CompareEquityOverlay({ items }: { items: CompareItem[] }) {
             ? `${name}: no return series yet.`
             : resolved.why === "read_failed"
               ? `${name}: its measured span could not be loaded, so no curve is drawn.`
-              : `${name}: the span of its cumulative return cannot be dated, so no curve is drawn.`,
+              : resolved.why === "options_cash_wallet"
+                ? `${name}: measured on the cash wallet, which leaves out open option positions, so no curve is drawn.`
+                : `${name}: the span of its cumulative return cannot be dated, so no curve is drawn.`,
         );
         return;
       }

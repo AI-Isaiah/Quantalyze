@@ -376,7 +376,12 @@ describe("step 1: the ?add= deep link", () => {
     const { props } = setup({ deepLink: { raw: ID_A } });
     await screen.findByText("Step 2 of 2 · Amount and date");
     expect(screen.getByText("Alpha One")).toBeInTheDocument();
-    expect(screen.getByRole("spinbutton", { name: "Allocation (USD)" })).toHaveFocus();
+    // Focus moves in a passive effect after step 2 commits. `findByText` can
+    // resolve between the commit and that effect when the render is slow (the
+    // CI coverage shards), so the focus is awaited, not read once.
+    await waitFor(() =>
+      expect(screen.getByRole("spinbutton", { name: "Allocation (USD)" })).toHaveFocus(),
+    );
     expect(props.onInvalidDeepLink).not.toHaveBeenCalled();
   });
 

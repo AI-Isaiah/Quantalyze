@@ -75,7 +75,7 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
@@ -238,6 +238,71 @@ class DeriveRefusal(str, Enum):
     COMPOSE_EMPTY_BLOCKED = "compose_empty_blocked"
     # The compose refused a structural input (the core's loud asserts).
     COMPOSE_REFUSED = "compose_refused"
+    # 225 CONN-03 (CONTEXT Q6): a key with no broker server reads a login whose keys carry two
+    # or more servers, so its account cannot be placed. Unreachable for a new key under the
+    # founder ruling of 2026-11-25 (connect refuses an MT5 key without a server, and existing
+    # ones are deleted); kept only as a fail-loud tripwire, behaviour unchanged.
+    ACCOUNT_SERVER_AMBIGUOUS = "account_server_ambiguous"
+
+
+# 234 NOCAP-03: the CLOSED set of routes by which a no-capital key takes ``dropped_key``, the
+# keys of ``payload["inputs"]["no_capital_exit_refused"]``. It is neither a ``DegradeReason`` nor a
+# ``DeriveRefusal``: those describe a book's trust and a refused book, and
+# ``tests/fixtures/derive_refusal_rows.json`` pins both for three runtimes. A route here is a
+# per-run count that never changes ``is_trustworthy`` (``dropped_key`` already blocks).
+NO_CAPITAL_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        # selection (A2): the live read says empty over a stored terminal above the dust floor
+        "funded_terminal",
+        # selection: the key has returns and a no-capital token but no stored terminal
+        "no_stored_terminal",
+        # apply loop (D-10): the exit would consume or drop more than dust
+        "consumes_more_than_dust",
+        # compose: the replay of the candidate raised (``NavReconstructionError``)
+        "replay_refused",
+        # compose: the replay of the candidate returned a blocking reason
+        "blocking_reason",
+        # compose: an interior hole of the candidate lacks its stored segment terminals
+        "segment_terminals_missing",
+        # job: a whole-compose refusal reverted every candidate to its stored inputs
+        "compose_reverted",
+        # selection: the stored terminal is below -DUST_NAV_FLOOR (negative equity is not an exit)
+        "negative_terminal",
+        # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own row carries no writer basis, so no
+        # independent proof that the account is empty
+        "ledger_basis_absent",
+        # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own deal ledger sums above the dust floor
+        "ledger_level_funded",
+        # apply loop: a ``LEDGER_PROOF_VENUES`` key whose own deal ledger sums below
+        # ``-DUST_NAV_FLOOR`` (stored deals missing funding), which is no proof of an empty account
+        "ledger_level_negative",
+        # job (NOCAP-02): an exception that is not a ``NavReconstructionError`` was raised while a
+        # candidate was in play, from the apply loop or the compose call; every candidate was
+        # reverted once to its inputs exactly as stored
+        "candidate_exception",
+    }
+)
+
+
+def no_capital_refusal_field(counts: Mapping[str, int]) -> dict[str, int]:
+    """234 NOCAP-03: the one place a no-capital refusal token or count is checked.
+
+    Returns a NEW dict with sorted keys and positive integer counts, dropping zeros. Raises
+    ``ValueError`` for a token outside ``NO_CAPITAL_REFUSAL_REASONS``, for a count that is a
+    ``bool`` or not an ``int``, and for a negative count. A message never echoes the offending
+    token (it may have been read from storage): it names the class of the fault only."""
+    out: dict[str, int] = {}
+    for token in sorted(counts):
+        n = counts[token]
+        if token not in NO_CAPITAL_REFUSAL_REASONS:
+            raise ValueError("unknown no-capital refusal token")
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise ValueError("no-capital refusal count is not an integer")
+        if n < 0:
+            raise ValueError("no-capital refusal count is negative")
+        if n:
+            out[token] = n
+    return out
 
 
 def refusal_payload(
@@ -245,6 +310,7 @@ def refusal_payload(
     *,
     composed_at: str,
     extra_reasons: Sequence[str] = (),
+    no_capital_exit_refused: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """167.1.2.1.1 SC-1 (D-04): the ``equity_curve`` row payload for a derive REFUSAL.
 
@@ -266,7 +332,7 @@ def refusal_payload(
     def _value(raw: Any) -> str:
         return raw.value if isinstance(raw, Enum) else str(raw)
 
-    return {
+    payload: dict[str, Any] = {
         "curve": [],
         "returns": [],
         "version": 2,
@@ -277,6 +343,13 @@ def refusal_payload(
         "scalars": {"mwr": None, "dietz": None, "computable": False},
         "inputs": {"n_keys": 0, "anchor_asof": None, "composed_at": composed_at},
     }
+    if no_capital_exit_refused:
+        # 234 NOCAP-03: a refusal written after a no-capital fallback names the routes, counts
+        # only. Absent when there were none, so the default call is byte-identical to before.
+        field = no_capital_refusal_field(no_capital_exit_refused)
+        if field:
+            payload["inputs"]["no_capital_exit_refused"] = field
+    return payload
 
 
 # Backwards-compatible aliases (the enum members ARE these strings).
@@ -425,28 +498,103 @@ def account_groups(
     return [grouped[root] for root in sorted(grouped, key=lambda r: str(grouped[r][0].get("id")))]
 
 
+def _login_identities(
+    keys: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, tuple[str, str, str] | None], frozenset[str]]:
+    """Each key's login identity ``(exchange_key, login, canonical server)``, or ``None``,
+    and the ids of the AMBIGUOUS keys.
+
+    225 CONN-03, CONTEXT Q6 (founder ruling 2026-11-25 and the marked agent decision). One
+    canonical identity per key, never a pairwise wildcard: union-find is transitive, so a key
+    with no server unioned pairwise with servers a and b would merge a and b again (CR-01).
+
+    * login: ``venue_account_id`` stripped; a blank or non-string login has no login identity.
+    * server: ``venue_server`` when it is a non-empty ``str``, else none. The stored bytes are
+      read as they are; nothing is trimmed or case-folded here, because every writer already
+      stores the normalised form and ``api_keys_venue_server_valid`` refuses a blank.
+    * for each ``(exchange_key, login)``, S is the set of distinct servers among ``keys``.
+    * canonical server: the key's own server if set; else ``""`` when S is empty; else the
+      single member when S has one member; else NONE, and the key is AMBIGUOUS (identity
+      ``None``, listed in the second return value).
+
+    Twins: ``accountIdentityTokens`` (src/lib/departed-history.ts) and the SQL
+    ``commit_scenario_batch``; ``tests/fixtures/venue_server_identity.json`` pins all three."""
+    servers: dict[tuple[str, str], set[str]] = defaultdict(set)
+    parsed: dict[str, tuple[str, str, str | None] | None] = {}
+    for row in keys:
+        key_id = str(row["id"])
+        venue_id = row.get("venue_account_id")
+        if not isinstance(venue_id, str) or not venue_id.strip():
+            parsed[key_id] = None
+            continue
+        exchange = row.get("exchange")
+        exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+        server = row.get("venue_server")
+        own = server if isinstance(server, str) and server != "" else None
+        parsed[key_id] = (exchange_key, venue_id.strip(), own)
+        if own is not None:
+            servers[(exchange_key, venue_id.strip())].add(own)
+
+    identities: dict[str, tuple[str, str, str] | None] = {}
+    ambiguous: set[str] = set()
+    for key_id, item in parsed.items():
+        if item is None:
+            identities[key_id] = None
+            continue
+        exchange_key, login, own = item
+        if own is not None:
+            identities[key_id] = (exchange_key, login, own)
+            continue
+        seen = servers.get((exchange_key, login), set())
+        if not seen:
+            identities[key_id] = (exchange_key, login, "")
+        elif len(seen) == 1:
+            identities[key_id] = (exchange_key, login, next(iter(seen)))
+        else:
+            identities[key_id] = None
+            ambiguous.add(key_id)
+    return identities, frozenset(ambiguous)
+
+
+def ambiguous_server_key_ids(
+    keys: Sequence[Mapping[str, Any]],
+) -> frozenset[str]:
+    """The ids of keys whose account cannot be placed: a non-blank login, no server, and two
+    or more distinct set servers on their ``(exchange, login)`` among ``keys``.
+
+    225 CONN-03, CONTEXT Q6 agent decision. Such a key may read any of the servers, so it
+    joins none of them (``account_identity_tokens`` gives it no token unless a marker links
+    it) and the allocator derive REFUSES the book with
+    ``DeriveRefusal.ACCOUNT_SERVER_AMBIGUOUS``, live or disconnected. Pure. The TS
+    ``keyAccountOf`` and the SQL ``key_account`` give such a key its own account."""
+    return _login_identities(keys)[1]
+
+
 def account_identity_tokens(
     keys: Sequence[Mapping[str, Any]],
 ) -> dict[str, str | None]:
     """Which keys read the same exchange account, as one token per account.
 
-    Two keys read one account when they carry the same non-blank
-    ``(exchange, venue_account_id)`` (case-blind exchange, as
-    ``account_identity_collisions``), or when one is MARKED against the other
-    (``account_share_kind`` duplicate / composite_member naming it in
-    ``account_shared_with_api_key_id``). The marker is the stamper's own
-    evidence (D-01, D-04): the marked key hit the holder's unique account index,
-    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
-    NULL alone would call it an unknown account and let an owner's 'include'
-    count one account twice. A key with neither a venue id nor a marker link is
-    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
-    ``account_groups`` reads (IN-03), never a copy. Pure.
+    Two keys read one account when they carry the same login identity
+    ``(exchange, venue_account_id, canonical server)`` (``_login_identities``; CONTEXT Q6:
+    one login on two different set servers is TWO accounts, a key with no server joins its
+    login only while that login carries at most one distinct set server), or when one is
+    MARKED against the other (``account_share_kind`` duplicate / composite_member naming it
+    in ``account_shared_with_api_key_id``). The marker is the stamper's own evidence
+    (D-01, D-04): the marked key hit the holder's unique account index, which is exactly why
+    its own ``venue_account_id`` stays NULL. Reading the NULL alone would call it an unknown
+    account and let an owner's 'include' count one account twice. A key with neither a login
+    identity nor a marker link is unknown (``None``); that includes an AMBIGUOUS key
+    (``ambiguous_server_key_ids``), which takes part in no login union. The marker kinds
+    are ``SHARED_ACCOUNT_KINDS``, the set ``account_groups`` reads (IN-03), never a copy.
+    The token is ``account:<smallest id>`` of the group, so it does not depend on row order.
+    Pure.
 
     Moved here from ``services/job_worker.py`` (170.4 review CR-01) so the match
     scorer groups keys by the SAME identity as the departed-history rule, the
     dashboard (``accountIdentityTokens``, src/lib/departed-history.ts) and the
-    commit RPC's ``contributing`` CTE. ``job_worker.account_identity_tokens``
-    delegates here; there is one implementation."""
+    commit RPC's ``contributing`` CTE (``commit_scenario_batch``).
+    ``job_worker.account_identity_tokens`` delegates here; there is one implementation."""
     ids = [str(row["id"]) for row in keys]
     parent = {key_id: key_id for key_id in ids}
 
@@ -462,19 +610,17 @@ def account_identity_tokens(
             parent[max(root_left, root_right)] = min(root_left, root_right)
 
     known: set[str] = set()
-    by_venue: dict[tuple[str, str], str] = {}
+    by_identity: dict[tuple[str, str, str], str] = {}
+    identities, _ambiguous = _login_identities(keys)
     for row in keys:
         key_id = str(row["id"])
-        venue_id = row.get("venue_account_id")
-        if isinstance(venue_id, str) and venue_id.strip():
-            exchange = row.get("exchange")
-            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
-            pair = (exchange_key, venue_id.strip())
+        identity = identities[key_id]
+        if identity is not None:
             known.add(key_id)
-            if pair in by_venue:
-                _union(by_venue[pair], key_id)
+            if identity in by_identity:
+                _union(by_identity[identity], key_id)
             else:
-                by_venue[pair] = key_id
+                by_identity[identity] = key_id
     for row in keys:
         key_id = str(row["id"])
         holder = row.get("account_shared_with_api_key_id")
@@ -1143,6 +1289,14 @@ EMPTIED_RESTART_FLOOR_USD = 100.0
 # sampled NAV, and the ccxt venues carry retention caps (OKX ~90d, Bybit ~365d).
 FULL_HISTORY_VENUES: frozenset[str] = frozenset({"deribit", "mt5"})
 
+# 234 NOCAP-01: the venues whose stored realized terminal IS the live balance read, so the no-capital
+# exit's A2 check (terminal at or below the dust floor) is circular there: a funded account whose
+# balance reads zero for one tick stores a terminal of 0.0 and passes on its own echo. On these
+# venues the exit also needs the key's OWN stored deal ledger to agree the account is empty.
+# Deribit is out because its terminal is reconciled to inception at write time (native_nav's
+# inception gate); the ccxt venues cannot form a candidate and sfox stores no terminal.
+LEDGER_PROOF_VENUES: frozenset[str] = frozenset({"mt5"})
+
 
 @dataclass(frozen=True)
 class KeyEquity:
@@ -1292,6 +1446,7 @@ def replay_key_equity(
     realized_terminal: tuple[str, float] | None = None,
     writer_day_pnl: Mapping[str, float] | None = None,
     writer_flows: Sequence[Any] | None = None,
+    tiny_base_days: Collection[str] | None = None,
 ) -> KeyEquity:
     """Reconstruct one key's $-equity series BACKWARD from ``anchor`` (STITCH-04).
 
@@ -1386,6 +1541,15 @@ def replay_key_equity(
     would explain every collapse). A stretch must still begin on a withdrawal, a stored
     dropped-day P&L or a stored non-zero return that left a positive level (an ordinary
     trading loss, CR-01 of the PR-2 review).
+
+    234 founder ruling 2026-11-24 — STATED TAIL DAYS. ``tiny_base_days`` is the key's own stored
+    ``key_inputs.tiny_base_days`` (the days the derive stated it left out of the returns). A flow
+    dated AFTER the last return day on one of those days is a stated day's flow, not a flow
+    outside the window, and is not counted in ``out_of_window_flows``. The scope is exactly that:
+    a flow before the first return day, a flow after the last return day on an unlisted day, and
+    a listed day inside the return window all keep today's behaviour. It applies to the event
+    flows in the legacy roll and to the writer's composed flows in writer-basis mode (``fbd``
+    holds whichever the replay runs on). ``None`` or empty behaves exactly as before.
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -1495,7 +1659,13 @@ def replay_key_equity(
         lo, hi = ret_days[0], ret_days[-1]
         if history_reaches_inception:
             opening_run = _opening_flow_run(fbd, lo)
-        out_of_window_flows = sum(1 for fd in fbd if fd < lo or fd > hi) - len(opening_run)
+        # 234 founder ruling 2026-11-24: a flow AFTER the last return day, on a day the
+        # key's own row states in ``tiny_base_days``, belongs to a stated day and is
+        # not an out-of-window flow. Both conditions are required; nothing else moves.
+        stated = frozenset(tiny_base_days or ())
+        out_of_window_flows = sum(
+            1 for fd in fbd if fd < lo or (fd > hi and fd not in stated)
+        ) - len(opening_run)
 
     equity = [0.0] * n
     # CR-01: start from the writer's realized terminal when it is on the series' last
@@ -1747,6 +1917,35 @@ def read_dropped_day_pnl(payload: Mapping[str, Any]) -> dict[str, float]:
             raise ValueError("key_inputs dropped_day_pnl: duplicate day")
         out[day] = amount
     return out
+
+
+def read_tiny_base_days(payload: Mapping[str, Any]) -> frozenset[str]:
+    """The ISO days a ``key_inputs`` payload states in ``tiny_base_days``; ``frozenset()``
+    when the row predates the field or carries none (absent or null is the old row, not an
+    error). STRICT, like every neighbouring ``key_inputs`` reader (234 CONTEXT post-research;
+    RESEARCH A5 had suggested a tolerant reader and was not taken): a present but malformed
+    list (not a list, a non-string item, a non-canonical or impossible day) raises
+    ``TypeError``/``ValueError`` so the job disposes it as a corrupt input instead of reading
+    a guess. The list relaxes one gate, so a guess is never acceptable. Messages name the
+    field and never the stored value; each item is checked against ``_ISO_DAY_RE`` before
+    ``date.fromisoformat``."""
+    raw = payload.get("tiny_base_days")
+    if raw is None:
+        return frozenset()
+    if not isinstance(raw, list):
+        raise TypeError("key_inputs tiny_base_days: not a list")
+    out: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            raise TypeError("key_inputs tiny_base_days: non-string day")
+        if not _ISO_DAY_RE.match(item):
+            raise ValueError("key_inputs tiny_base_days: day is not a canonical YYYY-MM-DD")
+        try:
+            date.fromisoformat(item)
+        except ValueError:
+            raise ValueError("key_inputs tiny_base_days: day is not a real calendar day") from None
+        out.add(item)
+    return frozenset(out)
 
 
 def realized_terminal_payload(day: Any, usd: float) -> dict[str, Any]:

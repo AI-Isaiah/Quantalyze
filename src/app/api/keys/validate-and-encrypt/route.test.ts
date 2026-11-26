@@ -118,6 +118,17 @@ const {
     dependentResult: null as { data: unknown; error: unknown } | null,
     /** The filters of every such read. */
     dependentReads: [] as Record<string, unknown>[],
+    /**
+     * Founder 2026-11-25 — the refusal's reads of the caller's OWN strategy or
+     * key (`own-account-holder.ts`): `strategies`, `strategy_keys`, or
+     * `api_keys` selecting `label, created_at`. `holderLookup` answers them from
+     * a fixture; null = nothing to name. `holderReads` records every one with
+     * its filters, so a test can prove each carried the caller's id.
+     */
+    holderLookup: null as
+      | null
+      | ((table: string, filters: Record<string, unknown>) => { data: unknown; error: unknown }),
+    holderReads: [] as Record<string, unknown>[],
   },
 }));
 
@@ -166,6 +177,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               filters[`${col}:is`] = val;
               return builder;
             },
+            // 225 review M-1 — the own-account holder read's status filters.
+            neq: (col: string, val: unknown) => {
+              filters[`${col}:neq`] = val;
+              return builder;
+            },
+            not: (col: string, op: string, val: unknown) => {
+              filters[`${col}:not.${op}`] = val;
+              return builder;
+            },
             order: (_col: string) => builder,
             limit: (_n: number) => builder,
             maybeSingle: async () => {
@@ -175,6 +195,16 @@ vi.mock("@/lib/supabase/admin", () => ({
               if ("account_share_kind" in filters) {
                 PERSIST_STATE.dependentReads.push({ __table: table, ...filters });
                 return PERSIST_STATE.dependentResult ?? { data: null, error: null };
+              }
+              if (
+                table === "strategies" ||
+                table === "strategy_keys" ||
+                (table === "api_keys" && _cols === "label, created_at")
+              ) {
+                PERSIST_STATE.holderReads.push({ __table: table, __cols: _cols, ...filters });
+                return PERSIST_STATE.holderLookup
+                  ? PERSIST_STATE.holderLookup(table, filters)
+                  : { data: null, error: null };
               }
               PERSIST_STATE.stampReads.push({ __table: table, __cols: _cols, ...filters });
               return PERSIST_STATE.stampResult ?? { data: { venue_account_id: null }, error: null };
@@ -1099,6 +1129,30 @@ describe("POST /api/keys/validate-and-encrypt — mt5 three-credential defense (
       expect((await res.json()).error).toBe("Missing required fields");
       // The mirror-image of sfox: mt5 flows the api_secret-REQUIRED path AND
       // additionally requires the broker server — no sfox-style relaxation leaks.
+      expect(mockValidateKey).not.toHaveBeenCalled();
+      expect(mockEncryptKey).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["a control-character-only value (non-blank to JS trim, blank to Python strip)", "\u001f"],
+    ["over the 128-character cap", "s".repeat(129)],
+  ])(
+    "founder ruling 2026-11-25: rejects an MT5 key whose server is %s, with KEY_MT5_WRONG_SERVER BEFORE any worker call",
+    async (_label, passphrase) => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeReq({
+          exchange: "mt5",
+          api_key: "5001234",
+          api_secret: "investor-password-123",
+          passphrase,
+          persist: true,
+        }),
+      );
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("KEY_MT5_WRONG_SERVER");
       expect(mockValidateKey).not.toHaveBeenCalled();
       expect(mockEncryptKey).not.toHaveBeenCalled();
     },
@@ -2769,6 +2823,31 @@ describe("[164.2-05 / WIZFORM-02] keys/validate-and-encrypt — a bare upstream 
     });
   });
 
+  // Phase 225 (SIGNINREFUSED) — a login-stage MT5 -6 reaches this route as a 424 carrying
+  // seamCode `MT5_SIGN_IN_REFUSED`. The route forwards the code untouched and the client
+  // recogniser resolves the route's ACTUAL body to the broker-refused entry, never UNKNOWN.
+  it("a 424 MT5_SIGN_IN_REFUSED is forwarded and the client recogniser resolves it to KEY_MT5_SIGN_IN_REFUSED", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    const { recogniseValidateAndEncryptCode } = await import("@/lib/wizardErrors");
+    mockValidateKey.mockRejectedValue(
+      new AnalyticsUpstreamError(
+        "Your broker answered and refused this sign-in.",
+        424,
+        "MT5_SIGN_IN_REFUSED",
+      ),
+    );
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(VALID_BODY));
+    const body = await res.json();
+
+    expect(res.status).toBe(424);
+    expect(body.code).toBe("MT5_SIGN_IN_REFUSED");
+    expect(recogniseValidateAndEncryptCode(body, res.status)).toEqual({
+      code: "KEY_MT5_SIGN_IN_REFUSED",
+      recognised: true,
+    });
+  });
+
   it("a bare 4xx the classifier cannot name still answers UNKNOWN, and a 424 AUTH_FAILED keeps its own code", async () => {
     const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
     mockValidateKey.mockRejectedValue(
@@ -3023,6 +3102,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     PERSIST_STATE.stampReads.length = 0;
     PERSIST_STATE.dependentResult = null;
     PERSIST_STATE.dependentReads.length = 0;
+    PERSIST_STATE.holderLookup = null;
+    PERSIST_STATE.holderReads.length = 0;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -3111,6 +3192,106 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
   });
 
+  // ── Founder 2026-11-25: the refusal names the caller's OWN strategy or key ──
+  // The same account on many accounts of the platform is fine; one person adding
+  // it twice double-counts it. So the 409 says WHAT they already hold and links
+  // to it, from their own rows only. The fixture below is a tiny owner-aware
+  // table: it filters on whichever of `user_id` / `owner_id` the route sent, and
+  // the FOREIGN rows come first and share the holder's key id, so a route that
+  // dropped its owner filter would name the foreign row and these cases go red.
+  describe("own-account holder on the refusal", () => {
+    const FOREIGN = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+    function fixtureDb(rows: {
+      strategies?: Record<string, unknown>[];
+      strategy_keys?: Record<string, unknown>[];
+      api_keys?: Record<string, unknown>[];
+    }) {
+      PERSIST_STATE.holderLookup = (table, filters) => {
+        const pool = (rows as Record<string, Record<string, unknown>[]>)[table] ?? [];
+        const hit = pool.find((r) =>
+          Object.entries(filters).every(([k, v]) => !(k in r) || r[k] === v),
+        );
+        return { data: hit ?? null, error: null };
+      };
+    }
+
+    it("a holder key with NO strategy is named by nickname and date and linked to /strategies; a foreign key on the same id is never named", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        api_keys: [
+          { user_id: FOREIGN, id: HOLDER_ID, label: "Foreign Desk Key", created_at: "2020-01-01T00:00:00Z" },
+          { user_id: TEST_USER.id, id: HOLDER_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" },
+        ],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text)).toEqual({
+        ...REFUSAL,
+        holder: { kind: "key", name: "Test", added_at: "2026-11-19T10:00:00Z", href: "/strategies" },
+      });
+      expect(text).not.toContain("Foreign Desk Key");
+      expect(text).not.toContain(FOREIGN);
+      expect(text).not.toContain(LOGIN);
+      expect(text).not.toContain(HOLDER_ID);
+    });
+
+    it("a holder key WITH a strategy names the strategy and links to its factsheet; a foreign strategy is never named", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        strategies: [
+          { user_id: FOREIGN, api_key_id: HOLDER_ID, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", name: "Foreign Fund", status: "published" },
+          { user_id: TEST_USER.id, api_key_id: HOLDER_ID, id: "11111111-1111-4111-8111-111111111111", name: "My Fund", status: "published" },
+        ],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text).holder).toEqual({
+        kind: "strategy",
+        name: "My Fund",
+        href: "/factsheet/11111111-1111-4111-8111-111111111111?from=strategies",
+      });
+      expect(text).not.toContain("Foreign Fund");
+      expect(text).not.toContain("ffffffff");
+    });
+
+    it("every holder read carries the CALLER's id, and the refusal rule itself is unchanged (409, zero inserts, zero rpc)", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        api_keys: [{ user_id: TEST_USER.id, id: HOLDER_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" }],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(409);
+      expect(PERSIST_STATE.holderReads.length).toBeGreaterThan(0);
+      for (const read of PERSIST_STATE.holderReads) {
+        expect(read.user_id ?? read.owner_id, `${String(read.__table)} read was not owner-scoped`).toBe(TEST_USER.id);
+      }
+      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    });
+
+    it("a faulted holder read leaves the refusal byte-identical to before (no holder, same 409)", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      PERSIST_STATE.holderLookup = () => ({ data: null, error: { code: "XX000", message: "boom" } });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}',
+      );
+      consoleErr.mockRestore();
+    });
+  });
+
   it("an MT5 add beside a same-login owner key with a NULL server is refused (null is the wildcard, Q2)", async () => {
     PERSIST_STATE.sameLoginRows = [holderRow({ venue_server: null })];
     const { POST } = await import("./route");
@@ -3161,6 +3342,62 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(PERSIST_STATE.inserts).toHaveLength(1);
     expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(OKX_UID);
     expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+  });
+
+  // ── 225-18 (CONTEXT Q6 item 2): the stored server is the validated server ──
+  // The analytics validate proves the server it is handed (run_probe's server
+  // bracket). These pin the TS half: the server that is stored is the one that
+  // was validated, and a refused validation stores nothing.
+  it("225-18: validateKey is handed the request's own passphrase, and the inserted venue_server is that same value normalised", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "  MetaQuotes-Demo  " }));
+
+    expect(res.status).toBe(200);
+    expect(mockValidateKey).toHaveBeenCalledTimes(1);
+    expect(mockValidateKey.mock.calls[0][3]).toBe("  MetaQuotes-Demo  ");
+    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    // The literal is the oracle for the normaliser; the call order shows the
+    // insert came after the validation it describes.
+    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(mockValidateKey.mock.invocationCallOrder[0]).toBeLessThan(
+      mockEncryptKey.mock.invocationCallOrder[0],
+    );
+  });
+
+  it.each([
+    ["an auth refusal", new Error("Authentication failed. Check your API key and secret.")],
+    ["the transient answer to a session on another server", new Error("Network error reaching the exchange. Check connectivity and try again.")],
+    ["a wrong-server refusal", new Error("MT5 server was not recognised for this login")],
+  ])("225-18: %s from validateKey writes no api_keys row, calls no RPC and encrypts nothing", async (_name, failure) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mockValidateKey.mockRejectedValue(failure);
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).not.toBe(200);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  it("225-18: an MT5 validation that is not read-only writes nothing either", async () => {
+    mockValidateKey.mockResolvedValue({ valid: true, read_only: false });
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add());
+
+    expect(res.status).toBe(400);
+    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(mockEncryptKey).not.toHaveBeenCalled();
+  });
+
+  it("225-18: an MT5 add that carries no broker server never reaches validateKey or a store", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(mt5Add({ passphrase: "   " }));
+
+    expect(res.status).toBe(400);
+    expect(mockValidateKey).not.toHaveBeenCalled();
+    expect(PERSIST_STATE.inserts).toEqual([]);
   });
 
   // ── Q3 / ONCE-02: never across owners ──────────────────────────────────────

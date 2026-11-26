@@ -436,6 +436,31 @@ export interface StrategyAnalytics {
   last_success_cumulative_method?: string | null;
   last_success_computed_at?: string | null;
   last_success_native_unit?: string | null;
+  /**
+   * Phase 252 (D-02) — NOT a column. The scalar `data_quality_flags->>mtm_gated_reason`, projected as
+   * a JSONB alias by the ranked list projection and the percentile reads, which must not ship the
+   * whole flags blob. A closed-vocabulary reason string (`unsmoothed_options_book` is the one the
+   * options-book withhold reads, strictly, through `isOptionsCashWalletReason`). An evidence INPUT
+   * only: `shapeRowAnalytics` deletes it, so no shaped object and no client component ever carries
+   * it. OPTIONAL like `cumulative_method`: reads that do not project it stay valid.
+   */
+  mtm_gated_reason?: string | null;
+  /**
+   * Phase 252 (D-02) — NOT a column. The same reason out of the derive hop's
+   * `last_success_snapshot.flags`, in the voice of `last_success_native_unit`: it carries the reason
+   * of the success that wrote the stored figures across the derive prestamp, which replaces the live
+   * flags and drops `mtm_gated_reason` with them. An evidence INPUT, deleted by `shapeRowAnalytics`.
+   */
+  last_success_mtm_gated_reason?: string | null;
+  /**
+   * Phase 252 — NOT a column. Set ONLY by `shapeRowAnalytics` on a row it blanked for the options-book
+   * withhold: the row's stored figures are measured on the cash wallet, which leaves out the market
+   * value of open option positions. Absent on every other row (absence is the convention), so every
+   * existing shaped object keeps its exact shape. `rowRecord` turns it into the figure record's
+   * `withheldBy`, `StrategyTable` takes the row out of the ranked set on it, and the percentile reads
+   * skip such a row.
+   */
+  headline_withheld_cause?: "options_cash_wallet";
   drawdown_series: { date: string; value: number }[] | null;
   monthly_returns: Record<string, Record<string, number>> | null;
   daily_returns: Record<string, Record<string, number>> | null;
@@ -1310,6 +1335,10 @@ export interface ApiKey {
   // passed", never "what the venue confirmed" — see the column's own
   // COMMENT. Rendered on both key cards for exchange === "mt5" only.
   venue_account_id: string | null;
+  // Migration 20261125132334 (Phase 225 plan 13, CONN-03). The broker server the
+  // key reads: identity input for accountIdentityTokens (one login on two set
+  // servers is two accounts). Owner-readable; never rendered.
+  venue_server: string | null;
   // Migration 20260925120000 (Phase 167.1.2 D-11). The live key of the same
   // owner that already holds the exchange account this key reads, and why.
   // Both-or-neither in the database. Written only by the service-role
@@ -1373,6 +1402,8 @@ export const ApiKeyRowSchema = z
     last_429_at: _isoTimestampNullable,
     disconnected_at: _isoTimestampNullable,
     venue_account_id: z.string().nullable(),
+    // Phase 225 (CONN-03): owner-readable since plan 13's GRANT.
+    venue_server: z.string().nullable(),
     account_shared_with_api_key_id: z.string().nullable(),
     account_share_kind: z.enum(["duplicate", "composite_member"]).nullable(),
     history_inclusion: z.enum(["include", "exclude"]).nullable(),

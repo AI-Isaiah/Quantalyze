@@ -264,7 +264,15 @@ async def _call(router, req):
 # "login": 123456 matches the parsed login from _make_req's api_key="123456" so the
 # RED-TEAM login bracket (account_info().login == expected, pre+post the read) passes
 # on the happy path — the fake terminal IS on the connected account.
-_INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "currency": "USD", "login": 123456}
+_INVESTOR_ACCOUNT = {
+    "trade_allowed": False,
+    "balance": 1000.0,
+    "currency": "USD",
+    "login": 123456,
+    # Phase 225 plan 18: the session's own server, equal to _make_req's default
+    # passphrase, so the server bracket in run_probe passes on the happy path.
+    "server": "Broker-Demo",
+}
 # An investor order_check is rejected with the DOCUMENTED investor code
 # TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
 #
@@ -805,7 +813,7 @@ async def test_mt5_master_via_trade_allowed_rejected(exchange_router):
     valid:true, so the TS caller never reaches /encrypt-key). release() still runs."""
     router = exchange_router
     client = _make_client(
-        account={"trade_allowed": True, "login": 123456},
+        account={"trade_allowed": True, "login": 123456, "server": "Broker-Demo"},
         order_check=_INVESTOR_ORDER_CHECK,
         terminal=_HEALTHY_TERMINAL_INFO,
     )
@@ -825,7 +833,7 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
     positive signal alone still rejects the master login."""
     router = exchange_router
     client = _make_client(
-        account={"trade_allowed": False, "login": 123456},
+        account={"trade_allowed": False, "login": 123456, "server": "Broker-Demo"},
         order_check={"retcode": 10009, "comment": "Done"},
         terminal=_HEALTHY_TERMINAL_INFO,
     )
@@ -1028,7 +1036,7 @@ async def test_mt5_capability_refusal_logs_carry_no_credentials(
     """
     router = exchange_router
     client = _make_client(
-        account={"trade_allowed": False, "login": 123456},
+        account={"trade_allowed": False, "login": 123456, "server": "MyBroker-Live"},
         order_check=_INVESTOR_ORDER_CHECK,
         terminal={"connected": True, "trade_allowed": False},
     )
@@ -1096,6 +1104,174 @@ async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
     # PRE bracket fires right after the first account_info, before the probe.
     client.order_check.assert_not_called()
     client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 225 plan 18 (CONTEXT Q6 item 2) — the SERVER bracket.
+#
+# A validation stores nothing unless the session it just opened is on the
+# REQUESTED login AND the REQUESTED broker server. `login()` returning success
+# proves neither on its own: the MT5 docs (mql5.com/en/docs/python_metatrader5/
+# mt5login_py, mt5initialize_py) say nothing about a terminal that already holds
+# that login on another server. `account_info().server` is the session's own
+# word (mt5accountinfo_py), so `run_probe` compares it with the request.
+#
+# The two server names are the suite's synthetic labels (tests/conftest.py admits
+# both on the known-server list), never real broker names. `_OTHER_SERVER` stands
+# for a sibling server of the same broker: the known-server pre-check lets it
+# through, so only the session proof can refuse it.
+# --------------------------------------------------------------------------- #
+
+_OTHER_SERVER = "MyBroker-Live"
+
+
+async def test_mt5_session_on_another_server_fails_closed_transient(exchange_router):
+    """(a) login() answers success and account_info() reports the REQUESTED login
+    on ANOTHER server: the validation must fail CLOSED transient (an infra fault,
+    never `valid`, never a user-blame stamp), and order_check must not even run.
+    Before the server bracket this answered {valid: true} — the let-through that
+    would store a key whose server its session never proved."""
+    router = exchange_router
+    client = _make_client(
+        account={**_INVESTOR_ACCOUNT, "server": _OTHER_SERVER},
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_refused_by_a_wrong_server_is_a_permanent_refusal(
+    exchange_router,
+):
+    """(b) A terminal that authorises ONLY the account's own server refuses the
+    same login against any other: the answer is a permanent 400, never `valid`,
+    and nothing is read from the terminal afterwards. The router tests mock the
+    whole Mt5Client, so this pins the router's disposition only; that the server
+    reaches MetaTrader5's own login() is pinned one seam lower in
+    test_mt5_client_contract.py::test_login_passes_the_requested_server_to_mt5."""
+    router = exchange_router
+    own_server = "Broker-Demo"
+
+    def _login_authorising_only_the_own_server(login, password, server):
+        if server != own_server:
+            raise Mt5ClientError(0, "trade server not found")
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK
+    )
+    client.login = MagicMock(side_effect=_login_authorising_only_the_own_server)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req(passphrase=_OTHER_SERVER))
+
+    assert ei.value.status_code == 400
+    assert ei.value.detail == MT5_WRONG_SERVER_DETAIL
+    client.account_info.assert_not_called()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_against_the_accounts_own_server_validates(exchange_router):
+    """(b) positive control: the same double that refuses `_OTHER_SERVER`, asked
+    for the account's own server, answers valid. Without it (b) would stay green
+    for a double that refuses everything."""
+    router = exchange_router
+
+    def _login_authorising_only_the_own_server(login, password, server):
+        if server != "Broker-Demo":
+            raise Mt5ClientError(0, "trade server not found")
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    client.login = MagicMock(side_effect=_login_authorising_only_the_own_server)
+    _install_mt5_client(router, client)
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+
+async def test_mt5_server_spelling_differing_only_by_case_and_space_passes(
+    exchange_router,
+):
+    """(c) The terminal may spell the server with other case or surrounding
+    whitespace than the user typed. Both sides go through `normalise_mt5_server`
+    (the known-server pre-check's own normaliser), so a correct session is never
+    refused. Without the normaliser this would turn every such user away."""
+    router = exchange_router
+    client = _make_client(
+        account={**_INVESTOR_ACCOUNT, "server": "  BROKER-demo \t"},
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    result = await _call(router, _make_req(passphrase="Broker-Demo"))
+
+    assert result == {"valid": True, "read_only": True}
+
+
+@pytest.mark.parametrize("server_field", ["absent", None, "", "   "])
+async def test_mt5_session_reporting_no_server_fails_closed_transient(
+    exchange_router, server_field
+):
+    """(d) account_info() carries no server (absent, None, blank): the bracket
+    FAILS LOUD exactly as the login bracket does for a missing login. An absent
+    field is not a match."""
+    router = exchange_router
+    account = {k: v for k, v in _INVESTOR_ACCOUNT.items() if k != "server"}
+    if server_field != "absent":
+        account["server"] = server_field
+    client = _make_client(
+        account=account,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.order_check.assert_not_called()
+
+
+async def test_mt5_server_changing_after_the_probe_fails_closed_transient(
+    exchange_router,
+):
+    """The POST bracket judges the server too: a session that was on the
+    requested server before order_check and is on another one after it (a
+    concurrent re-login) must not validate. Reads one snapshot per bracket."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    client.account_info = MagicMock(
+        side_effect=[_INVESTOR_ACCOUNT, {**_INVESTOR_ACCOUNT, "server": _OTHER_SERVER}]
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.order_check.assert_called_once()
 
 
 # --------------------------------------------------------------------------- #
@@ -1271,14 +1447,21 @@ async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
     client.release.assert_called_once()
 
 
-@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [p for p in _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL if p.values[0] != -6],
+)
 async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
     exchange_router, code, detail
 ):
     """167 CR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
-    login-stage -10005, 0 or -6 is a refused sign-in: `424 SIGN_IN_FAILED`,
-    `recoverable=False`. The -10005 case is the one D-08 is written about (the
-    modal login dialog a wrong password raises), and the classifier's own
+    login-stage -10005 or 0 is a refused sign-in: `424 SIGN_IN_FAILED`,
+    `recoverable=False`. (⭐ Phase 225: a login-stage -6 is the one refusal code
+    that answers `MT5_SIGN_IN_REFUSED` instead, pinned below; the -6 case is
+    filtered out of this parametrization, and `is_mt5_login_refusal` still holds
+    for it, `test_login_stage_sign_in_answer_is_a_refusal`.) The -10005 case is
+    the one D-08 is written about (the modal login dialog a wrong password
+    raises), and the classifier's own
     -10005 code-gate must not pre-empt it into `NETWORK_UNAVAILABLE`: it answers
     `transient`, which is the tail the predicate splits."""
     router = exchange_router
@@ -1293,6 +1476,39 @@ async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
         f"a login-stage refusal with code {code} was not answered SIGN_IN_FAILED"
     )
     assert getattr(ei.value, "code", None) == "SIGN_IN_FAILED"
+    assert getattr(ei.value, "recoverable", None) is False, (
+        "a refused sign-in must not offer a Retry: it re-sends the same "
+        "credential to the one shared terminal (D-08)"
+    )
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_stage_minus_6_answers_sign_in_refused(exchange_router):
+    """Phase 225 (SIGNINREFUSED), end to end through `_validate_mt5_key_probe` — a
+    login-stage `last_error` of exactly -6 (`RES_E_AUTH_FAILED`, "authorization
+    failed") answers `424 MT5_SIGN_IN_REFUSED`, `recoverable=False`, with the honest
+    detail, and never the `SIGN_IN_FAILED` answer whose detail says the attempt "did
+    not complete". The broker answered and refused; MEASURED on PROD 2026-11-25 with a
+    wrong server and a real investor password (~0.5 s). The sibling test above
+    (-10005 and 0 still answer `SIGN_IN_FAILED`) is what fails if this branch is
+    widened past exactly -6."""
+    from services.closed_sets import MT5_SIGN_IN_REFUSED_DETAIL
+
+    router = exchange_router
+    client = _make_client(
+        login_raises=Mt5LoginRefusedError(-6, "Authorization failed")
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert getattr(ei.value, "code", None) == "MT5_SIGN_IN_REFUSED"
+    assert ei.value.detail == MT5_SIGN_IN_REFUSED_DETAIL
+    assert ei.value.detail != SIGN_IN_FAILED_DETAIL
     assert getattr(ei.value, "recoverable", None) is False, (
         "a refused sign-in must not offer a Retry: it re-sends the same "
         "credential to the one shared terminal (D-08)"

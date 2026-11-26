@@ -24,6 +24,7 @@ fail with exactly the two PROD AttributeErrors above.
 """
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -431,3 +432,119 @@ async def test_fetch_mt5_account_balance_still_returns_equity_for_the_usd_family
     transport = _FakeMt5Transport(account=_account(currency=currency))
     value = await jw._fetch_mt5_account_balance(_session(transport))
     assert value == pytest.approx(ACCOUNT_EQUITY)
+
+
+# ---------------------------------------------------------------------------
+# 225-20 (PR-2c0) — the balance read and the holdings read write the SAME one-line
+# server verdict the derive's read writes (`services.mt5_read.log_mt5_poll_server_verdict`).
+# LOG-ONLY: a False or not_captured poll returns exactly what a True one returns
+# (T-225-66), and a mismatched LOGIN writes no verdict because the login bracket
+# raises first. No line carries a login, a server or the password (T-225-65).
+# ---------------------------------------------------------------------------
+_VERDICT_LOGGER = "quantalyze.analytics.mt5_read"
+_VERDICT_MSG = "mt5 poll server verdict"
+_VERDICT_CASES = [
+    pytest.param("Broker-Live", "True", id="matching"),
+    pytest.param("Broker-Demo-7", "False", id="other-server"),
+    pytest.param(None, "not_captured", id="no-server"),
+]
+
+
+def _verdict_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _VERDICT_MSG in r.getMessage()]
+
+
+def _assert_no_secret(line: str) -> None:
+    folded = line.casefold()
+    for secret in ("broker-live", "broker-demo", str(EXPECTED_LOGIN), "999999", "pw"):
+        assert secret not in folded, (secret, line)
+
+
+def _account_reporting(server: str | None, **overrides: object) -> dict:
+    account = _account(**overrides)
+    if server is not None:
+        account["server"] = server
+    return account
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("server", "label"), _VERDICT_CASES)
+async def test_the_balance_read_logs_one_server_verdict_and_returns_the_same_equity(
+    caplog: pytest.LogCaptureFixture, server: str | None, label: str
+) -> None:
+    transport = _FakeMt5Transport(account=_account_reporting(server))
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        value = await jw._fetch_mt5_account_balance(
+            _session(transport), api_key_id=API_KEY_ID
+        )
+
+    assert value == pytest.approx(ACCOUNT_EQUITY)
+    lines = _verdict_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0] == (
+        f"{_VERDICT_MSG} site=sync_trades_balance holder={API_KEY_ID} "
+        f"session_server_matches_requested={label}"
+    )
+    _assert_no_secret(lines[0])
+
+
+@pytest.mark.asyncio
+async def test_a_balance_read_on_a_mismatched_login_writes_no_verdict_and_still_returns_none(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = _FakeMt5Transport(
+        account=_account_reporting("Broker-Live", login=999_999)
+    )
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        value = await jw._fetch_mt5_account_balance(
+            _session(transport), api_key_id=API_KEY_ID
+        )
+
+    assert value is None
+    assert _verdict_lines(caplog) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("server", "label"), _VERDICT_CASES)
+async def test_the_holdings_read_logs_one_server_verdict_and_returns_the_same_rows(
+    monkeypatch, caplog: pytest.LogCaptureFixture, server: str | None, label: str
+) -> None:
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(account=_account_reporting(server))
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER):
+        rows, warning = await fetch_allocator_holdings(
+            "mt5", _session(transport), API_KEY_ID
+        )
+
+    assert warning is None
+    assert len(rows) == 1
+    assert rows[0]["value_usd"] == pytest.approx(ACCOUNT_EQUITY)
+    lines = _verdict_lines(caplog)
+    assert len(lines) == 1, lines
+    assert lines[0] == (
+        f"{_VERDICT_MSG} site=allocator_holdings holder={API_KEY_ID} "
+        f"session_server_matches_requested={label}"
+    )
+    _assert_no_secret(lines[0])
+
+
+@pytest.mark.asyncio
+async def test_a_holdings_read_on_a_mismatched_login_writes_no_verdict_and_keeps_its_disposition(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from services.allocator_positions import AllocatorHoldingsSyncTransientError
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=_account_reporting("Broker-Live", login=999_999)
+    )
+
+    with caplog.at_level(logging.INFO, logger=_VERDICT_LOGGER), pytest.raises(
+        AllocatorHoldingsSyncTransientError
+    ):
+        await fetch_allocator_holdings("mt5", _session(transport), API_KEY_ID)
+
+    assert _verdict_lines(caplog) == []

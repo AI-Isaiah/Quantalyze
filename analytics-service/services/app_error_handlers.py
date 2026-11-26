@@ -162,7 +162,18 @@ async def validation_exception_handler(
 # one.
 # --------------------------------------------------------------------------
 
-_rate_limit_log = structlog.get_logger("quantalyze.analytics.ratelimit")
+def _rate_limit_log() -> Any:
+    """The rate-limit logger, looked up PER CALL rather than held at module scope.
+
+    Same shape and reason as ``_stage_logger`` in ``services/mt5_client.py``.
+    ``configure_logging()`` sets ``cache_logger_on_first_use=True``, so a
+    module-scope proxy freezes onto the processor list in force at its first
+    emission. Any later ``structlog.configure()`` installs a NEW list the frozen
+    logger never sees, and ``structlog.testing.capture_logs()`` captures through
+    that new list, so the 429 lines went missing from capture once a test in the
+    same process had re-run ``configure_logging()`` after an earlier 429.
+    """
+    return structlog.get_logger("quantalyze.analytics.ratelimit")
 
 
 def _retry_after_seconds(request: Request, exc: RateLimitExceeded) -> int:
@@ -215,7 +226,7 @@ def _log_anon_alert_failure() -> None:
     silently turn the only saturation signal into a no-op.
     """
     try:
-        _rate_limit_log.warning("request.anon_bucket_alert_failed", exc_info=True)
+        _rate_limit_log().warning("request.anon_bucket_alert_failed", exc_info=True)
     except Exception:
         pass  # the failure report must never change or fail the 429 either
 
@@ -259,7 +270,7 @@ def _alert_anon_bucket_saturated(request: Request, throttle: RateLimitExceeded) 
         anon_aggregate_key("process_key"),
     ):
         return
-    _rate_limit_log.warning(
+    _rate_limit_log().warning(
         "request.anon_bucket_saturated",
         path=request.url.path,
         limit=str(throttle.detail),
@@ -305,7 +316,7 @@ async def rate_limit_exceeded_handler(
     )
     # `exc.detail` is the LIMIT string ("5 per 1 hour") built at decoration time
     # from a literal in the router — server configuration, never caller input.
-    _rate_limit_log.warning(
+    _rate_limit_log().warning(
         "request.rate_limited",
         path=request.url.path,
         limit=str(throttle.detail),

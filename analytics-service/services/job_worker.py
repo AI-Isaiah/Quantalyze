@@ -50,6 +50,7 @@ import logging
 import math
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from enum import Enum
@@ -89,6 +90,7 @@ if TYPE_CHECKING:
     # it. `_make_mt5_session` imports the class lazily at RUNTIME (see below), which
     # keeps the module-import-does-not-require-mt5linux contract intact.
 
+from services import exchange as _exchange
 from services import ops_alert
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -115,6 +117,8 @@ from services.db import (
 )
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
+    BINANCE_FILLS_REACH_DAYS,
+    BINANCE_SYNC_FILLS_READ_DEADLINE_S,
     BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
@@ -216,6 +220,7 @@ from services.mt5_read import (  # noqa: F401 — re-export for the derive regre
     _MT5_DEAL_FETCH_MARGIN_S,
     _MT5_MAX_SERVER_UTC_OFFSET_S,
     Mt5HistoryUnsettledError,
+    log_mt5_poll_server_verdict,
     read_mt5_deal_ledger,
 )
 from services.account_unit import (
@@ -327,6 +332,39 @@ PARTITION_COLUMNS: Final[tuple[str, ...]] = (
 # can produce rollout-window inconsistency (workers spawned mid-deploy with
 # different env values processing different jobs differently). Tests can
 # still flip behavior via monkeypatch on this module attribute.
+#
+# Phase 250 BINANCEFILLS (SC-4): do not turn USE_RAW_TRADE_INGESTION on while a
+# Binance key syncs until Phase 250's SC-1 to SC-3 are on main (the
+# window-walking Binance fills read, the non-holding unlisted-symbol flag
+# beside the holding partial-symbol flag, and the page-cap and deadline
+# read-through stamp). One named exception to SC-1 ships with it and this
+# switch accepts it rather than waits for it, the
+# quiet-prefix deadline known limit (founder ruling 2026-11-25 (UTC)): a sync
+# read stopped by its deadline over a prefix holding no stored fill leaves the
+# cursor where it was, named by `binance_deadline_symbols` on every such run
+# and bounded by the reach clamp. A second gap, to SC-3, is a RECORDED OPEN GAP and
+# not an accepted exception: no founder ruling covers it (round-1 review WR-01, round-2
+# review WR-01). The state is a column ahead of where the stopped read began: the stop's bound
+# (or, with none, the read's seed) is below the column. The likeliest entry is the first
+# sync of a second strategy on a key shared with another strategy: the column was set
+# by the other strategy, this strategy has no stored fill and no daily row, so the read
+# walks from the reach with no anchor. Pre-232 wall-clock stamps and deleted fills reach
+# it too. The bounded stop stamp is then below the column, `advance_sync_cursor` only
+# moves the column forward (migration 20260602173710) and drops it, the next seed is
+# again the column, and the stopped symbol's span between its bound and the column may
+# never be re-read. The run names it with the data-quality flag
+# `binance_stop_below_cursor` and a WARNING naming the strategy, the column and the
+# bound; it does not hold the cursor and does not close the gap. Closing it needs an RPC
+# change, outside this phase, booked as `[250-BINANCE-STOP-BELOW-CURSOR]` in TODOS.md. A third known gap is recorded the
+# same way (round-1 review WR-03, T-250-19), the sync handler tail: a
+# fill-heavy read that also runs to its 840 s deadline can overrun the 900 s
+# handler while it persists (one amendment SELECT and one upsert per 100 fills,
+# duplicates included), and `wait_for` then cancels before the cursor RPC. The
+# cursor did not move, so the next run reads the same span to the same frontier,
+# persists the same fills and times out again: a loud stall that repeats on
+# every run, not one failed run, until the account's fills thin out. There is
+# no fill-count stop. This is one of several venue conditions for this switch
+# and certifies nothing about OKX, Bybit or Deribit.
 _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
     os.environ.get("USE_RAW_TRADE_INGESTION", "false").lower() == "true"
 )
@@ -852,6 +890,12 @@ async def _fetch_mt5_account_balance(
         # default-match (the derive branch's _assert_expected_login contract).
         if info.get("login") != session.login:
             raise Mt5AccountMismatchError(session.login, info.get("login"))
+        # 225-20 (PR-2c0) — LOG-ONLY server verdict, only once the login check has
+        # passed. It cannot raise, so it can never turn this read into a dropped
+        # balance snapshot (the swallow-all arm below).
+        log_mt5_poll_server_verdict(
+            info, requested_server=session.server, site=SITE_BALANCE, holder=api_key_id
+        )
         return info
 
     try:
@@ -2098,6 +2142,32 @@ def _emit_audit(
 # Per-kind handlers
 # ---------------------------------------------------------------------------
 
+#: The refusal keys beside the verdict's reasons that the queued sync owns on
+#: `strategy_analytics.data_quality_flags` (Phase 251 SYNCSTORE items 3 and 4).
+_DAILY_PNL_REFUSAL_COMPANIONS: Final[frozenset[str]] = frozenset(
+    {"daily_pnl_fetch_error_class", "daily_pnl_unsupported_venue"}
+)
+
+
+def _is_sync_owned_daily_pnl_key(key: str) -> bool:
+    """True for a `daily_pnl_*` flag key the queued `sync_trades` handler owns.
+
+    The handler owns the refusal keys (Phase 251 CONTEXT Items 3 and 4): on every
+    run where the ccxt daily read ran, the stored owned keys are replaced by that
+    run's drained set, so a clean read clears what an earlier refusal wrote. The
+    reason set comes from the shared `daily_pnl_read_verdict` (a one-key mapping
+    asks the verdict whether the key is a reason), so a reason added to the verdict
+    later is owned automatically; the two companions are listed by name.
+    `daily_pnl_malformed_*` is NOT owned: the derive owns it from a full-history
+    read (founder decision D-12), so the queued sync merges it as drained and never
+    removes it.
+    """
+    return (
+        key in _DAILY_PNL_REFUSAL_COMPANIONS
+        or key in daily_pnl_read_verdict({key: True}).reasons
+    )
+
+
 async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     """Decrypt the strategy's API key, fetch daily PnL from the exchange,
     and persist via the sync_trades RPC.
@@ -2131,6 +2201,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # when the cursor column was NULL at read time and the run had a non-NULL
     # seed. The epilogue writes it only when the fills read failed (see there).
     fills_anchor_iso: str | None = None
+    # The fills read's seed and the column as read (None: no read, or a NULL column); the
+    # epilogue's `binance_stop_below_cursor` check reads both.
+    fills_since_ms: int | None = None
+    _fills_cursor_ms: int | None = None
     # Audit-2026-05-07 red-team CRITICAL conf=9 — ``fetch_all_trades`` /
     # ``fetch_daily_pnl`` can write DQ flags into the per-task buffer
     # (historically ``bybit_daily_pnl_includes_funding`` pre-C-0319;
@@ -2143,6 +2217,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # and survive the ``fetch_raw_trades`` reset for the
     # strategy_analytics stamp below.
     exchange_dq_flags: dict[str, Any] = {}
+    # The daily read's own drained buffer (the ccxt arm reassigns it). It stays
+    # separate from `exchange_dq_flags` because the verdict below reads the daily
+    # read alone; the fills read's flags are never a reason to refuse the store.
+    daily_pnl_dq_flags: dict[str, Any] = {}
     try:
         # --- Phase flags (shared by the mt5 and ccxt arms below) ---
         # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
@@ -2157,6 +2235,15 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # set to the *fetched* count not the *persisted* count; (b) last_sync_at
         # advancing past the unpersisted window permanently; (c) no DQ flag.
         phase1_failed = False
+        # Phase 251 SYNCSTORE: the daily read was REFUSED by the shared verdict
+        # (`daily_pnl_read_verdict`), so nothing was stored. Distinct from
+        # `phase1_failed` (a store that was attempted and raised): a refusal holds
+        # `last_sync_at` and the fills cursor and reports 0 rows, but it is not a
+        # persist failure and never stamps `phase1_daily_pnl_persist_failed`.
+        phase1_read_refused = False
+        # Phase 251: the ccxt daily read ran (set only in the ccxt arm, directly
+        # after its drain). MT5 fetches no daily P&L, so it never sets this.
+        phase1_read_ran = False
 
         if isinstance(ctx.exchange, Mt5Session):
             # MT5SYNC-02 (hotfix 2026-08-06): mt5 is non-ccxt — pre-fix this
@@ -2204,8 +2291,76 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # get clobbered by ``fetch_raw_trades``' entry-seam reset on
             # the same asyncio task.
             daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+            phase1_read_ran = True
             if daily_pnl_dq_flags:
                 exchange_dq_flags.update(daily_pnl_dq_flags)
+
+            # Phase 251 SYNCSTORE items 1 and 2. The verdict is the one shared
+            # reader of the daily buffer (the cron tick and the derive read the
+            # same one), so the queued sync cannot drift from them. A swallowed
+            # venue rate limit is re-raised into the outer 429 arm (static text,
+            # no venue string), exactly as the derive does; a degraded read is
+            # REFUSED, because `sync_trades` deletes the payload's own [min, max]
+            # span before it inserts, so storing it would overwrite real daily
+            # rows with partial or foreign ones. Anything else is stored NOW,
+            # before the balance read and the Phase-2 fills walk, so a run
+            # cancelled or raised in that walk has already kept its daily rows.
+            phase1_verdict = daily_pnl_read_verdict(daily_pnl_dq_flags)
+            if phase1_verdict.rate_limited:
+                raise ccxt.RateLimitExceeded(
+                    "sync_trades: daily P&L read was rate limited"
+                )
+            elif phase1_verdict.reasons:
+                phase1_read_refused = True
+                logger.warning(
+                    "sync_trades: daily P&L read for strategy %s was refused (%s) "
+                    "- nothing was stored and last_sync_at was held",
+                    strategy_id, ",".join(phase1_verdict.reasons),
+                )
+            elif trades:
+                # Persist trades atomically via sync_trades RPC.
+                #
+                # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The
+                # supabase Python client serializes the params dict via json.dumps
+                # internally - if we pre-serialize via json.dumps(trades), PostgREST
+                # receives a JSON STRING (the literal "[...]" text) and casts it to
+                # a JSONB scalar string, not a JSONB array. Then
+                # `jsonb_array_elements(p_trades)` inside migration 007's sync_trades
+                # function fails with 22023 "cannot extract elements from a scalar".
+                # Pass the raw list - supabase-py does the serialization once.
+                #
+                # Phase 1 wrapped in try/except: a 22023 (or any other persist
+                # failure on the daily-PnL DELETE+INSERT path) must NOT abort Phase
+                # 2's raw-fill ingestion below - raw fills are the canonical
+                # fill-level data that downstream analytics + the wizard's
+                # verify-data gate count on.
+                def _sync() -> int:
+                    res = ctx.supabase.rpc(
+                        "sync_trades",
+                        {"p_strategy_id": strategy_id, "p_trades": trades},
+                    ).execute()
+                    # sync_trades returns the integer inserted-row count on
+                    # res.data; narrow via isinstance (a non-int means SQL contract
+                    # drift -> 0, the same value the old `res.data or 0` produced
+                    # for a falsy/absent count).
+                    return res.data if isinstance(res.data, int) else 0
+
+                try:
+                    inserted = await db_execute(_sync)
+                    logger.info(
+                        "sync_trades: persisted %s rows for strategy %s",
+                        inserted, strategy_id,
+                    )
+                except Exception as persist_exc:
+                    # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
+                    # the unpersisted window, (b) trade_count reflects 0 persisted
+                    # rows, and (c) a DQ flag is emitted below for the health card.
+                    phase1_failed = True
+                    logger.warning(
+                        "sync_trades Phase 1 (daily PnL) failed for strategy %s - "
+                        "continuing to Phase 2 raw-fill ingestion: %s",
+                        strategy_id, str(persist_exc),
+                    )
             account_balance = await fetch_usdt_balance(ctx.exchange)
 
         # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
@@ -2252,6 +2407,20 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     fills_anchor_iso = datetime.fromtimestamp(
                         daily_since_ms / 1000, tz=timezone.utc
                     ).isoformat()
+                elif ctx.key_row.get("exchange") == "binance":
+                    # Phase 250 BINANCEFILLS review CR-01: no seed at all, so the read walks
+                    # from the venue's reach and the walk's start IS the reach. Anchor there,
+                    # taken BEFORE the read so it is never past the walk's own start (the read
+                    # takes its clock after this). Without it a stopped or held read that
+                    # stamps nothing leaves the column NULL, and Phase 1 of this very run moves
+                    # the daily high-water the next run seeds from past the unread span.
+                    fills_anchor_iso = (
+                        datetime(1970, 1, 1, tzinfo=timezone.utc)
+                        + timedelta(
+                            milliseconds=_exchange._now_ms()
+                            - BINANCE_FILLS_REACH_DAYS * 86_400_000
+                        )
+                    ).isoformat()
             else:
                 _fill_hw_iso, _fill_hw_err = await db_execute(
                     lambda: load_strategy_fill_high_water(ctx.supabase, strategy_id)
@@ -2266,8 +2435,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     else min(_fills_cursor_ms, _seed_bound_ms)
                 )
             try:
+                # 840 of the handler's 900 s (T-250-19): the persist after the read is
+                # unbounded by it, so a fill-heavy read that runs to its deadline times
+                # out and repeats on every later run (see `_RAW_TRADE_INGESTION_ENABLED`).
                 raw_fills = await fetch_raw_trades(
-                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms
+                    ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms,
+                    read_deadline_s=BINANCE_SYNC_FILLS_READ_DEADLINE_S,
                 )
                 fetch_raw_dq_flags = get_and_clear_last_dq_flags()
                 if fetch_raw_dq_flags:
@@ -2340,47 +2513,6 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-    # Persist trades atomically via sync_trades RPC.
-    #
-    # PostgREST JSONB shape: pass `trades` (list[dict]) directly. The supabase
-    # Python client serializes the params dict via json.dumps internally — if
-    # we pre-serialize via json.dumps(trades), PostgREST receives a JSON STRING
-    # (the literal "[…]" text) and casts it to a JSONB scalar string, not a
-    # JSONB array. Then `jsonb_array_elements(p_trades)` inside migration 007's
-    # sync_trades function fails with 22023 "cannot extract elements from a
-    # scalar". Pass the raw list — supabase-py does the serialization once.
-    #
-    # Phase 1 wrapped in try/except: a 22023 (or any other persist failure on
-    # the daily-PnL DELETE+INSERT path) must NOT abort Phase 2's raw-fill
-    # ingestion below — raw fills are the canonical fill-level data that
-    # downstream analytics + the wizard's verify-data gate count on.
-    if trades:
-        def _sync() -> int:
-            res = ctx.supabase.rpc(
-                "sync_trades",
-                {"p_strategy_id": strategy_id, "p_trades": trades},
-            ).execute()
-            # sync_trades returns the integer inserted-row count on res.data;
-            # narrow via isinstance (a non-int means SQL contract drift → 0, the
-            # same value the old `res.data or 0` produced for a falsy/absent count).
-            return res.data if isinstance(res.data, int) else 0
-
-        try:
-            inserted = await db_execute(_sync)
-            logger.info(
-                "sync_trades: persisted %s rows for strategy %s", inserted, strategy_id
-            )
-        except Exception as e:
-            # NEW-C12-02: set flag so (a) last_sync_at is NOT advanced past
-            # the unpersisted window, (b) trade_count reflects 0 persisted
-            # rows, and (c) a DQ flag is emitted below for the health card.
-            phase1_failed = True
-            logger.warning(
-                "sync_trades Phase 1 (daily PnL) failed for strategy %s — "
-                "continuing to Phase 2 raw-fill ingestion: %s",
-                strategy_id, str(e),
-            )
 
     # Persist raw fills (Phase 2, after exchange is closed).
     #
@@ -2526,6 +2658,156 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 phase2_persisted, strategy_id, amended_count,
             )
 
+    # Checkpoint the fills cursor to what was STORED, never to the clock.
+    # Survives downstream analytics/reconstruction failure. Best-effort — a
+    # missed stamp just means re-fetching one window next run.
+    #
+    # Phase 232 VREAD-08: `last_fetched_trade_timestamp` is a stored-through
+    # mark. When the gate below holds, the stamp is the newest `timestamp`
+    # among the fills this run PERSISTED. Otherwise the param is NULL and the
+    # RPC leaves the column untouched. Before Phase 232 an empty fill list
+    # advanced the cursor to wall-clock now, which covered a raised fetch, an
+    # empty read, the MT5 arm and every run with USE_RAW_TRADE_INGESTION off,
+    # and put the column ahead of the newest stored fill (the 231
+    # `dependency-232` record, WR-03). The gate holds only when:
+    #   * raw fills exist AND every batch persisted (`phase2_complete`);
+    #   * Phase 2 did not fail (`phase2_failed`: a raised fetch or a partial
+    #     persist, G12.A.7: the next run re-fetches the lost fills);
+    #   * Phase 1 did not fail (red-team/C-1: the fills cursor is held back
+    #     with last_sync_at; since Phase 211 the daily read seeds from the
+    #     stored daily high-water, so this now only re-fetches FILLS, which the
+    #     exchange_fill_id dedup absorbs);
+    #   * the daily read was not refused (Phase 251: a refused read stored no
+    #     daily span, so the fills cursor is held with `last_sync_at`);
+    #   * no `sync_truncated_*` flag is true (Phase 232 ruling Q7: a truncated
+    #     read stored an incomplete window, so its newest fill is not a
+    #     stored-through mark) and `binance_partial_symbols` is not set (a
+    #     symbol whose fills read failed left an unread span behind the newest
+    #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
+    #   * every fill timestamp parses (a fill that cannot be dated holds the
+    #     cursor; never a partial maximum).
+    # Phase 250 BINANCEFILLS (SC-3): a Binance read that STOPPED early (a symbol
+    # hit the page cap, a full page had no timestamp to page past, the read
+    # deadline) records `binance_read_through_ms`, the instant every stopped
+    # symbol is complete through. The read still returns healthy symbols' fills
+    # newer than that instant, so the stamp is the newest PERSISTED fill at or
+    # before the bound, never a fill after it. The bound only selects among
+    # persisted fills (never a read-through instant, a window end or the clock
+    # is stamped) and it applies only when nothing above holds. A stop record
+    # whose bound is missing or malformed HOLDS the cursor: `_record_dq_flag`
+    # swallows its own exceptions, so a lost bound must never read as "no stop".
+    # `binance_unlisted_symbols` and `binance_fills_reach_clamped` never hold.
+    _fills_incomplete = any(
+        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
+        and value
+        for key, value in exchange_dq_flags.items()
+    )
+    _read_through_raw = exchange_dq_flags.get("binance_read_through_ms")
+    _read_through: datetime | None = None
+    # `type(...) is int` excludes bool. Exact to the millisecond: the UTC epoch
+    # plus a timedelta, never a float division.
+    if type(_read_through_raw) is int and _read_through_raw >= 0:
+        try:
+            _epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            _read_through = _epoch + timedelta(milliseconds=_read_through_raw)
+        except OverflowError:
+            _read_through = None
+    _fills_stopped = "binance_read_through_ms" in exchange_dq_flags or any(
+        exchange_dq_flags.get(key)
+        for key in (
+            "binance_page_cap_symbols",
+            "binance_untimed_page_symbols",
+            "binance_deadline_symbols",
+        )
+    )
+    if _fills_stopped and _read_through is None:
+        # A stop record whose bound is unusable (T-250-05): hold, exactly like
+        # any other incomplete read. Names the strategy and the bound's type
+        # only, never fill content.
+        if not _fills_incomplete:
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a Binance stop record has no usable read-through bound (%s)",
+                strategy_id, type(_read_through_raw).__name__,
+            )
+        _fills_incomplete = True
+    advance_fetched_cursor = (
+        bool(raw_fills)
+        and phase2_complete
+        and not phase2_failed
+        and not phase1_failed
+        and not phase1_read_refused
+        and not _fills_incomplete
+    )
+    _p_last_fetched: str | None = None
+    if advance_fetched_cursor:
+        try:
+            _stamp_candidates = [
+                coerce_to_aware_utc(fill["timestamp"], "sync_trades")
+                for fill in raw_fills
+            ]
+            if _read_through is not None:
+                _stamp_candidates = [
+                    ts for ts in _stamp_candidates if ts <= _read_through
+                ]
+            _p_last_fetched = (
+                max(_stamp_candidates).isoformat() if _stamp_candidates else None
+            )
+        except (KeyError, ValueError, TypeError, OverflowError, OSError) as exc:
+            # A fill without a usable timestamp: hold the cursor. The log names
+            # the strategy and the exception class only, never fill content.
+            logger.warning(
+                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
+                "a persisted fill has no usable timestamp (%s)",
+                strategy_id, type(exc).__name__,
+            )
+            _p_last_fetched = None
+    elif (phase2_failed or _fills_incomplete) and fills_anchor_iso is not None:
+        # Phase 232 VREAD-08 bootstrap anchor (ruling Q1): the cursor column was
+        # NULL at read time and this run's fills read began at `fills_anchor_iso`
+        # but did not store its span (a raised fetch OR a partial persist: both
+        # leave an unstored span under phase2_fill_ingestion_failed; a truncated
+        # or partial-symbol read returns fills yet leaves an unread span, and
+        # holding a NULL column protects nothing: review 232 CR-01). Anchor the
+        # column at the read start so the next clean run re-reads that span
+        # before the self-heal clears the flag. It never points past where the
+        # read began, and the RPC writes it only into a NULL or earlier column.
+        _p_last_fetched = fills_anchor_iso
+    if _p_last_fetched is None and _fills_stopped and fills_anchor_iso is not None:
+        # Phase 250 BINANCEFILLS (SC-3): a stopped read that left nothing
+        # stampable (every persisted fill after the bound, or no fill at all,
+        # an empty list included) on a NULL column. Anchor at the read start,
+        # never past where the read began; the RPC writes it only into a NULL
+        # or earlier column. Without it the next run seeds from the daily
+        # high-water, which moves on, and the stopped span is never re-read
+        # (RESEARCH Pitfall 5, the 232 CR-01 class).
+        _p_last_fetched = fills_anchor_iso
+
+    # Phase 250 BINANCEFILLS (round-2 review WR-01): the open SC-3 gap recorded at
+    # `_RAW_TRADE_INGESTION_ENABLED`, named at run time. A stopped or incomplete Binance read
+    # on a SET column whose unread span starts below the column (the stop's bound, or with no
+    # bound the read's seed; no seed means the walk began at the reach) and whose stamp is
+    # None or below the column leaves the column where it is, because `advance_sync_cursor`
+    # only moves it forward. The next seed is min(column, newest stored fill), so the span
+    # between the bound and the column may never be read again. Never holds the cursor.
+    if _fills_cursor_ms is not None and (
+        _fills_stopped or exchange_dq_flags.get("binance_partial_symbols")
+    ):
+        _unread_from_ms = _read_through_raw if _read_through is not None else fills_since_ms
+        _stamp_ms = None if _p_last_fetched is None else parse_since_ms(_p_last_fetched)
+        if (_unread_from_ms is None or _unread_from_ms < _fills_cursor_ms) and (
+            _stamp_ms is None or _stamp_ms < _fills_cursor_ms
+        ):
+            exchange_dq_flags["binance_stop_below_cursor"] = True
+            logger.warning(
+                "sync_trades: Binance read stopped below the fills cursor for strategy %s: "
+                "column %s, unread from %s; advance_sync_cursor will not lower the column, "
+                "so the span may not be re-read (binance_stop_below_cursor)",
+                strategy_id,
+                ctx.key_row.get("last_fetched_trade_timestamp"),
+                "the reach" if _unread_from_ms is None else _unread_from_ms,
+            )
+
     # H-0691: When Phase 2 fetch or persist fails, surface the lag into
     # strategy_analytics.data_quality_flags so the admin "Position Metrics
     # Failed" health card lights up. Best-effort — stamp failure must not
@@ -2555,13 +2837,17 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # `phase2_complete` only flipped True when at least one batch was
     # persisted (gated by the `if raw_fills:` block above), so a healthy
     # strategy with no new fills would carry a stale phase2_fill_ingestion_failed=True
-    # flag forever (HIGH code-review finding). We skip the read entirely
-    # only when Phase 2 was not run at all (_RAW_TRADE_INGESTION_ENABLED
-    # is False).
+    # flag forever (HIGH code-review finding). We skip the read only when neither
+    # Phase 2 ran (_RAW_TRADE_INGESTION_ENABLED is False) nor the ccxt Phase-1
+    # daily read ran (an MT5 run with ingestion off): the ccxt daily read is a
+    # second reason to read, because its refusal flags (Phase 251) are owned by
+    # this block and a clean read clears the ones an earlier refusal wrote.
     phase2_success = _RAW_TRADE_INGESTION_ENABLED and not phase2_failed
     # NEW-C12-02: phase1_failed also requires a flag write to surface via
     # the admin health card (it has no pre-existing path for daily-PnL failures).
-    needs_flag_write = phase2_failed or phase2_success or phase1_failed
+    needs_flag_write = (
+        phase2_failed or phase2_success or phase1_failed or phase1_read_ran
+    )
     if needs_flag_write:
         def _load_existing_flags() -> dict[str, Any]:
             res = (
@@ -2580,8 +2866,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # through one() makes this the intended empty-flags path (flag_load_failed
             # stays False, no spurious write) — what the author wrote `res.data or {}`
             # to mean, and what test_sync_trades_feature_flag_on already asserts (skip
-            # the upsert). Deliberate latent-bug fix; only reachable when
-            # USE_RAW_TRADE_INGESTION is on (off by default in prod).
+            # the upsert). Deliberate latent-bug fix; reachable whenever this block
+            # reads: with USE_RAW_TRADE_INGESTION on, and (Phase 251) on every ccxt
+            # run, since the Phase-1 daily read is a reason to read as well.
             row = one(res) or {}
             return dict(row.get("data_quality_flags") or {})
 
@@ -2589,18 +2876,25 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         try:
             existing_flags = await db_execute(_load_existing_flags)
         except Exception as load_exc:  # noqa: BLE001
-            # If the read fails, fall back to a fresh dict — we'd rather
-            # potentially overwrite stale flags than skip the signal entirely
-            # (analytics_runner re-emits its flags on the next computation).
+            # If the read fails, fall back to a fresh dict. Whether that dict is
+            # then upserted depends on the run (see the write decision below): a
+            # run where Phase 2 ran still writes its recovery payload (the
+            # analytics_runner re-emits its flags on the next computation), a run
+            # where it did not writes nothing.
             logger.warning(
                 "sync_trades: failed to load existing data_quality_flags for "
-                "strategy %s — proceeding with new-flag-only upsert: %s",
+                "strategy %s — continuing with an empty flag set: %s",
                 strategy_id, load_exc,
             )
             existing_flags = {}
             flag_load_failed = True
 
         flag_was_set = existing_flags.get("phase2_fill_ingestion_failed") is True
+        # Phase 251: `write_needed` only ACCUMULATES. It used to be assigned in
+        # every arm of the chain below, so the Phase-2 arm's trailing reset to
+        # False erased the True a Phase-1 persist failure had just set, and the
+        # `phase1_daily_pnl_persist_failed` stamp was never written.
+        write_needed = False
 
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — merge the DQ flags
         # drained from ``fetch_raw_trades`` (binance_partial_symbols,
@@ -2612,8 +2906,39 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # cross-clobber is not a concern. ``exchange_dq_flags`` is {} on
         # the clean path (most common) so this is a no-op then.
         exchange_dq_flags_present = bool(exchange_dq_flags)
+        # Phase 251 items 3 and 4: on every run where the ccxt daily read ran,
+        # the stored owned `daily_pnl_*` refusal keys are REPLACED by this run's
+        # drained set: they are popped here, the drained set is merged in below,
+        # and the owned keys are compared before and after, so a run that changes
+        # no owned key makes no write of its own. `daily_pnl_malformed_*` is not
+        # owned (the derive owns it), so it is merged as drained and never popped.
+        owned_before = (
+            {k: v for k, v in existing_flags.items() if _is_sync_owned_daily_pnl_key(k)}
+            if phase1_read_ran
+            else {}
+        )
+        if phase1_read_ran:
+            for owned_key in [
+                k for k in existing_flags if _is_sync_owned_daily_pnl_key(k)
+            ]:
+                existing_flags.pop(owned_key, None)
         if exchange_dq_flags_present:
             existing_flags.update(exchange_dq_flags)
+        if phase1_read_ran:
+            # The stored class is the verdict's sanitized identifier, never the
+            # raw drained string (a venue string must not reach the stored flags);
+            # absent when the verdict has none.
+            if "daily_pnl_fetch_error_class" in existing_flags:
+                sanitized_class = daily_pnl_read_verdict(daily_pnl_dq_flags).error_class
+                if sanitized_class is None:
+                    existing_flags.pop("daily_pnl_fetch_error_class", None)
+                else:
+                    existing_flags["daily_pnl_fetch_error_class"] = sanitized_class
+            owned_after = {
+                k: v for k, v in existing_flags.items() if _is_sync_owned_daily_pnl_key(k)
+            }
+            if owned_after != owned_before:
+                write_needed = True
 
         # NEW-C12-02: emit DQ flag when Phase-1 (daily-PnL) RPC failed so
         # the admin health card lights up (pre-fix had no flag path for this).
@@ -2621,8 +2946,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             existing_flags["phase1_daily_pnl_persist_failed"] = True
             existing_flags["phase1_failed_at"] = datetime.now(timezone.utc).isoformat()
             write_needed = True
-        elif existing_flags.get("phase1_daily_pnl_persist_failed"):
-            # Clear stale flag on a successful Phase-1 run.
+        elif existing_flags.get("phase1_daily_pnl_persist_failed") and not phase1_read_refused:
+            # Clear stale flag on a successful Phase-1 run. A refused read is not
+            # one (Phase 251): it stored nothing, so it must not assert a recovery
+            # that did not happen, and a stale flag stays until a run that stores.
             existing_flags.pop("phase1_daily_pnl_persist_failed", None)
             existing_flags.pop("phase1_failed_at", None)
             write_needed = True
@@ -2632,17 +2959,22 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             existing_flags["phase2_error"] = phase2_error_message or "unknown"
             existing_flags["phase2_failed_at"] = datetime.now(timezone.utc).isoformat()
             write_needed = True
-        else:
+        elif phase2_success:
             # Phase 2 ran without raising — clear the lingering flag if present.
+            # Phase 251: this arm is entered only when Phase 2 RAN. A run with
+            # ingestion off says nothing about its own stored `phase2_*` keys.
             # Red-team M-conf=8: when the read itself failed we cannot tell
             # from an empty dict whether the DB row carries a stale failure
             # flag. Write the recovery payload defensively in that case so a
             # recovered strategy whose read transiently blipped no longer
             # perma-stays in "needs attention" on the admin health card.
-            # PostgREST upsert merges JSONB keys, so emitting an EXPLICIT
-            # `phase2_fill_ingestion_failed=False` is required on the
-            # load-failed path (a pop here would not actually remove the
-            # stale key from the DB row since we never read it).
+            # The upsert sends the WHOLE merged object and REPLACES the stored
+            # column (tests/test_okxtrades_cursor.py `_FakeAnalytics.upsert` and
+            # the src/app/api/keys/sync/route.ts comment are the in-repo
+            # evidence), so a pop on the load-failed path would not remove the
+            # stale key from the DB row since we never read it: the explicit
+            # `phase2_fill_ingestion_failed=False` marker stays for runs where
+            # Phase 2 ran.
             if flag_was_set:
                 existing_flags.pop("phase2_fill_ingestion_failed", None)
                 existing_flags.pop("phase2_error", None)
@@ -2662,10 +2994,23 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 # signal (e.g. binance_partial_symbols, sync_truncated_*).
                 # Persist so the admin health card can see it.
                 write_needed = True
-            else:
-                write_needed = False
 
-        if write_needed:
+        # "Phase 2 ran" is `phase2_failed or phase2_success`, which equals
+        # `_RAW_TRADE_INGESTION_ENABLED` (MT5 included).
+        phase2_ran = phase2_failed or phase2_success
+        if write_needed and flag_load_failed and not phase2_ran:
+            # The flags could not be read on a run where the fills walk did not
+            # run. An upsert here would replace the whole column with a payload
+            # guessed from an empty dict (dropping every flag the analytics runner
+            # owns), so nothing is written. The next sync re-reads and re-derives
+            # the flags.
+            logger.warning(
+                "sync_trades: skipping the flag write for strategy %s — the "
+                "data_quality_flags could not be read on a run where the fills "
+                "walk did not run; the next sync re-reads and re-derives them",
+                strategy_id,
+            )
+        elif write_needed:
             def _stamp_phase2_flags() -> None:
                 ctx.supabase.table("strategy_analytics").upsert(
                     {
@@ -2683,72 +3028,6 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     "phase2_* for strategy %s: %s",
                     strategy_id, flag_exc,
                 )
-
-    # Checkpoint the fills cursor to what was STORED, never to the clock.
-    # Survives downstream analytics/reconstruction failure. Best-effort — a
-    # missed stamp just means re-fetching one window next run.
-    #
-    # Phase 232 VREAD-08: `last_fetched_trade_timestamp` is a stored-through
-    # mark. When the gate below holds, the stamp is the newest `timestamp`
-    # among the fills this run PERSISTED. Otherwise the param is NULL and the
-    # RPC leaves the column untouched. Before Phase 232 an empty fill list
-    # advanced the cursor to wall-clock now, which covered a raised fetch, an
-    # empty read, the MT5 arm and every run with USE_RAW_TRADE_INGESTION off,
-    # and put the column ahead of the newest stored fill (the 231
-    # `dependency-232` record, WR-03). The gate holds only when:
-    #   * raw fills exist AND every batch persisted (`phase2_complete`);
-    #   * Phase 2 did not fail (`phase2_failed`: a raised fetch or a partial
-    #     persist, G12.A.7: the next run re-fetches the lost fills);
-    #   * Phase 1 did not fail (red-team/C-1: the fills cursor is held back
-    #     with last_sync_at; since Phase 211 the daily read seeds from the
-    #     stored daily high-water, so this now only re-fetches FILLS, which the
-    #     exchange_fill_id dedup absorbs);
-    #   * no `sync_truncated_*` flag is true (Phase 232 ruling Q7: a truncated
-    #     read stored an incomplete window, so its newest fill is not a
-    #     stored-through mark) and `binance_partial_symbols` is not set (a
-    #     symbol whose fills read failed left an unread span behind the newest
-    #     fill of the symbols that succeeded; review 232 CR-02 / SFH-01);
-    #   * every fill timestamp parses (a fill that cannot be dated holds the
-    #     cursor; never a partial maximum).
-    _fills_incomplete = any(
-        (key.startswith("sync_truncated_") or key == "binance_partial_symbols")
-        and value
-        for key, value in exchange_dq_flags.items()
-    )
-    advance_fetched_cursor = (
-        bool(raw_fills)
-        and phase2_complete
-        and not phase2_failed
-        and not phase1_failed
-        and not _fills_incomplete
-    )
-    _p_last_fetched: str | None = None
-    if advance_fetched_cursor:
-        try:
-            _p_last_fetched = max(
-                coerce_to_aware_utc(fill["timestamp"], "sync_trades")
-                for fill in raw_fills
-            ).isoformat()
-        except (KeyError, ValueError, TypeError, OverflowError, OSError) as exc:
-            # A fill without a usable timestamp: hold the cursor. The log names
-            # the strategy and the exception class only, never fill content.
-            logger.warning(
-                "sync_trades Phase 2: holding fetched-cursor for strategy %s — "
-                "a persisted fill has no usable timestamp (%s)",
-                strategy_id, type(exc).__name__,
-            )
-            _p_last_fetched = None
-    elif (phase2_failed or _fills_incomplete) and fills_anchor_iso is not None:
-        # Phase 232 VREAD-08 bootstrap anchor (ruling Q1): the cursor column was
-        # NULL at read time and this run's fills read began at `fills_anchor_iso`
-        # but did not store its span (a raised fetch OR a partial persist: both
-        # leave an unstored span under phase2_fill_ingestion_failed; a truncated
-        # or partial-symbol read returns fills yet leaves an unread span, and
-        # holding a NULL column protects nothing: review 232 CR-01). Anchor the
-        # column at the read start so the next clean run re-reads that span
-        # before the self-heal clears the flag. It never points past where the
-        # read began, and the RPC writes it only into a NULL or earlier column.
-        _p_last_fetched = fills_anchor_iso
 
     # NEW-C12-05 (CL12): fenced epilogue write. The two cursor checkpoints
     # (last_fetched_trade_timestamp, last_sync_at) and the balance snapshot are
@@ -2770,7 +3049,8 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     Phase 211 it seeds the Phase-2 fills read ONLY (`fills_since_ms`);
     #     the Phase-1 daily-P&L read seeds from the stored high-water instead.
     #   • last_sync_at advances only when Phase-1 persisted rows (NEW-C12-02:
-    #     advancing past an unpersisted window loses the daily-PnL permanently).
+    #     advancing past an unpersisted window loses the daily-PnL permanently)
+    #     and the daily read was not refused (Phase 251: nothing was stored).
     #   • account_balance_usdt is written whenever present (no ordering).
     #
     # Error policy: this consolidates two writes (the old fetched-cursor write
@@ -2780,7 +3060,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # swallow-with-warning is safe and avoids a retry storm on a persistent
     # api_keys write fault. Not silent: the warning is surfaced loudly.
     _now_iso = datetime.now(timezone.utc).isoformat()
-    _p_last_sync = _now_iso if not phase1_failed else None
+    _p_last_sync = None if phase1_read_refused else (_now_iso if not phase1_failed else None)
 
     if _p_last_fetched is None and _p_last_sync is None and account_balance is None:
         # silent-failure/F-04: nothing to write (no stored-through fills stamp,
@@ -2788,9 +3068,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # distinguish it from a write-path regression that drops the update.
         logger.info(
             "sync_trades: advance_sync_cursor skipped — no columns to write "
-            "(advance_fetched_cursor=%s phase1_failed=%s account_balance=%s; "
-            "last_sync_at intentionally held for retry)",
-            advance_fetched_cursor, phase1_failed, account_balance,
+            "(advance_fetched_cursor=%s phase1_failed=%s phase1_read_refused=%s "
+            "account_balance=%s; last_sync_at intentionally held for retry)",
+            advance_fetched_cursor, phase1_failed, phase1_read_refused,
+            account_balance,
         )
     else:
         def _advance_cursor() -> bool:
@@ -2850,19 +3131,16 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # wizard was the only path that needed this and it has been broken
     # since the queue substrate was introduced.
     #
-    # Enqueue is best-effort *for the job retry loop* — a transient failure
-    # must not retry-loop sync_trades (the trades are already persisted and
-    # the next cron tick re-enqueues cleanly). However, the wizard polls
-    # strategy_analytics.computation_status and would otherwise spin for
-    # up to 24h with no error UI until the daily cron tick (regression
-    # of the same wizard-hang class PR #116 was meant to root-cause-fix).
-    #
-    # Fix: when the enqueue fails, write a `failed` row to strategy_analytics
-    # with a discriminating computation_error so the wizard's polling loop
-    # in SyncPreviewStep.tsx surfaces a GATE_ANALYTICS_FAILED envelope and
-    # the user sees a real error instead of an indefinite spinner. The
-    # daily cron will still re-enqueue and the next successful run will
-    # upsert computation_status back to 'computing' / 'complete'.
+    # Enqueue outcome (Phase 222 ERRC-03, founder rulings OQ2 and OQ4): the trades are
+    # already persisted when the enqueue runs, so a failure here is NOT retried as a
+    # sync of its own accord. What the failure does depends on whether the strategy has
+    # numbers published (see the except arm below):
+    #   * nothing published -> a `failed` row is written for the wizard poller
+    #     (SyncPreviewStep.tsx) and the handler returns FAILED / transient, so the queue
+    #     retries the sync with its backoff; the row reads 'computing' between attempts
+    #     and 'failed' with the retries-exhausted sentence at the last;
+    #   * published, or the publish state unreadable -> nothing is written and the job is
+    #     DONE; the daily cron re-enqueues on the next tick.
     # Follow-on analytics kind: the funding-inclusive CSV route
     # (derive_broker_dailies → compute_analytics_from_csv). The legacy
     # trades-only compute_analytics re-entry was retired in 106-08.
@@ -2894,104 +3172,208 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             exc,
         )
 
-        # Mark strategy_analytics.computation_status='failed' so the
-        # wizard's poller (SyncPreviewStep.tsx) breaks out of its
-        # waiting_for_complete state and renders an error envelope.
-        # Best-effort: if even this write fails, we log + swallow rather
-        # than fail the job (the trades are already persisted).
-        # ⛔⛔ THIS WRITE IS ERASED ONE RPC LATER, AND NO PROVENANCE MARKER CAN
-        # SAVE IT (164.2-REVIEW WR-01). READ THIS BEFORE ADDING ONE BACK.
-        # --------------------------------------------------------------------
-        # Phase 164.2 stamped this payload with ('writer', <this job's id>) on
-        # the theory that the bridge's branch (b) would then keep the curated
-        # sentence. MEASURED, it never reaches a branch that consults a marker:
-        # this handler returns DispatchOutcome.DONE at the foot of the function
-        # (the trades DID persist), `main_worker.py:929` maps DONE to
-        # `mark_compute_job_done`, and that RPC ends in
-        # `PERFORM sync_strategy_analytics_status`. With this sync job now done
-        # and NO analytics job enqueued — that is the very failure being
-        # recorded — every compute_jobs row for the strategy is terminal-done,
-        # `live_failures` is empty, and the bridge takes branch (c), which
-        # writes computation_status='complete', computation_error=NULL, BOTH
-        # markers NULL and a fresh computed_at, unconditionally.
-        #
-        # So the user's row reads 'complete' with no analytics and a fresh
-        # vintage. That erasure is PRE-EXISTING — it is the 161.1 F1 class, and
-        # F1's comment at the derive handler's insufficient-history exit
-        # (:5082) describes it exactly — and this comment is what 164.2 owed it
-        # instead of a stamp that nothing reads.
-        #
-        # ⛔ AND THE F1 REMEDY DOES NOT TRANSFER TO THIS HANDLER. F1 returns
-        # FAILED/permanent so the bridge takes (b) or (b-prime). It is applied
-        # at a `derive_broker_dailies` job, and that kind is IN the bridge's
-        # `is_protected` kind list (`derive_broker_dailies`,
-        # `compute_analytics_from_csv`, `stitch_composite`) — so on a marked
-        # recurring refresh over a healthy published row it lands on (b-prime),
-        # which PRESERVES the publish state. `sync_trades` is not in that list
-        # and can never be protected, so the same edit here always lands on the
-        # LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups
-        # would unpublish a live funded factsheet to 'failed' until the next
-        # tick's `done` supersedes it — and if the enqueue ever fails
-        # SYSTEMATICALLY (a bad kind, an RLS change), every live strategy on the
-        # platform goes dark within one cron tick. Correcting the outcome here
-        # needs to be scoped to the case with nothing published to lose, which
-        # is a founder-facing change and NOT a review fix. Booked in TODOS.md as
-        # [SYNCTRADES-ENQUEUE-DONE].
-        #
-        # Until that lands this payload is DELIBERATELY UNSTAMPED, and the
-        # provenance census carves it out BY EXACT KEY SET with its own count,
-        # so re-stamping it collapses the carve-out and reddens the gate rather
-        # than silently restoring an inert marker.
-        #
-        # ⚠️ The WRITE itself stays, and the paragraph above is why the comment
-        # below it must not be read as a working guarantee: the bridge runs
-        # inside the very next RPC, so the 'failed' row this lands is visible to
-        # the wizard poller for milliseconds at best. It is kept because it is
-        # the authoritative record at the moment it is made, because deleting it
-        # would be a SECOND behaviour change on the same live path, and because
-        # it is the row that becomes correct the day the TODOS item lands.
-        try:
-            def _mark_analytics_failed() -> None:
-                _enqueue_failed_payload: dict[str, Any] = {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
-                        # every terminal 'failed' so the status bridge (branches
-                        # a/c) cannot resurrect a stale complete_with_warnings.
-                        "computation_warned": False,
-                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
-                        "computing_started_at": None,
-                        "computation_error": (
-                            "Analytics enqueue failed during sync. "
-                            "The next scheduled sync will retry — "
-                            "contact support if this persists."
-                        ),
-                        # ⛔ NO computation_error_source / computation_error_job_id.
-                        # See the block above this `try`. A marker here is read by
-                        # nobody and asserts a protection that does not exist.
-                }
-
-                ctx.supabase.table("strategy_analytics").upsert(
-                    _enqueue_failed_payload,
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_mark_analytics_failed)
-        except Exception as mark_exc:  # noqa: BLE001
-            logger.exception(
-                "sync_trades: failed to mark strategy_analytics as "
-                "failed for strategy %s after enqueue failure — wizard "
-                "may still hang. Error: %s",
-                strategy_id,
-                mark_exc,
+        # Phase 222 ERRC-03 (CONTEXT ruling, option a; founder rulings OQ2 and OQ4,
+        # 2026-11-25). What this tail does depends on whether the strategy has numbers
+        # PUBLISHED, so that is read BEFORE any write. `_strategy_has_published_numbers`
+        # is the local twin of `_published_numbers_exist` in
+        # run_derive_broker_dailies_job (same select, same `getattr(res, "data", None)
+        # or {}` read, same OQ4 predicate); that closure is outside this handler's write
+        # scope, so it is mirrored here rather than shared. Published means a success
+        # status, or a 'computing' row that already carries its headline
+        # ``metrics_json``.
+        def _strategy_has_published_numbers() -> bool:
+            res = (
+                ctx.supabase.table("strategy_analytics")
+                .select("computation_status, metrics_json")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
             )
+            row = getattr(res, "data", None) or {}
+            return isinstance(row, dict) and (
+                row.get("computation_status") in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+                or (
+                    row.get("computation_status") == "computing"
+                    and row.get("metrics_json") is not None
+                )
+            )
+
+        _nothing_published = False
+        try:
+            _published = await db_read_with_retry(_strategy_has_published_numbers)
+        except Exception as read_exc:  # noqa: BLE001
+            # FAILED is reserved for a strategy with nothing published, and an
+            # unreadable state is not that: a read hiccup must never unpublish a live
+            # strategy. Write nothing, return DONE below. RESIDUAL (T-222-13): if the
+            # enqueue AND this read both fail on a never-published strategy, the row is
+            # left to the status bridge, which reads 'complete' (today's outcome).
+            # Recorded as a known limit; ERROR so an operator sees it.
+            logger.exception(
+                "sync_trades: follow-on enqueue failed for strategy %s AND the publish "
+                "state could not be read — writing nothing and returning DONE (an "
+                "unreadable state is not 'nothing published'). Error: %s",
+                strategy_id,
+                read_exc,
+            )
+        else:
+            if _published:
+                logger.error(
+                    "sync_trades: follow-on enqueue failed for strategy %s, which is "
+                    "published — writing nothing so its publish state (status, "
+                    "computation_warned, figures) is kept; the next cron tick retries "
+                    "the enqueue.",
+                    strategy_id,
+                )
+            else:
+                _nothing_published = True
+
+        # Nothing published: mark strategy_analytics 'failed', then return FAILED below.
+        # Best-effort: if even this write fails, we log + swallow (the trades are already
+        # persisted); the FAILED outcome below still lets the status bridge set the row.
+        # The write and the zero-row re-read sit in SEPARATE `try` scopes (251-02, SC-5),
+        # so each log line names the call that failed and the two outcomes differ.
+        #
+        # THE FAILED/DONE SPLIT (replaces the 164.2-REVIEW WR-01 erasure analysis):
+        #   * nothing published -> FAILED / transient -> `mark_compute_job_failed` ->
+        #     `failed_retry` (bridge branch (a): the row reads 'computing' between
+        #     attempts) and then `failed_final` at the last attempt (bridge branch (b):
+        #     the curated transient sentence from `computation_error_copy`). The DONE
+        #     this handler used to return sent the bridge to branch (c) and the row read
+        #     'complete' with a NULL error and no analytics (ROADMAP SC-3).
+        #   * published -> NO write, DONE -> branch (c) keeps the publish state (a
+        #     complete_with_warnings row stays that, because this write is what used to
+        #     clear `computation_warned`). OQ4.
+        #   * publish read failed -> NO write, DONE, plus the residual noted at the
+        #     `except` above.
+        #   * zero-row write, then a re-read that RAISES -> NO further write, DONE, by
+        #     the same rule as a failed publish read (an unreadable state is not
+        #     'nothing published'); the T-222-13 residual applies. A write that itself
+        #     raises stays FAILED: the first read said nothing is published.
+        # Why FAILED only when nothing is published: the 161.1 F1 remedy (an
+        # unconditional FAILED) does not transfer to this handler. `sync_trades` is not
+        # in the bridge's `is_protected` kind list (`derive_broker_dailies`,
+        # `compute_analytics_from_csv`, `stitch_composite`), so an unconditional FAILED
+        # would always land on the loud branch (b) and unpublish a live funded factsheet;
+        # a SYSTEMATIC enqueue fault would take every live strategy dark in one cron tick.
+        #
+        # This payload stays DELIBERATELY UNSTAMPED by founder ruling 2026-11-25 (Phase
+        # 222 ERRC-03): no computation_error_source / computation_error_job_id, so branch
+        # (b) stores the curated kind sentence over it instead of keeping this one. The
+        # provenance census carves the payload out BY EXACT KEY SET with its own count
+        # (EXPECTED_INERT_SITES), so re-stamping it reddens that gate; a re-stamp needs a
+        # new founder decision, not a count change.
+        if _nothing_published:
+            try:
+                def _mark_analytics_failed() -> bool:
+                    _enqueue_failed_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
+                            # every terminal 'failed' so the status bridge (branches
+                            # a/c) cannot resurrect a stale complete_with_warnings.
+                            "computation_warned": False,
+                            # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                            "computing_started_at": None,
+                            "computation_error": (
+                                "Analytics enqueue failed during sync. "
+                                "The next scheduled sync will retry — "
+                                "use the contact form if this persists."
+                            ),
+                            # ⛔ NO computation_error_source / computation_error_job_id.
+                            # See the block above this `try`. A marker here is read by
+                            # nobody and asserts a protection that does not exist.
+                    }
+
+                    # SFH-01: the publish read above and this write are separate
+                    # round trips, so an unconditional upsert could overwrite a row a
+                    # concurrent analytics job published in between. The write itself
+                    # is therefore conditional on "nothing published" (the inverse of
+                    # `_strategy_has_published_numbers`): an UPDATE that skips a success
+                    # status and a 'computing' row carrying metrics_json. A zero-row
+                    # result is therefore ambiguous, and the caller decides which it
+                    # was: no row (the FAILED return below makes
+                    # `mark_compute_job_failed` run the status bridge, which creates
+                    # the row: branch (a) 'computing', then branch (b) 'failed'), or a
+                    # row published in between (R2-WR-01: it must not be marked failed
+                    # by the bridge either, so the caller returns DONE).
+                    res = (
+                        ctx.supabase.table("strategy_analytics")
+                        .update(_enqueue_failed_payload)
+                        .eq("strategy_id", strategy_id)
+                        .not_.in_(
+                            "computation_status",
+                            sorted(STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES),
+                        )
+                        .or_("computation_status.neq.computing,metrics_json.is.null")
+                        .execute()
+                    )
+                    return bool(getattr(res, "data", None))
+
+                wrote = await db_execute(_mark_analytics_failed)
+            except Exception as write_exc:  # noqa: BLE001
+                # The write raised: its effect is unknown, but the first read said
+                # nothing is published, so FAILED cannot unpublish a figure. No
+                # re-read; the outcome stays FAILED below.
+                logger.exception(
+                    "sync_trades: the conditional failed-row write raised for "
+                    "strategy %s after the follow-on enqueue failed — the outcome "
+                    "stays FAILED so the status bridge records the failure. "
+                    "Error: %s",
+                    strategy_id,
+                    write_exc,
+                )
+            else:
+                if not wrote:
+                    try:
+                        _published_in_between = await db_read_with_retry(
+                            _strategy_has_published_numbers
+                        )
+                    except Exception as reread_exc:  # noqa: BLE001
+                        # Same rule as the publish-read arm above: an unreadable
+                        # state is not 'nothing published' (T-222-13), so a
+                        # re-read hiccup must never become FAILED, which at the
+                        # last attempt lets bridge branch (b) write 'failed' over
+                        # a row that may be published. Nothing was written.
+                        logger.exception(
+                            "sync_trades: follow-on enqueue failed for strategy %s "
+                            "and the failed-row write matched zero rows; the "
+                            "re-read of the publish state then raised — nothing "
+                            "was written, returning DONE (an unreadable state is "
+                            "not 'nothing published'). Error: %s",
+                            strategy_id,
+                            reread_exc,
+                        )
+                        _nothing_published = False
+                    else:
+                        if _published_in_between:
+                            logger.error(
+                                "sync_trades: follow-on enqueue failed for strategy %s, and the "
+                                "strategy was published between the publish read and the write "
+                                "— writing nothing and returning DONE so the status bridge "
+                                "keeps its publish state (R2-WR-01).",
+                                strategy_id,
+                            )
+                            _nothing_published = False
+
+            # Constant operator sentence naming the cause: no exception text, no ids
+            # (T-222-11). Transient (OQ2): an enqueue fault is not a property of the
+            # strategy; the retry re-runs the sync.
+            if _nothing_published:
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_kind="transient",
+                    error_message=(
+                        "sync_trades: the follow-on analytics enqueue failed and the "
+                        "strategy has nothing published"
+                    ),
+                )
 
     return DispatchResult(
         # NEW-C12-02: trade_count must reflect PERSISTED rows, not fetched.
         # Pre-fix a Phase-1 failure still reported len(trades) which gave a
         # false green signal (admin sees "N rows synced" with 0 persisted).
         outcome=DispatchOutcome.DONE,
-        trade_count=0 if phase1_failed else len(trades),
+        trade_count=0 if (phase1_failed or phase1_read_refused) else len(trades),
     )
 
 
@@ -7809,6 +8191,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _mt5_session,
                             now=_mt5_now,
                             settle_history=_mt5_fresh,
+                            # 225-20: attribution for the verdict line only.
+                            holder=ctx.key_row.get("id"),
                         ),
                         timeout=mt5_derive_read_bound_s(
                             read_s=_MT5_DERIVE_READ_TIMEOUT_S,
@@ -12426,7 +12810,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         await _stamp_failed(
             f"Composite has {len(members)} member keys, above the safe maximum of "
             f"{_max_members} for the current derive-timeout budget. Reduce members "
-            "or contact support to raise the limit."
+            "or use the contact form to ask for a higher limit."
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -16729,6 +17113,32 @@ def _no_capital_exit_consumes_only_dust(
     )
 
 
+def _no_capital_ledger_level(
+    basis: tuple[Mapping[str, float], Mapping[str, float]] | None,
+) -> float | None:
+    """234 NOCAP-01 (DEC-02-A), 166.3.1 A2: the balance a key's OWN stored deal ledger implies,
+    ``sum(composed flow_usd) + sum(composed pnl_usd)``, or None when there is no independent proof.
+
+    ``basis`` is the ``(flows_by_day, pnl_by_day)`` pair ``read_writer_basis`` returns for the
+    key's own ``key_inputs`` row, or None. For MT5 the stored realized terminal copies the live
+    balance read, so A2 on it is circular; the writer builds both series from the deal ledger
+    (``history_deals_get``, a full-history fetch), never from ``account_info``, so their sum is
+    the balance the deals imply. Pure over stored numbers. None for no basis, for an empty day P&L
+    (the job's own rule treats it as no basis: an empty pair sums to 0.0 and would read as a proved
+    empty ledger), or for a non-finite total (an unreadable number is not evidence of an empty
+    account).
+
+    The caller confirms emptiness over a two-sided band, ``-DUST_NAV_FLOOR <= level <= DUST_NAV_FLOOR``,
+    mirroring A2's ``<=``. A ledger above the band says the account is funded; one below it says the
+    stored deals miss funding (a withdrawal with no deposit). Neither proves the account empty, and
+    the replay does NOT catch the far-negative one downstream, so the caller refuses both. Known bound (RESEARCH A7): a native-BTC MT5 key with a small non-zero
+    native terminal adds a bounded extra term to this sum; both live PROD exits are USD keys."""
+    if basis is None or not basis[1]:
+        return None
+    total = float(sum(basis[0].values())) + float(sum(basis[1].values()))
+    return total if math.isfinite(total) else None
+
+
 async def run_derive_allocator_equity_job(
     job: dict[str, Any], *, _markers_rechecked: bool = False
 ) -> DispatchResult:
@@ -16762,17 +17172,21 @@ async def run_derive_allocator_equity_job(
     )
     from services.allocator_equity_derive import (
         FULL_HISTORY_VENUES,
+        LEDGER_PROOF_VENUES,
         SHARED_ACCOUNT_KINDS,
         WRITER_BASIS_WITHHELD_TOKENS,
         DegradeReason,
         DeriveRefusal,
         account_groups,
+        ambiguous_server_key_ids,
         blocking_degrade_tokens,
         eligible_key_predicate,
         identity_pending_venues,
+        no_capital_refusal_field,
         read_dropped_day_pnl,
         read_realized_terminal,
         read_returns_stamp,
+        read_tiny_base_days,
         read_writer_basis,
         read_writer_basis_withheld,
         refusal_payload,
@@ -16792,7 +17206,10 @@ async def run_derive_allocator_equity_job(
     supabase = get_supabase()
 
     async def _persist_refusal(
-        token: str, *, extra_reasons: Sequence[str] = ()
+        token: str,
+        *,
+        extra_reasons: Sequence[str] = (),
+        no_capital_exit_refused: Mapping[str, int] | None = None,
     ) -> None:
         # 167.1.2.1.1 SC-1 (D-04): a refusal REPLACES the (allocator_id,
         # 'equity_curve') row with a version-2 payload that names why, in ONE atomic
@@ -16808,6 +17225,7 @@ async def run_derive_allocator_equity_job(
                 token,
                 composed_at=datetime.now(timezone.utc).isoformat(),
                 extra_reasons=extra_reasons,
+                no_capital_exit_refused=no_capital_exit_refused,
             ),
             "computed_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -16826,7 +17244,7 @@ async def run_derive_allocator_equity_job(
             supabase.table("api_keys")
             .select(
                 "id,is_active,sync_status,disconnected_at,"
-                "exchange,venue_account_id,"
+                "exchange,venue_account_id,venue_server,"
                 "account_shared_with_api_key_id,account_share_kind,"
                 "history_inclusion"
             )
@@ -17125,6 +17543,36 @@ async def run_derive_allocator_equity_job(
     # account still do.
     # The account is the identity token (venue id OR marker link), so a
     # departed holder and the live key marked against it are one account here.
+    # 225 CONN-03 (CONTEXT Q6 agent decision): a key with no server on a login that carries
+    # two or more servers cannot be placed, live or disconnected. Unreachable for a new key
+    # under the founder ruling of 2026-11-25 (connect refuses an MT5 key without a server,
+    # existing ones are deleted); kept only to fail loud, behaviour unchanged. It runs
+    # BEFORE the collision check so the named cause wins over a collision the ambiguity
+    # could also produce, and it has its own token because the collision's line
+    # ("disconnect one of them") would not clear a key that is already disconnected.
+    # Token, allocator id and a count only (T-167.1.2-22): no key id, login, server or USD.
+    ambiguous_keys = ambiguous_server_key_ids(key_rows)
+    if ambiguous_keys:
+        reason = DeriveRefusal.ACCOUNT_SERVER_AMBIGUOUS.value
+        await _persist_refusal(reason)
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_refusal", reason)
+            sentry_sdk.capture_message(
+                f"derive_allocator_equity: {reason} — a key with no broker server "
+                "reads a login that carries two or more servers; the equity curve "
+                "was refused and recorded",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: %s for allocator %s (ambiguous_keys=%d) — "
+            "recorded the refusal in the equity_curve row; the book shows the "
+            "rebuilding panel until the key's server is known",
+            reason,
+            allocator_id,
+            len(ambiguous_keys),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
     identity_tokens = account_identity_tokens(key_rows)
     collisions = account_identity_collisions(
         [
@@ -17276,6 +17724,9 @@ async def run_derive_allocator_equity_job(
     # 167.1.2.2 D-15: the P&L of the days each key's TWR left out of its stored
     # returns ({ISO day: USD}). An older row has none and composes as before.
     dropped_pnl_by_key: dict[str, dict[str, float]] = {}
+    # 234 founder ruling 2026-11-24: each counted or departed key's own stated tail days.
+    # A stitch source never fills this (its tail days belong to the kept member's list).
+    tiny_base_days_by_key: dict[str, frozenset[str]] = {}
     source_dropped_pnl: dict[str, dict[str, float]] = {}
     # CR-01: ``(ISO day, USD)`` — the level each key's NAV was rolled back from by its
     # writer. An older row has none and is replayed from its live anchor as before. A
@@ -17333,6 +17784,10 @@ async def run_derive_allocator_equity_job(
     # 166.3.1 plan 09: the keys that qualify for that rule, mapped to ``(token, (terminal day,
     # terminal level))`` as stored. Filled in the loop below, applied after the stitch.
     no_capital_candidates: dict[str, tuple[str, tuple[str, float]]] = {}
+    # 234 NOCAP-03: how many would-be no-capital keys this run kept on ``dropped_key``, by closed
+    # route token (``NO_CAPITAL_REFUSAL_REASONS``), one count per key. Merged with the compose's own
+    # counts into ``payload["inputs"]["no_capital_exit_refused"]`` after the compose.
+    no_capital_refusals: Counter[str] = Counter()
     # 164.6.6.2.1 D-09 (mechanism I2): the interior days a missing close left out of a BTC key's
     # USD series, and the realized USD level on the last priced day before each such hole. The
     # compose replays the key in segments split there and rolls each back from its own level.
@@ -17372,6 +17827,7 @@ async def run_derive_allocator_equity_job(
                     ]
                     anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
                     dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(departed_payload)
+                    tiny_base_days_by_key[api_key_id] = read_tiny_base_days(departed_payload)
                     _departed_terminal = read_realized_terminal(departed_payload)
                     if _departed_terminal is not None:
                         realized_terminal_by_key[api_key_id] = _departed_terminal
@@ -17433,6 +17889,7 @@ async def run_derive_allocator_equity_job(
                 for _f in (payload.get("flows") or [])
             ]
             dropped_pnl_by_key[api_key_id] = read_dropped_day_pnl(payload)
+            tiny_base_days_by_key[api_key_id] = read_tiny_base_days(payload)
             _terminal = read_realized_terminal(payload)
             if _terminal is not None:
                 realized_terminal_by_key[api_key_id] = _terminal
@@ -17530,15 +17987,28 @@ async def run_derive_allocator_equity_job(
                 and _nc_reason in _NO_CAPITAL_ANCHOR_REASONS
                 and api_key_id in last_return_day
                 and api_key_id not in departed_end_by_key
-                and _nc_terminal is not None
+            ):
+                # 234 NOCAP-03: a key that gets this far would be a candidate but for the writer's
+                # terminal, so each way it stays on ``dropped_key`` is counted by name, once. A
+                # read-failure token never reaches here (it is not evidence of an empty account),
+                # so it is never counted as a no-capital fallback.
+                if _nc_terminal is None:
+                    no_capital_refusals["no_stored_terminal"] += 1
                 # A2: the writer must agree the account is small. Its last level is at or below
                 # the dust floor (which sits above the emptied band, so a level inside that band
                 # qualifies too). A live read that says empty over a funded terminal is a
                 # transient zero or a mis-priced balance until proven otherwise: the key keeps
                 # today's ``dropped_key`` rather than exiting while the book reads trustworthy.
-                and _nc_terminal[1] <= DUST_NAV_FLOOR
-            ):
-                no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
+                elif _nc_terminal[1] > DUST_NAV_FLOOR:
+                    no_capital_refusals["funded_terminal"] += 1
+                # 234 NOCAP-01 (DEC-02-D, negative equity): a terminal below -DUST_NAV_FLOOR is
+                # not an exit on any venue. The sign is recorded through the token (TODOS
+                # [166.3.1-NOCAP-MT5-A2-CIRCULAR] "records its sign"); exactly -DUST_NAV_FLOOR
+                # passes this gate, mirroring A2's boundary.
+                elif _nc_terminal[1] < -DUST_NAV_FLOOR:
+                    no_capital_refusals["negative_terminal"] += 1
+                else:
+                    no_capital_candidates[api_key_id] = (str(_nc_reason), _nc_terminal)
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
@@ -17742,82 +18212,156 @@ async def run_derive_allocator_equity_job(
             dict(departed_end_by_key),
             {},
         )
-    no_capital_refused = 0
-    for _k in sorted(no_capital_candidates):
-        _nc_token, (_nc_p, _nc_p_level) = no_capital_candidates[_k]
-        _nc_last = last_return_day[_k]
-        _nc_end, _nc_level = _nc_p, _nc_p_level
-        # D-10 (review round 1 CR-01/WR-01): the exit is only as honest as what it consumes. The
-        # amounts it names or drops must be the dust-sized ones D-08 measured; anything else
-        # keeps today's ``dropped_key`` (D-02: no reconciliation gate is weakened by an exit).
-        _nc_basis_k = writer_basis_by_key.get(_k)
-        if _nc_basis_k is not None:
-            _nc_flow_by_day: dict[str, float] = {}
-            for _f in _nc_basis_k[0]:
-                _nc_flow_by_day[_f.utc_day_iso] = (
-                    _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
-                )
-            _nc_pnl_by_day: Mapping[str, float] = _nc_basis_k[1]
-        else:
-            _nc_flow_by_day = {}
-            for _f in flows_by_key[_k]:
-                _nc_flow_by_day[_f.utc_day_iso] = (
-                    _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
-                )
-            _nc_pnl_by_day = dropped_pnl_by_key[_k]
-        if not _no_capital_exit_consumes_only_dust(
-            _nc_p,
-            _nc_last,
-            (_f.utc_day_iso for _f in flows_by_key[_k]),
-            dropped_pnl_by_key[_k],
-            _nc_flow_by_day,
-            _nc_pnl_by_day,
-        ):
-            no_capital_refused += 1
-            continue
-        if _nc_p > _nc_last:
-            _nc_end = _nc_last
-            _nc_level = _no_capital_level_on_last_return_day(
-                _nc_p, _nc_p_level, _nc_last, _nc_flow_by_day, _nc_pnl_by_day
-            )
-        anchors_by_key[_k] = _nc_level
-        null_anchor_reasons.pop(_k, None)
-        realized_terminal_by_key[_k] = (_nc_end, _nc_level)
-        departed_end_by_key[_k] = _nc_end
-        no_capital_exit_by_key[_k] = (_nc_token, _nc_end)
-        flows_by_key[_k] = [_f for _f in flows_by_key[_k] if _f.utc_day_iso <= _nc_end]
-        dropped_pnl_by_key[_k] = {
-            _d: _v for _d, _v in dropped_pnl_by_key[_k].items() if _d <= _nc_end
-        }
-        if _k in writer_basis_by_key:
-            _nc_wflows = [_f for _f in writer_basis_by_key[_k][0] if _f.utc_day_iso <= _nc_end]
-            _nc_wpnl = {_d: _v for _d, _v in writer_basis_by_key[_k][1].items() if _d <= _nc_end}
-            # A3 pad. The replay's writer mode needs the realized terminal on the basis' LAST day,
-            # and after the trim that day is before L when L is a gap-fill row the writer left
-            # out of its day P&L (it carries the level). Such a day has a stored return of
-            # exactly 0.0 and so no P&L, so a 0.0 writer P&L on L states the same fact. It is
-            # NEVER padded over a non-zero stored return: that would let a zero stand in for a
-            # real day's P&L. That key keeps the unpadded basis, reads ``writer_basis_mismatch``
-            # in the replay and falls back to ``dropped_key`` in the compose.
+    # 234 NOCAP-02 (T-234-09): an exception that is not a ``NavReconstructionError`` raised while
+    # the loop applies a candidate (a malformed stored row reads as a ``KeyError`` or
+    # ``ValueError``) used to escape the job, which ``classify_exception`` files as ``unknown``:
+    # the dispatcher retried and the previous ``equity_curve`` row stayed stale on every attempt.
+    # The rule exists to make a book better, so the fault reverts every candidate ONCE to the
+    # inputs exactly as stored and the job carries on to the upsert. The loop counts its own
+    # refusals into a loop-local counter that joins the run's only when the loop completes, so
+    # a reverted loop is counted as one ``candidate_exception`` per candidate and nothing else.
+    # Only ``Exception`` is caught here: a ``BaseException`` that is not one (cancellation,
+    # interpreter exit) propagates. The warning names the class and counts, never the text (a
+    # ``KeyError``'s text is the missing key, which can be a key id). Runs before the failing-key
+    # section below, which edits ``no_capital_stored.departed_end``.
+    _nc_loop_refusals: Counter[str] = Counter()
+    try:
+        for _k in sorted(no_capital_candidates):
+            _nc_token, (_nc_p, _nc_p_level) = no_capital_candidates[_k]
+            _nc_last = last_return_day[_k]
+            _nc_end, _nc_level = _nc_p, _nc_p_level
+            # 234 NOCAP-01 (DEC-02-A/B, 166.3.1 A2 circular): on a venue whose stored terminal IS the
+            # live balance read (``LEDGER_PROOF_VENUES``), the terminal is no evidence the account is
+            # empty, so the key's OWN deal ledger must agree. Read from the key's own row basis
+            # (``writer_basis_raw``), never ``writer_basis_by_key``, which holds a stitched basis for
+            # a kept key. No own basis is no proof; a ledger above the dust floor says the account is
+            # funded, and one below ``-DUST_NAV_FLOOR`` says the stored deals miss funding (the band is
+            # two-sided; the replay does not catch the far-negative one). Either way the key keeps ``dropped_key`` with its stored inputs untouched, like
+            # a D-10 refusal. Runs BEFORE D-10: D-10 reasons about amounts walked back from a
+            # terminal that, here, is evidence only once the ledger confirms it. The venue read is the
+            # same expression ``full_history_keys`` uses. Counts only (no key id, no USD).
             if (
-                _nc_end != _nc_p
-                and _nc_wpnl
-                and _nc_end not in _nc_wpnl
-                and _nc_end in returns_by_key[_k].index
-                and float(returns_by_key[_k].loc[_nc_end]) == 0.0
+                str(rows_by_id[_k].get("exchange") or "").strip().lower() in LEDGER_PROOF_VENUES
             ):
-                _nc_wpnl[_nc_end] = 0.0
-            if _nc_wpnl:
-                writer_basis_by_key[_k] = (_nc_wflows, _nc_wpnl)
+                _nc_ledger_level = _no_capital_ledger_level(writer_basis_raw.get(_k))
+                if _nc_ledger_level is None:
+                    _nc_loop_refusals["ledger_basis_absent"] += 1
+                    continue
+                if _nc_ledger_level > DUST_NAV_FLOOR:
+                    _nc_loop_refusals["ledger_level_funded"] += 1
+                    continue
+                if _nc_ledger_level < -DUST_NAV_FLOOR:
+                    _nc_loop_refusals["ledger_level_negative"] += 1
+                    continue
+            # D-10 (review round 1 CR-01/WR-01): the exit is only as honest as what it consumes. The
+            # amounts it names or drops must be the dust-sized ones D-08 measured; anything else
+            # keeps today's ``dropped_key`` (D-02: no reconciliation gate is weakened by an exit).
+            _nc_basis_k = writer_basis_by_key.get(_k)
+            if _nc_basis_k is not None:
+                _nc_flow_by_day: dict[str, float] = {}
+                for _f in _nc_basis_k[0]:
+                    _nc_flow_by_day[_f.utc_day_iso] = (
+                        _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
+                    )
+                _nc_pnl_by_day: Mapping[str, float] = _nc_basis_k[1]
             else:
-                del writer_basis_by_key[_k]
+                _nc_flow_by_day = {}
+                for _f in flows_by_key[_k]:
+                    _nc_flow_by_day[_f.utc_day_iso] = (
+                        _nc_flow_by_day.get(_f.utc_day_iso, 0.0) + _f.usd_signed
+                    )
+                _nc_pnl_by_day = dropped_pnl_by_key[_k]
+            if not _no_capital_exit_consumes_only_dust(
+                _nc_p,
+                _nc_last,
+                (_f.utc_day_iso for _f in flows_by_key[_k]),
+                dropped_pnl_by_key[_k],
+                _nc_flow_by_day,
+                _nc_pnl_by_day,
+            ):
+                _nc_loop_refusals["consumes_more_than_dust"] += 1
+                continue
+            if _nc_p > _nc_last:
+                _nc_end = _nc_last
+                _nc_level = _no_capital_level_on_last_return_day(
+                    _nc_p, _nc_p_level, _nc_last, _nc_flow_by_day, _nc_pnl_by_day
+                )
+            anchors_by_key[_k] = _nc_level
+            null_anchor_reasons.pop(_k, None)
+            realized_terminal_by_key[_k] = (_nc_end, _nc_level)
+            departed_end_by_key[_k] = _nc_end
+            no_capital_exit_by_key[_k] = (_nc_token, _nc_end)
+            flows_by_key[_k] = [_f for _f in flows_by_key[_k] if _f.utc_day_iso <= _nc_end]
+            dropped_pnl_by_key[_k] = {
+                _d: _v for _d, _v in dropped_pnl_by_key[_k].items() if _d <= _nc_end
+            }
+            if _k in writer_basis_by_key:
+                _nc_wflows = [_f for _f in writer_basis_by_key[_k][0] if _f.utc_day_iso <= _nc_end]
+                _nc_wpnl = {_d: _v for _d, _v in writer_basis_by_key[_k][1].items() if _d <= _nc_end}
+                # A3 pad. The replay's writer mode needs the realized terminal on the basis' LAST day,
+                # and after the trim that day is before L when L is a gap-fill row the writer left
+                # out of its day P&L (it carries the level). Such a day has a stored return of
+                # exactly 0.0 and so no P&L, so a 0.0 writer P&L on L states the same fact. It is
+                # NEVER padded over a non-zero stored return: that would let a zero stand in for a
+                # real day's P&L. That key keeps the unpadded basis, reads ``writer_basis_mismatch``
+                # in the replay and falls back to ``dropped_key`` in the compose.
+                if (
+                    _nc_end != _nc_p
+                    and _nc_wpnl
+                    and _nc_end not in _nc_wpnl
+                    and _nc_end in returns_by_key[_k].index
+                    and float(returns_by_key[_k].loc[_nc_end]) == 0.0
+                ):
+                    _nc_wpnl[_nc_end] = 0.0
+                if _nc_wpnl:
+                    writer_basis_by_key[_k] = (_nc_wflows, _nc_wpnl)
+                else:
+                    del writer_basis_by_key[_k]
+    except Exception as _nc_exc:  # noqa: BLE001 - revert, never fail the job for a candidate
+        if no_capital_stored is None:
+            raise
+        _nc_restore: list[tuple[Any, Any]] = [
+            (anchors_by_key, no_capital_stored.anchors),
+            (null_anchor_reasons, no_capital_stored.null_reasons),
+            (flows_by_key, no_capital_stored.flows),
+            (dropped_pnl_by_key, no_capital_stored.dropped_pnl),
+            (realized_terminal_by_key, no_capital_stored.realized_terminal),
+            (writer_basis_by_key, no_capital_stored.writer_basis),
+            (departed_end_by_key, no_capital_stored.departed_end),
+        ]
+        for _live_map, _stored_map in _nc_restore:
+            _live_map.clear()
+            _live_map.update(_stored_map)
+        no_capital_exit_by_key.clear()
+        no_capital_refusals["candidate_exception"] += len(no_capital_candidates)
+        # A WARNING log reaches Sentry only as a breadcrumb, and a programming bug in the candidate
+        # path would otherwise downgrade a book with no event. ONE warning event: static message,
+        # tags are the job and the exception class only (no key id, no text, no amount).
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("exception_class", type(_nc_exc).__name__)
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: an unexpected exception was raised while applying "
+                "no-capital candidates, reverted to the inputs as stored",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: %s raised while applying %d no-capital candidate(s) of "
+            "allocator %s - reverting them once to %s",
+            type(_nc_exc).__name__,
+            len(no_capital_candidates),
+            allocator_id,
+            DegradeReason.DROPPED_KEY.value,
+        )
+    else:
+        no_capital_refusals.update(_nc_loop_refusals)
 
-    if no_capital_refused:
+    if no_capital_refusals["consumes_more_than_dust"]:
         # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
         logger.warning(
             "derive_allocator_equity: %d no-capital key(s) of allocator %s keep "
             "dropped_key: the exit would consume or drop more than dust (D-10)",
-            no_capital_refused,
+            no_capital_refusals["consumes_more_than_dust"],
             allocator_id,
         )
 
@@ -18142,6 +18686,9 @@ async def run_derive_allocator_equity_job(
             # D-15: the P&L of the days the TWR left out of the stored returns. An
             # older key_inputs row has none, and its key composes as before.
             dropped_day_pnl_by_key=inputs.dropped_pnl,
+            # 234 founder ruling 2026-11-24: a flow after a key's last return day on a day its
+            # own row states in tiny_base_days is a stated day's flow, not out_of_window_flow.
+            tiny_base_days_by_key=tiny_base_days_by_key or None,
             # CR-01: the level each writer rolled its NAV back from. The replay rolls
             # the stored returns back from it, so the open position at the moment of the
             # derive neither shifts a level nor moves the zero-start verdict.
@@ -18169,7 +18716,11 @@ async def run_derive_allocator_equity_job(
         # post-liquidation poison input would leave the frozen pre-liquidation curve
         # rendering as trustworthy FOREVER; the refusal record (167.1.2.1.1 D-04)
         # holds the row instead and the book shows "rebuilding" with its reason.
-        await _persist_refusal(DeriveRefusal.COMPOSE_REFUSED.value)
+        # 234 NOCAP-03: a refusal written after a candidate fallback carries the run's counts.
+        await _persist_refusal(
+            DeriveRefusal.COMPOSE_REFUSED.value,
+            no_capital_exit_refused=no_capital_refusal_field(no_capital_refusals) or None,
+        )
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -18203,8 +18754,45 @@ async def run_derive_allocator_equity_job(
         # unpadded writer basis), which is today's result, and carry on to the upsert. If that
         # refuses too, the refusal is not the rule's and the permanent path runs unchanged.
         # Counts and the refusal class only (no key id, no day, no USD).
+        # 234 NOCAP-03: the first compose's own counts leave with its payload; the stored-input
+        # compose below has no candidate to count. Each candidate in play is named once here.
+        no_capital_refusals["compose_reverted"] += len(no_capital_exit_by_key)
         logger.warning(
             "derive_allocator_equity: compose refused (%s) with %d no-capital candidate(s) in "
+            "play for allocator %s — re-composing once with them reverted to %s",
+            type(exc).__name__,
+            len(no_capital_exit_by_key),
+            allocator_id,
+            DegradeReason.DROPPED_KEY.value,
+        )
+        try:
+            payload = _compose(no_capital_stored)
+        except NavReconstructionError as exc_again:
+            return await _compose_refused(exc_again)
+    except Exception as exc:  # noqa: BLE001 - a candidate's fault reverts; any other fault re-raises
+        # 234 NOCAP-02 (T-234-09, T-234-10): the same revert for an exception that is NOT a
+        # ``NavReconstructionError`` (a candidate's malformed inputs reading as a ``KeyError`` or
+        # ``ValueError`` inside the compose). It runs ONLY with a candidate in play: with none the
+        # fault is not the rule's and reaches the dispatcher exactly as before (``unknown``). The
+        # stored-input compose below keeps today's two outcomes (a ``NavReconstructionError`` is
+        # ``_compose_refused``; anything else propagates), and a ``BaseException`` that is not an
+        # ``Exception`` is never caught here. Counts and the class name only: a ``KeyError``'s
+        # text is the missing key, which can be a key id.
+        if no_capital_stored is None or not no_capital_exit_by_key:
+            raise
+        no_capital_refusals["candidate_exception"] += len(no_capital_exit_by_key)
+        # Same single Sentry warning event as the apply loop's handler: static message, tags are
+        # the job and the exception class only.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("exception_class", type(exc).__name__)
+            sentry_sdk.capture_message(
+                "derive_allocator_equity: an unexpected exception was raised in the compose with "
+                "no-capital candidates in play, reverted to the inputs as stored",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: compose raised %s with %d no-capital candidate(s) in "
             "play for allocator %s — re-composing once with them reverted to %s",
             type(exc).__name__,
             len(no_capital_exit_by_key),
@@ -18243,6 +18831,17 @@ async def run_derive_allocator_equity_job(
         payload["inputs"]["writer_basis_missing_members"] = absent_members
         payload["inputs"]["writer_basis_stitched_members"] = absent_stitched_members
 
+    # 234 NOCAP-03: one benign counts-only field names every route a no-capital key took to
+    # ``dropped_key`` this run: the compose's own (replay refused, blocking reason, ...) merged with
+    # the routes only the job sees (selection, the D-10 bound, the compose revert). It never enters
+    # ``degrade_reasons`` or ``flags``. Absent when nothing fell back, so a healthy payload is
+    # unchanged.
+    no_capital_refused_counts = Counter(payload["inputs"].get("no_capital_exit_refused") or {})
+    no_capital_refused_counts.update(no_capital_refusals)
+    no_capital_refused_field = no_capital_refusal_field(no_capital_refused_counts)
+    if no_capital_refused_field:
+        payload["inputs"]["no_capital_exit_refused"] = no_capital_refused_field
+
     # ── 5. B2 root cause: an EMPTY curve is NOT a renderable series. A
     #      zero-anchored-keys / zero-weight-mass compose (every prod allocator
     #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
@@ -18277,11 +18876,15 @@ async def run_derive_allocator_equity_job(
                 for k, a in anchors_by_key.items()
             )
         ):
-            await _persist_refusal(DeriveRefusal.COMPOSE_EMPTY.value)
+            await _persist_refusal(
+                DeriveRefusal.COMPOSE_EMPTY.value,
+                no_capital_exit_refused=no_capital_refused_field or None,
+            )
         else:
             await _persist_refusal(
                 DeriveRefusal.COMPOSE_EMPTY_BLOCKED.value,
                 extra_reasons=_blocking,
+                no_capital_exit_refused=no_capital_refused_field or None,
             )
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "

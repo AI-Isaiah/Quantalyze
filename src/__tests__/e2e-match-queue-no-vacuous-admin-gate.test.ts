@@ -27,6 +27,10 @@
  * remediation — re-introducing a hardcoded credential, a silent
  * `if (hasDashboard)` body, an early `return;` bail-out, or the env-gated
  * reported-skip. So the anti-pattern cannot silently creep back in.
+ *
+ * Credential absence is enforced over the whole tracked tree by
+ * `scripts/check-demo-credential-digests.ts`; the first arm below only checks
+ * the spec's SHAPE (no quoted credential assignment), so it needs no needle.
  */
 
 import { describe, it, expect } from "vitest";
@@ -50,42 +54,41 @@ function stripComments(src: string): string {
     .replace(/^\s*\/\/.*$/gm, "");
 }
 
-/**
- * ⚠️ These two literals are DELIBERATELY retained — do not "scrub" them.
- *
- * They are the needle this guard searches for: the assertions below prove the
- * credential is ABSENT from `e2e/match-queue.spec.ts`, and an absence assertion
- * cannot be written without naming the thing that must be absent. Replacing
- * them with a placeholder would make every assertion below pass unconditionally
- * — a guard that cannot fail, which is worse than no guard (H-1050 / M-0876).
- *
- * 158-REVIEW CR-03 reviewed this file and confirmed the exception. The honest
- * accounting: this repository is PUBLIC, so this pair IS published — but it was
- * already published the moment it was first committed, and it remains in git
- * history regardless of any text change made now. Deleting it here would cost a
- * working guard and remediate nothing. The ONLY real remediation is to
- * disable/rotate the `matratzentester24@gmail.com` account on every project it
- * exists in; that is a human action, tracked in TODOS, and NOT done by this
- * change. Once rotated, these become inert strings and the guard keeps working.
- */
-const HARDCODED_CRED = "matratzentester24@gmail.com";
-const HARDCODED_PW = "Test12";
-
 describe("e2e/match-queue.spec.ts — admin-gate is not vacuous (H-1050 / M-0876)", () => {
   const raw = readSpec("e2e/match-queue.spec.ts");
   const code = stripComments(raw);
 
-  it("contains no hardcoded plaintext credential in executable code", () => {
-    // The committed-credential leg of the H-1050 chain. The reference inside
-    // the file's doc comment (describing what was removed) is allowed; an
-    // executable string literal is not.
+  it("contains no quoted credential assignment in executable code", () => {
+    // The committed-credential leg of the H-1050 chain, checked by SHAPE so
+    // this file needs no needle. Credential absence itself is enforced over
+    // the whole tracked tree by scripts/check-demo-credential-digests.ts. Each
+    // finding records the shape and the line of the comment-stripped source,
+    // never the matched text.
+    const shapes: Array<[string, RegExp]> = [
+      [
+        "a const/let/var named for an email or password bound to a quoted string",
+        /\b(?:const|let|var)\s+[A-Za-z0-9_$]*(?:EMAIL|PASSWORD)[A-Za-z0-9_$]*(?:\s*:[^=\n]+)?\s*=\s*["'`]/i,
+      ],
+      [
+        "a page.fill on a login email or password selector with a quoted value",
+        /\bpage\.fill\(\s*[^,()\n]*(?:email|password)[^,()\n]*,\s*["'`]/i,
+      ],
+      [
+        "a quoted string literal holding an email address",
+        /(["'`])[^"'`\n]*[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+[^"'`\n]*\1/,
+      ],
+    ];
+    const offenders: string[] = [];
+    code.split("\n").forEach((text, idx) => {
+      for (const [shape, re] of shapes) {
+        if (re.test(text)) offenders.push(`${shape}, line ${idx + 1}`);
+      }
+    });
     expect(
-      code.includes(HARDCODED_CRED),
-      `match-queue.spec.ts re-introduced the committed credential ` +
-        `${HARDCODED_CRED} in executable code. Source creds from ` +
-        `E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD instead (H-1050).`,
-    ).toBe(false);
-    expect(code.includes(`"${HARDCODED_PW}"`) || code.includes(`'${HARDCODED_PW}'`)).toBe(false);
+      offenders,
+      "match-queue.spec.ts holds a quoted credential in executable code. " +
+        "Source creds from E2E_ADMIN_EMAIL / E2E_ADMIN_PASSWORD instead (H-1050).",
+    ).toEqual([]);
   });
 
   it("sources admin creds from env, not from a literal", () => {

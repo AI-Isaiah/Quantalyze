@@ -3,10 +3,10 @@
  *
  * Reproduces the EXACT public shape of the retired legacy blend-panels module
  * (deleted in Plan 108-02), but derives every rolling series from the ONE
- * canonical backbone — the POPULATION-std primitives in `factsheet/rolling.ts`
+ * canonical backbone — the sample-std (ddof 1, F-5) primitives in `factsheet/rolling.ts`
  * (the same code the full backbone series-bundle entry calls) — and the
  * quantiles from `factsheet/quantiles.ts::quantileSummary`. No second
- * Sharpe/annualization stack, no sample-std (÷ n−1) math lives here.
+ * Sharpe/annualization stack, and no std math of its own, lives here.
  *
  * Pure TS, zero side-effects (no fetch / DOM / time). Consumes the frozen
  * engine's UNROUNDED `portfolio_daily_returns` (`{ date, value }[]`, where
@@ -14,13 +14,12 @@
  * `scenario-factsheet-payload.ts` (synthesize-a-minimal-input discipline).
  *
  * USER DECISIONS honoured (108-CONTEXT):
- *   - Parity std: POPULATION std is canonical (backbone). The prior module used
- *     SAMPLE std (÷ n−1). The shift is sub-1px on the chart line; a ~0.2–0.8%
- *     relative shift IS visible in the rolling vol/Sharpe HOVER TOOLTIPS
- *     (2-decimal percent, e.g. 3M vol 25.00% → 24.80%) — accepted as the
- *     canonical population-std value (user-confirmed), an intentional convention
- *     unification (one rolling-std path), NOT a regression. (Do not claim it is
- *     invisible at display precision — the tooltip is hover-visible.)
+ *   - Parity std: the backbone's std is canonical (one rolling-std path). 108 fixed
+ *     it on the POPULATION std (÷ n), a ~0.2–0.8% shift against the retired module's
+ *     SAMPLE std that was hover-visible in the tooltips. Phase 236 (F-5, "365, ddof 1
+ *     everywhere") moved the backbone itself to the SAMPLE std (÷ n−1), so this adapter
+ *     follows it and the convention stays unified; the 108 decision is superseded by F-5,
+ *     not forked from. (The shift is again hover-visible, not invisible at display precision.)
  *   - Adapter route: call the backbone PRIMITIVES with the caller's EXPLICIT
  *     rolling window (63/126/252) — this preserves the 3M/6M/12M toggle WITHOUT
  *     the heavy full backbone series-bundle entry per toggle press.
@@ -66,7 +65,7 @@ export interface BlendPanelSeries {
   quantiles: Record<string, QuantileWhiskers>;
   /** { sharpe_365d: series } so RollingMetrics resolves CHART_ACCENT. {} if degenerate. */
   rollingSharpe: Record<string, { date: string; value: number }[]>;
-  /** population-std × √N (periodsPerYear, default 252), warmup dropped. [] if degenerate. */
+  /** sample-std × √N (periodsPerYear, default 252), warmup dropped. [] if degenerate. */
   rollingVol: { date: string; value: number }[];
   /** downside RMS ÷ TOTAL window n × √N, warmup dropped. [] if degenerate. */
   rollingSortino: { date: string; value: number }[];
@@ -176,7 +175,7 @@ export function deriveBlendPanels(
     };
   }
 
-  // ── Rolling series — backbone POPULATION-std primitives at the EXPLICIT
+  // ── Rolling series — backbone sample-std primitives at the EXPLICIT
   //    window (toggle-preserving); zip + drop every null (see zipDrop). ──
   return {
     histogramSeries,

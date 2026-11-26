@@ -467,6 +467,18 @@ type KeyReadResult = {
   error: { code?: string; message?: string } | null;
 };
 
+/**
+ * Founder 2026-11-25 — answers the own-key read the refusal makes. Default: no
+ * row (so every pre-existing refusal pin keeps its exact body). A case that wants
+ * a key named installs an owner-aware implementation.
+ */
+const ownKeyLabelReadMock = vi.fn(
+  (_filters: CapturedFilters): { data: Record<string, unknown> | null; error: unknown } => ({
+    data: null,
+    error: null,
+  }),
+);
+
 const reuseKeyAdminReadFault = { value: null as { code: string } | null };
 const reuseKeyUserScopedReadFault = { value: null as { code: string } | null };
 
@@ -533,6 +545,17 @@ function makeSelectBuilder(
       filters[col] = val;
       return node;
     },
+    // 225 review M-1 — the own-account holder read skips drafts and archived
+    // rows in the query. Recorded under a suffixed key so no table router here
+    // mistakes it for an equality filter.
+    neq: (col: string, val: unknown) => {
+      filters[`${col}:neq`] = val;
+      return node;
+    },
+    not: (col: string, op: string, val: unknown) => {
+      filters[`${col}:not.${op}`] = val;
+      return node;
+    },
     order: () => node,
     limit: () => node,
     // 225-07 — thenable api_keys list read: the same-account read is awaited
@@ -571,6 +594,12 @@ function makeSelectBuilder(
         }
         if ("account_share_kind" in filters) {
           return compositeDependentReadMock(filters);
+        }
+        // Founder 2026-11-25 — the refusal's read of the caller's OWN key
+        // (`own-account-holder.ts`): the only user-scoped `api_keys` read that
+        // selects `label, created_at`.
+        if (client === "user-scoped" && columns === "label, created_at") {
+          return ownKeyLabelReadMock(filters);
         }
         if ("id" in filters) {
           return client === "admin"
@@ -617,7 +646,7 @@ vi.mock("@/lib/supabase/server", () => ({
     // the `rpcCallSites` docblock above for why the throw is armed per-case.
     rpc: (...args: unknown[]) => userScopedRpc(...args),
     from: (table: string) => ({
-      select: () => makeSelectBuilder(table, "user-scoped"),
+      select: (cols?: string) => makeSelectBuilder(table, "user-scoped", cols),
       update: (...args: unknown[]) => {
         recordWrite("user-scoped", table, "update");
         return assetClassUpdateMock(...args);
@@ -1546,6 +1575,23 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a control-character-only value (non-blank to JS trim, blank to Python strip)", "\u001f"],
+    ["over the 128-character cap", "s".repeat(129)],
+  ])(
+    "founder ruling 2026-11-25: rejects an MT5 key whose server is %s, with KEY_MT5_WRONG_SERVER before validate, encrypt and the RPC",
+    async (_label, passphrase) => {
+      const POST = await importPost();
+      const res = await POST(makeReq({ ...MT5_BODY, passphrase }));
+
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("KEY_MT5_WRONG_SERVER");
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+      expect(rpcMock).not.toHaveBeenCalled();
+    },
+  );
+
   it("STILL 400s an invalid exchange value (three-layer lockstep: bogus never admitted)", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...MT5_BODY, exchange: "notanexchange" }));
@@ -1775,6 +1821,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
     venueStrategyLookupMock.mockReset();
     venueOwnerLookupMock.mockReset();
     keyMembershipLookupMock.mockReset();
+    ownKeyLabelReadMock.mockReset();
     compositeDependentReadMock.mockReset();
     compositeDependentReadMock.mockResolvedValue({ data: null, error: null });
     stampedKeyReadMock.mockReset();
@@ -2307,7 +2354,7 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       // body is what `ConnectKeyStep`'s reader and the copy table are pinned
       // against.
       expect(await res.text()).toBe(
-        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy.","strategy_name":"Helios Momentum"}',
+        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy.","strategy_name":"Helios Momentum","holder":{"kind":"strategy","name":"Helios Momentum","href":"/factsheet/dddddddd-dddd-4ddd-8ddd-dddddddddddd?from=strategies"}}',
       );
     });
 
@@ -3485,6 +3532,82 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       );
     });
 
+    // ── 225-18 (CONTEXT Q6 item 2): a key is never stored with a server its
+    // validation did not use. The analytics validate proves the server it is
+    // handed (run_probe's server bracket); these pin the TS half: the server
+    // validated is the server stored, and a refused validation stores nothing.
+    describe("[225-18] the stored server is the validated server", () => {
+      it("validateKey is handed the request's own passphrase, and p_venue_server is that same value normalised", async () => {
+        const POST = await importPost();
+        const res = await POST(
+          makeReq({ ...MT5_RECONNECT_BODY, passphrase: "  Broker-Live " }),
+        );
+
+        expect(res.status).toBe(200);
+        expect(validateKeyMock).toHaveBeenCalledTimes(1);
+        const validatedServer = validateKeyMock.mock.calls[0][3];
+        expect(validatedServer).toBe("  Broker-Live ");
+        // The stored server derives from the VALIDATED value, not from a second
+        // reading of the body, and the literal is the oracle for the normaliser.
+        expect(rpcCalls("create_wizard_strategy")[0][1]).toMatchObject({
+          p_venue_server: "broker-live",
+        });
+        // Validation ran BEFORE the only write.
+        expect(validateKeyMock.mock.invocationCallOrder[0]).toBeLessThan(
+          rpcMock.mock.invocationCallOrder[0],
+        );
+      });
+
+      it.each([
+        ["an auth refusal", new Error("Authentication failed. Check your API key and secret.")],
+        ["the transient answer to a session on another server", new Error("Network error reaching the exchange. Check connectivity and try again.")],
+        ["a wrong-server refusal", new Error("MT5 server was not recognised for this login")],
+      ])("%s from validateKey stores nothing: no encrypt, no RPC", async (_name, failure) => {
+        const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+        validateKeyMock.mockRejectedValue(failure);
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).not.toBe(200);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+        consoleErr.mockRestore();
+      });
+
+      it("a replayed MT5 connect on a session that already holds a draft writes nothing, even when it names another server", async () => {
+        // The idempotency arm answers from the existing draft before validateKey.
+        // It is the one MT5 arm that returns without validating, and it must be
+        // read-only: the server in this body is not stored by it.
+        draftLookupMock.mockResolvedValueOnce({
+          data: { id: STRATEGY_ID, api_key_id: API_KEY_ID },
+          error: null,
+        });
+
+        const POST = await importPost();
+        const res = await POST(
+          makeReq({ ...MT5_RECONNECT_BODY, passphrase: "Some-Other-Server" }),
+        );
+
+        expect(res.status).toBe(200);
+        expect((await res.json()).deduped).toBe(true);
+        expect(validateKeyMock).not.toHaveBeenCalled();
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
+
+      it("an MT5 validation that is not read-only stores nothing either", async () => {
+        validateKeyMock.mockResolvedValue({ valid: true, read_only: false });
+
+        const POST = await importPost();
+        const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+        expect(res.status).toBe(400);
+        expect(encryptKeyMock).not.toHaveBeenCalled();
+        expect(rpcMock).not.toHaveBeenCalled();
+      });
+    });
+
     // WR-01 + SF-M3 (225 PR-2 review, orchestrator decision 1): INVERTED from "a
     // swap that FAILS after the draft exists ... still answers success". The
     // admitted key was created with no identity, so the unique index cannot catch
@@ -4242,10 +4365,90 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
         code: "VENUE_ALREADY_CONNECTED",
         error: "This account is already connected to an existing strategy.",
         strategy_name: "Own OKX Strategy",
+        // Founder 2026-11-25: the caller's OWN strategy, named and linked.
+        holder: {
+          kind: "strategy",
+          name: "Own OKX Strategy",
+          href: `/factsheet/${EXISTING_STRATEGY_ID}?from=strategies`,
+        },
       });
       expect(text).not.toContain(OKX_UID);
       expect(text).not.toContain(EXISTING_KEY_ID);
       noWriteWasMade();
+    });
+
+    // ── Founder 2026-11-25: the refusal names the caller's OWN key or strategy ──
+    // "The same key can be used by many different accounts. It only becomes
+    // problematic if one account forgets that it already ingested a key and
+    // reingests it." So KEY_ORPHANED names the stored key (nickname and date) and
+    // links to the page that lists it, and every holder read is the caller's own.
+    it("1b. a same-owner key with NO strategy answers KEY_ORPHANED naming that key (nickname, date added, link) and never another owner's key on the same id", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      // The other owner's row is FIRST and carries the same key id: a read that
+      // dropped its owner filter would name it.
+      const keyTable = [
+        { user_id: OTHER_OWNER_ID, id: EXISTING_KEY_ID, label: "Other Owner Desk", created_at: "2020-02-02T00:00:00Z" },
+        { user_id: MOCK_USER.id, id: EXISTING_KEY_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" },
+      ];
+      ownKeyLabelReadMock.mockImplementation((filters) => ({
+        data:
+          keyTable.find(
+            (r) =>
+              (!("user_id" in filters) || r.user_id === filters.user_id) &&
+              (!("id" in filters) || r.id === filters.id),
+          ) ?? null,
+        error: null,
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text)).toEqual({
+        code: "KEY_ORPHANED",
+        error: "This key is already stored, but no strategy uses it.",
+        holder: { kind: "key", name: "Test", added_at: "2026-11-19T10:00:00Z", href: "/strategies" },
+      });
+      expect(text).not.toContain("Other Owner Desk");
+      expect(text).not.toContain(OTHER_OWNER_ID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      noWriteWasMade();
+    });
+
+    it("1c. every read behind a same-owner refusal carries the CALLER's id, so no other owner's row can be named", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      ownKeyLabelReadMock.mockImplementation(() => ({
+        data: { label: "Test", created_at: "2026-11-19T10:00:00Z" },
+        error: null,
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+      expect(res.status).toBe(409);
+
+      const holderTables = new Set(["api_keys", "strategies", "strategy_keys"]);
+      const reads = capturedSelects.filter((c) => holderTables.has(c.table));
+      expect(reads.length).toBeGreaterThan(0);
+      for (const read of reads) {
+        expect(
+          read.filters.user_id ?? read.filters.owner_id,
+          `${read.table} read was not scoped to the caller`,
+        ).toBe(MOCK_USER.id);
+      }
+    });
+
+    it("1d. a faulted own-key read still refuses with the unchanged KEY_ORPHANED body", async () => {
+      seedAccountRows([{ id: EXISTING_KEY_ID, user_id: MOCK_USER.id }]);
+      ownKeyLabelReadMock.mockImplementation(() => ({
+        data: null,
+        error: { code: "XX000", message: "boom" },
+      }));
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
     });
 
     it("2. an MT5 login matching a WORKING key of the SAME owner is refused the same way", async () => {
@@ -5241,6 +5444,38 @@ describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentr
    * The copy must also never claim an alert, since this key is not in
    * `OUR_DEFECT_KEY_ERROR_CODES`.
    */
+  /**
+   * Phase 225 (SIGNINREFUSED) - a login-stage MT5 `last_error` -6 answers wire
+   * `MT5_SIGN_IN_REFUSED` (424, `recoverable=False`). The code must reach the wizard as
+   * `KEY_MT5_SIGN_IN_REFUSED`, never UNKNOWN, and it is not an operator fault, so it is
+   * not captured. Nothing is encrypted or written.
+   */
+  it("[225] a login-stage MT5 -6 renders KEY_MT5_SIGN_IN_REFUSED/424, not UNKNOWN, and is NOT captured", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("Your broker answered and refused this sign-in."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 424,
+          seamCode: "MT5_SIGN_IN_REFUSED",
+          recoverable: false,
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(424);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_SIGN_IN_REFUSED");
+    expect(json.code).not.toBe("UNKNOWN");
+    expect(json.code).not.toBe("KEY_SIGN_IN_FAILED");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
+
   it("[218] a not-ready MT5 terminal renders KEY_MT5_TERMINAL_NOT_READY/424 and is NOT captured", async () => {
     validateKeyMock.mockRejectedValue(
       Object.assign(
@@ -5915,6 +6150,38 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
     expect(encryptKeyMock).not.toHaveBeenCalled();
   });
 
+  it("225-18: a reuse request that carries a login and a broker server still sends neither to the RPC (the stored server is never re-chosen here)", async () => {
+    // The reuse arm never validates, so it must never WRITE a server either: it
+    // adopts a key whose server an earlier validation already proved. Stray
+    // credential fields in the body are not read.
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...REUSE_BODY,
+        exchange: "mt5",
+        api_key: "5009999",
+        passphrase: "Some-Other-Server",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy_for_key");
+    expect(rpcMock.mock.calls[0][1]).toEqual({
+      p_user_id: MOCK_USER.id,
+      p_api_key_id: REUSE_KEY_ID,
+      p_placeholder_name: expect.any(String),
+      p_wizard_session_id: WIZARD_SESSION_ID,
+    });
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(apiKeyWrites()).toEqual([]);
+  });
+
   it("the uid in EVERY filter and in the RPC comes from the SESSION, never from the body", async () => {
     seedKey(MOCK_USER.id);
     rpcMock.mockResolvedValue({
@@ -6067,6 +6334,11 @@ describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () =
       code: "VENUE_ALREADY_CONNECTED",
       error: "This account is already connected to an existing strategy.",
       strategy_name: "Delta Neutral",
+      holder: {
+        kind: "strategy",
+        name: "Delta Neutral",
+        href: "/factsheet/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa?from=strategies",
+      },
     });
     expect(rpcMock).not.toHaveBeenCalled();
     expect(writeAttempts).toEqual([]);

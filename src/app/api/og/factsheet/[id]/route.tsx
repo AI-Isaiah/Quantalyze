@@ -5,6 +5,7 @@ import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
+import { isOptionsCashWalletBook, OPTIONS_CASH_WALLET_PHRASES } from "@/lib/factsheet/headline-basis";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
 // Phase 237 FACT-02 / CACHE-01: the ONE held-re-run verdict every surface asks, and the copy the
 // card prints while a re-run is in flight (never an inlined sentence).
@@ -270,6 +271,13 @@ export async function GET(
     // so a held row would otherwise print the wrong unit and difference its curve the wrong way.
     // The raw blob is read nowhere else on this route and never leaves the server (a PNG).
     const effectiveFlags = effectiveDataQualityFlags(analytics).flags;
+    // Phase 252 DERIBITOPTIONS: an options book measured on the cash wallet prints the card's
+    // three dashes on EVERY path (`computeOgHeadline` returns NaN through the shared
+    // `headlineVerdict`, and a row the card did not admit never computes at all), so the
+    // reason line is set for every row this route read, admitted or not. It reuses the
+    // flags read above: the recompute-verdict census pins this file at one
+    // `effectiveDataQualityFlags` call.
+    const optionsBook = isOptionsCashWalletBook(effectiveFlags);
     unit = parseReturnsUnit(
       (effectiveFlags as { native_unit?: unknown } | null | undefined)?.native_unit,
     );
@@ -329,16 +337,21 @@ export async function GET(
       // Cleared but under one year: every KPI prints and the line is the marker sentence, which
       // names no figure the card does not show (so it is drawn only while Sharpe or CAGR prints).
       // A full or unknown record draws no line. This is inside the try: a failure here cannot 500.
-      const record = recordFromScalars(analytics, data?.asset_class);
-      const state = gateAnnualized(record);
-      if (state === "withheld") {
-        sharpe = NaN;
-        cagr = NaN;
-        figureNote = withheldReason("record", record);
-      } else if (state === "short" && record.spanDays != null && (Number.isFinite(sharpe) || Number.isFinite(cagr))) {
-        figureNote = shortTrackMarkerTitle(record.spanDays);
+      // Phase 252: skipped for an options book, whose reason line (below) must never be
+      // overwritten by the record line.
+      if (!optionsBook) {
+        const record = recordFromScalars(analytics, data?.asset_class);
+        const state = gateAnnualized(record);
+        if (state === "withheld") {
+          sharpe = NaN;
+          cagr = NaN;
+          figureNote = withheldReason("record", record);
+        } else if (state === "short" && record.spanDays != null && (Number.isFinite(sharpe) || Number.isFinite(cagr))) {
+          figureNote = shortTrackMarkerTitle(record.spanDays);
+        }
       }
     }
+    if (optionsBook) figureNote = OPTIONS_CASH_WALLET_PHRASES.card;
   } catch (err) {
     failed = true;
     reportOgFailure("compute", id, err);

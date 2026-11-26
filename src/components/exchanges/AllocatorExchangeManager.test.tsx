@@ -3594,6 +3594,31 @@ describe("AllocatorExchangeManager — 212-08 Add key renders validate-and-encry
     expect(card.closest("form")).not.toBeNull();
   });
 
+  // Founder 2026-11-25 — the same-account refusal names the caller's OWN strategy
+  // or key and links to it, so they remember they already added it.
+  it("a 409 KEY_VENUE_ALREADY_CONNECTED with a holder names it and links to it", async () => {
+    await submitAddKey(
+      jsonResponse(409, {
+        code: "KEY_VENUE_ALREADY_CONNECTED",
+        error: "x",
+        holder: { kind: "strategy", name: "Helios Momentum", href: "/factsheet/s-1?from=strategies" },
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "KEY_VENUE_ALREADY_CONNECTED");
+    expect(card).toHaveTextContent('Your strategy "Helios Momentum" already uses this account.');
+    const link = screen.getByTestId("error-envelope-holder-link");
+    expect(link).toHaveAttribute("href", "/factsheet/s-1?from=strategies");
+    expect(link).toHaveTextContent("Open “Helios Momentum”");
+  });
+
+  it("a 409 KEY_VENUE_ALREADY_CONNECTED with no holder renders no link and the unchanged cause", async () => {
+    await submitAddKey(jsonResponse(409, { code: "KEY_VENUE_ALREADY_CONNECTED", error: "x" }));
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).not.toHaveTextContent("already uses this account");
+    expect(screen.queryByTestId("error-envelope-holder-link")).toBeNull();
+  });
+
   it("a 424 RATE_LIMITED renders KEY_RATE_LIMIT (the venue throttled us)", async () => {
     await submitAddKey(jsonResponse(424, { error: "x", code: "RATE_LIMITED" }));
     expect(await screen.findByTestId("error-envelope")).toHaveAttribute(
@@ -3671,6 +3696,23 @@ describe("AllocatorExchangeManager — 212-08 Add key renders validate-and-encry
     expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
     expect(screen.getByText(/CURATED-CAUSE-SENTENCE/)).toBeInTheDocument();
     expect(screen.queryByText(/your draft is saved/i)).not.toBeInTheDocument();
+  });
+
+  // ⭐ Phase 225 (SIGNINREFUSED) - twin of StrategyForm's (k): the one named 424 that this
+  // form recognises. Its own copy, never the UNKNOWN shell, and no Retry.
+  it("a 424 MT5_SIGN_IN_REFUSED renders its own broker-refused copy, never UNKNOWN, and no Retry", async () => {
+    await submitAddKey(
+      jsonResponse(424, {
+        error: "CURATED-DETAIL-THAT-IS-NOT-THE-COPY",
+        code: "MT5_SIGN_IN_REFUSED",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "KEY_MT5_SIGN_IN_REFUSED");
+    expect(card.textContent).toContain("Your broker refused this sign-in.");
+    expect(card.textContent).toContain("a wrong account number, a wrong investor password and a wrong server");
+    expect(screen.queryByText("Try the last action again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
   it("the request carries an X-Correlation-Id equal to the envelope's correlation id", async () => {

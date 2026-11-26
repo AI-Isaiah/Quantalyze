@@ -1,0 +1,21 @@
+{
+  "_comment": "RED partial cover. One key, one cause: newest return 2026-11-10, newest flow and terminal day 2026-11-15 (gap 5), no anchor reason, and tinyDays states 4 of the 5 gap days (2026-11-13 is missing). A reason that covers only some gap days does not count. Expect exactly one freshness-stale naming 1 uncovered day. Every value here is synthetic.",
+  "scope": {
+    "derived": 1,
+    "withInputs": 1,
+    "withTerminal": 1
+  },
+  "rows": [
+    {
+      "venue": "deribit",
+      "tag": "dddd0001",
+      "newestReturn": "2026-11-10",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-15",
+      "terminalDay": "2026-11-15",
+      "markDay": "",
+      "tinyDays": ["2026-11-11", "2026-11-12", "2026-11-14", "2026-11-15"],
+      "hasInputs": true
+    }
+  ]
+}

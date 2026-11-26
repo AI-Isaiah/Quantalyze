@@ -13,6 +13,11 @@
  * qualifies them: under 365 covered days they are `short` (shown with one muted
  * note), from 365 `full`. A selected range, blend overlap, half or rolling window is
  * never withheld for being short.
+ *
+ * Phase 252 (CONTEXT Wave 1): a record may also carry `withheldBy: "options_cash_wallet"`, the
+ * marker of a strategy whose stored figures are measured on the cash wallet of an options book.
+ * Such a record never clears, whatever its span or count, so every site below withholds it and
+ * its reason names the measurement, never a length.
  */
 
 import { SIX_MONTH_WINDOW_DAYS, THREE_MONTH_WINDOW_DAYS } from "@/lib/factsheet/compute";
@@ -37,8 +42,9 @@ export const ONE_YEAR_DAYS = 365;
 /**
  * 194 D-02/D-03 (2026-11-07): the stored figure-definitions version (2 = historical VaR/CVaR,
  * calendar 3M/6M). Same value as `FIGURE_DEFS_VERSION` in metrics.py (pinned).
+ * 3 = Phase 236 F-5/F-6 (365-day CAGR span in whole days, ddof 1, CVaR null below CVAR_MIN_OBS on the total record).
  */
-export const FIGURE_DEFS_VERSION = 2;
+export const FIGURE_DEFS_VERSION = 3;
 
 export type FigureState = "withheld" | "short" | "full" | "null";
 
@@ -55,6 +61,16 @@ export interface FigureRecord {
    * (`recordClears` is false) and its reason names no length. Absent on every readable record.
    */
   unreadable?: true;
+  /**
+   * Phase 252 (CONTEXT Wave 1): present only on a record whose strategy's stored figures are measured
+   * on the cash wallet of an options book, which leaves out the market value of open option positions.
+   * Such a record never clears (`recordClears` is false, whatever its span or count) and its reason
+   * names that measurement, never a record length. Typed as a local literal, equal to
+   * `OPTIONS_CASH_WALLET_CAUSE` in `@/lib/factsheet/headline-basis`: this module must not import that
+   * one (headline-basis reaches basis-metrics, which imports `FIGURE_DEFS_VERSION` from here, so the
+   * import would close a cycle). Absent on every other record, so an unmarked record is byte-identical.
+   */
+  withheldBy?: "options_cash_wallet";
 }
 
 const DAY_MS = 86_400_000;
@@ -175,6 +191,8 @@ export function figureRecord(input: {
   headlineSince?: string | null;
   observations: number | null | undefined;
   periodsPerYear: number;
+  /** Phase 252: the options-book marker (see `FigureRecord.withheldBy`); omitted on every other record. */
+  withheldBy?: "options_cash_wallet";
 }): FigureRecord {
   const obs = input.observations;
   // 194 R5 WR-02: `headlineSince` decides a chain-broken row's record length, so a present
@@ -185,6 +203,7 @@ export function figureRecord(input: {
     observations: typeof obs === "number" && Number.isFinite(obs) ? obs : null,
     crypto: input.periodsPerYear === 365,
     ...(unreadable ? { unreadable: true as const } : {}),
+    ...(input.withheldBy ? { withheldBy: input.withheldBy } : {}),
   };
 }
 
@@ -192,9 +211,11 @@ export function figureRecord(input: {
  * Does the TOTAL record clear D-15's minimum? Crypto: span >= 90 days. Non-crypto:
  * observations >= 60; while the count is absent, span >= 90 days (A-194-D15-02, the
  * failure direction is the dash). Null when the deciding input is null. False for an
- * `unreadable` record (a present but malformed date), whatever its count.
+ * `unreadable` record (a present but malformed date), whatever its count, and for a record marked
+ * `withheldBy` (Phase 252), checked first.
  */
 export function recordClears(record: FigureRecord): boolean | null {
+  if (record.withheldBy) return false;
   if (record.unreadable) return false;
   if (!record.crypto && record.observations != null) {
     return record.observations >= MIN_ANNUALIZATION_OBS;
@@ -345,6 +366,9 @@ export const VAR_METHOD_LINE =
 /** The panel-level reason line when the TOTAL record fails D-15's minimum. */
 export function withheldReason(scope: "record" | "blend", record: FigureRecord): string {
   const blend = scope === "blend";
+  if (record.withheldBy) {
+    return `Annualized figures are not shown: ${blend ? "the blend's" : "this"} record is measured on the cash wallet, which leaves out the market value of open option positions.`;
+  }
   if (record.unreadable) {
     return `Annualized figures are not shown: ${blend ? "the blend's" : "this record's"} dates could not be read.`;
   }
@@ -362,6 +386,7 @@ export function withheldReason(scope: "record" | "blend", record: FigureRecord):
 
 /** The cell `title` / sr-only text for a withheld figure in a list or Holdings. */
 export function withheldCellTitle(record: FigureRecord): string {
+  if (record.withheldBy) return "Withheld: measured on the cash wallet, which leaves out open option positions.";
   if (record.unreadable) return "Withheld: the record's dates could not be read.";
   if (decidedByObservations(record)) {
     return `Withheld until the record reaches ${MIN_ANNUALIZATION_OBS} trading days (${count(record.observations ?? 0)} so far).`;
@@ -457,6 +482,10 @@ const WIDENED_SUBJECT: Record<Exclude<WidenedKind, "rolling-record">, string> = 
  * never a window, range or overlap length.
  */
 export function widenedWithheldReason(kind: WidenedKind, record: FigureRecord): string {
+  if (record.withheldBy) {
+    const subject = kind === "rolling-record" ? "Rolling annualized figures" : WIDENED_SUBJECT[kind];
+    return `${subject} are not shown: the record is measured on the cash wallet, which leaves out open option positions.`;
+  }
   if (record.unreadable) {
     const subject = kind === "rolling-record" ? "Rolling annualized figures" : WIDENED_SUBJECT[kind];
     return `${subject} are not shown: the record's dates could not be read.`;

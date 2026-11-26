@@ -8,7 +8,7 @@
     "dev": "next dev --hostname 0.0.0.0",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/ && tsx scripts/check-admin-route-manifest.ts && tsx scripts/check-route-contract.ts && tsx scripts/check-planning-hygiene.ts && tsx scripts/check-canonical-domain.ts",
+    "lint": "eslint --cache --cache-location node_modules/.cache/.eslintcache src/ && tsx scripts/check-admin-route-manifest.ts && tsx scripts/check-route-contract.ts && tsx scripts/check-planning-hygiene.ts && tsx scripts/check-canonical-domain.ts && tsx scripts/check-demo-credential-digests.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -83,5 +83,5 @@
     "postcss": "^8.5.23",
     "basic-ftp": "^6.2.1"
   },
-  "version": "0.133.74.1"
+  "version": "0.133.89.0"
 }

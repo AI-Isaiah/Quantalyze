@@ -60,6 +60,7 @@ from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     mt5_relaunch_debt,
     mt5_scrub_owed,
@@ -353,6 +354,7 @@ class Mt5Adapter:
                             investor_pw=investor_pw,
                             server=server,
                             log_prefix="mt5.validate",
+                            site=SITE_VALIDATE_WORKER,
                         )
                     finally:
                         # Set by THIS thread when `run_probe` exits, however it
@@ -404,9 +406,15 @@ class Mt5Adapter:
                     # classifies it honestly (sFOX F4 posture). close() still runs in
                     # the finally below, so the terminal session never leaks.
                     raise
-                except Mt5AccountMismatchError:
+                except Mt5AccountMismatchError as exc:
                     # D-07 part 2: another actor switched the terminal. No park.
-                    probe_disqualified = "probe_account_mismatch"
+                    # WR-02 (225 PR-2c): a server-bracket refusal is its own cause,
+                    # so it neither masks nor is masked by a real concurrency page.
+                    probe_disqualified = (
+                        "probe_server_mismatch"
+                        if isinstance(exc, Mt5ServerMismatchError)
+                        else "probe_account_mismatch"
+                    )
                     # RED-TEAM: a concurrent actor re-logged the shared terminal onto
                     # another account mid-probe — an INFRA/concurrency fault, never the
                     # user's key. PROPAGATE untouched (transient disposition: never valid,

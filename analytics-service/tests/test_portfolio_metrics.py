@@ -35,10 +35,16 @@ def test_mwr_known_sequence():
     Cash flows: -100,000 @ 2026-01-01, -50,000 @ 2026-06-01, +170,000 @
     2026-12-31. net_cf = +20,000 >= 0, so the terminal-value guard does NOT
     append final_value (the +170,000 IS the terminal inflow). Year fractions
-    from t0 (365.25-day basis): t = [0, 151/365.25, 364/365.25]. Solving
-        -100000 - 50000/(1+r)^0.413415 + 170000/(1+r)^0.996578 = 0
-    gives r ~ 0.156367 (15.64%). Matches the file's H-0732 exact-pin convention
-    (test_mwr_single_outflow_one_year_exact_irr etc.).
+    from t0 on the 365-day calendar year (Phase 236 CONTEXT A5 / F-5, the shared
+    CALENDAR_DAYS_PER_YEAR): the spans are 151 and 364 whole days, so
+    t = [0, 151/365, 364/365]. Solving
+        -100000 - 50000/(1+r)^(151/365) + 170000/(1+r)^(364/365) = 0
+    gives r = 0.15625176 (15.63%). DERIVED by an independent stdlib bisection on that
+    equation (200 halvings of [0, 1], no engine import), not read from compute_mwr.
+    Moved pin, old -> new -> why: 0.15636675 -> 0.15625176, because the year length the
+    day counts divide by moved from 365.25 to 365 (the same bisection with the old year
+    reproduces 0.15636675, which is what validates the method). Matches the file's H-0732
+    exact-pin convention (test_mwr_single_outflow_one_year_exact_irr etc.).
     """
     cash_flows = [
         {"amount": -100000, "date": "2026-01-01"},
@@ -47,7 +53,7 @@ def test_mwr_known_sequence():
     ]
     mwr = compute_mwr(cash_flows, final_value=170000)
     assert mwr is not None
-    assert abs(mwr - 0.15636675) < 1e-6
+    assert abs(mwr - 0.15625176) < 1e-6
 
 
 def test_mwr_single_outflow_one_year_exact_irr():
@@ -56,8 +62,10 @@ def test_mwr_single_outflow_one_year_exact_irr():
 
     One outflow of -100,000 at t0; final_value 110,000 exactly one calendar
     year later (365 days). The terminal value is appended because net_cf<0,
-    then NPV solves -100000 + 110000/(1+r)^(365/365.25) = 0.
-    => 1+r = 1.1^(365.25/365), r ≈ 0.1000718.
+    then NPV solves -100000 + 110000/(1+r)^(365/365) = 0, and the exponent is exactly 1.
+    => 1 + r = 110000/100000 = 1.1, r = 0.10 exactly (hand-solved).
+    Moved pin, old -> new -> why: 0.10007186 -> 0.10, because exactly 365 days is now
+    exactly one year, so the exponent is 1 and the rate is the plain ratio.
     A weight/sign regression would move this materially.
     """
     mwr = compute_mwr(
@@ -66,7 +74,7 @@ def test_mwr_single_outflow_one_year_exact_irr():
         end_date="2026-01-01",
     )
     assert mwr is not None
-    assert abs(mwr - 0.10007186) < 1e-6
+    assert abs(mwr - 0.10) < 1e-6
 
 
 def test_mwr_empty_cash_flows_returns_none():
@@ -82,7 +90,8 @@ def test_mwr_terminal_not_double_counted_when_net_cf_nonnegative():
     second time. Cash flows: -100,000 at t0 and +110,000 one year later
     (net_cf = +10,000 >= 0). final_value is also 110,000.
 
-    Correct (guard ON): solve -100000 + 110000/(1+r)^t = 0 → r ≈ 0.1000718.
+    Correct (guard ON): solve -100000 + 110000/(1+r)^t = 0 with t = 365/365 = 1, so
+    r = 0.10 exactly (hand-solved; old pin 0.10007181 moved with the year length).
     Broken (guard OFF, terminal double-appended): the solver would instead
     see +220,000 of inflow against -100,000 → r ≈ 1.20. A sign flip on the
     `net_cf < 0` condition is therefore caught by this exact-value assertion.
@@ -95,7 +104,7 @@ def test_mwr_terminal_not_double_counted_when_net_cf_nonnegative():
         final_value=110000,
     )
     assert mwr is not None
-    assert abs(mwr - 0.10007181) < 1e-6
+    assert abs(mwr - 0.10) < 1e-6
     # Guardrail: must be nowhere near the ~1.20 double-counted result.
     assert mwr < 0.5
 

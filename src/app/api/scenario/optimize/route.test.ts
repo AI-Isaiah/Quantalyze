@@ -88,6 +88,7 @@ const STATE = vi.hoisted(() => ({
   optimizeCalls: [] as Array<{
     series: Record<string, Array<{ date: string; value: number }>>;
     objective: string;
+    periodsPerYear: number;
   }>,
   optimizeImpl: (async () => ({
     ok: true,
@@ -180,8 +181,9 @@ vi.mock("@/lib/analytics-client", async () => {
     optimizeScenarioWeights: (
       series: Record<string, Array<{ date: string; value: number }>>,
       objective: string,
+      periodsPerYear: number,
     ) => {
-      STATE.optimizeCalls.push({ series, objective });
+      STATE.optimizeCalls.push({ series, objective, periodsPerYear });
       return STATE.optimizeImpl(series, objective);
     },
   };
@@ -209,7 +211,7 @@ function makeRequest(body: unknown, opts?: { rawBody?: string }): NextRequest {
   });
 }
 
-const validBody = () => ({ series: SERIES, objective: "min_vol" });
+const validBody = () => ({ series: SERIES, objective: "min_vol", periods_per_year: 365 });
 
 let errorSpy: ReturnType<typeof vi.spyOn>;
 
@@ -263,6 +265,34 @@ describe("POST /api/scenario/optimize", () => {
     expect(STATE.optimizeCalls).toHaveLength(1);
     expect(STATE.optimizeCalls[0].objective).toBe("min_vol");
     expect(STATE.optimizeCalls[0].series).toEqual(SERIES);
+  });
+
+  // Phase 236 plan 04 (FIG-01, CONTEXT A5; T-236-09): the blend's frequency clock is part of the
+  // request contract and a closed set {252, 365} at this trust boundary.
+  it.each([252, 365])("forwards periods_per_year=%i to the analytics client unchanged", async (clock) => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ ...validBody(), periods_per_year: clock }));
+    expect(res.status).toBe(200);
+    expect(STATE.optimizeCalls).toHaveLength(1);
+    expect(STATE.optimizeCalls[0].periodsPerYear).toBe(clock);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["out of the closed set", 300],
+    ["zero", 0],
+    ["a numeric string", "365"],
+    ["null", null],
+    ["a fractional clock", 365.25],
+  ])("400 VALIDATION_FAILED when periods_per_year is %s, and it never reaches the seam", async (_label, bad) => {
+    const { POST } = await import("./route");
+    const body: Record<string, unknown> = { ...validBody() };
+    if (bad === undefined) delete body.periods_per_year;
+    else body.periods_per_year = bad;
+    const res = await POST(makeRequest(body));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+    expect(STATE.optimizeCalls).toHaveLength(0);
   });
 
   // Phase 140 / SEAM-04 (SC-5c) — the arm this plan adds.
@@ -445,6 +475,7 @@ describe("POST /api/scenario/optimize", () => {
       makeRequest({
         series: { "strategy-a": [{ date: "2026-01-01", value: "0.01" }] },
         objective: "min_vol",
+        periods_per_year: 252,
       }),
     );
 
@@ -611,6 +642,24 @@ describe("[140.3-13b / SEAMUX-08] POST /api/scenario/optimize — Sentry capture
     expect(options.extra?.upstream_status).toBe(503);
   });
 
+  it("POSITIVE: an upstream 422 IS captured as contract drift, and the user still gets the flat 502", async () => {
+    // Python's request model requires `periods_per_year`; a 422 means this route's own request
+    // shape drifted from it. It was a flat 502 Sentry never saw (236 review round 1, topic C).
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    STATE.optimizeImpl = async () => {
+      throw new AnalyticsUpstreamError("periods_per_year: field required", 422);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "The optimizer is unavailable right now.", code: "UNKNOWN" });
+
+    const { options } = await nextCapture();
+    expect(options.tags?.surface).toBe("scenario-optimize");
+    expect(options.tags?.step).toBe("upstream-422-contract-drift");
+    expect(options.extra?.upstream_status).toBe(422);
+  });
+
   it("NEGATIVE: a caller-fault 400 is NEVER captured, and never reaches the seam at all", async () => {
     const { POST } = await import("./route");
     const res = await POST(
@@ -665,14 +714,14 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/scenario/optimize — a machine code 
 
   it("400 series is not an object → VALIDATION_FAILED", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeRequest({ series: [], objective: "min_vol" }));
+    const res = await POST(makeRequest({ series: [], objective: "min_vol", periods_per_year: 252 }));
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("VALIDATION_FAILED");
   });
 
   it("400 series count out of range → VALIDATION_FAILED", async () => {
     const { POST } = await import("./route");
-    const res = await POST(makeRequest({ series: {}, objective: "min_vol" }));
+    const res = await POST(makeRequest({ series: {}, objective: "min_vol", periods_per_year: 252 }));
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("VALIDATION_FAILED");
   });
@@ -680,7 +729,7 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/scenario/optimize — a machine code 
   it("400 per-series not an array → VALIDATION_FAILED", async () => {
     const { POST } = await import("./route");
     const res = await POST(
-      makeRequest({ series: { "strategy-a": "nope" }, objective: "min_vol" }),
+      makeRequest({ series: { "strategy-a": "nope" }, objective: "min_vol", periods_per_year: 252 }),
     );
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("VALIDATION_FAILED");
@@ -692,6 +741,7 @@ describe("[140.3-G5 / SEAMUX-03] POST /api/scenario/optimize — a machine code 
       makeRequest({
         series: { "strategy-a": [{ date: "2026-01-01", value: "0.01" }] },
         objective: "min_vol",
+        periods_per_year: 252,
       }),
     );
     expect(res.status).toBe(400);

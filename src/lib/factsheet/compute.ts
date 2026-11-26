@@ -1,4 +1,5 @@
 import type { ComputeResult } from "./types";
+import { CALENDAR_DAYS_PER_YEAR, SD_DDOF, wholeCalendarDays } from "@/lib/figure-conventions";
 import { dispersion, historicalVarCvar, sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /**
@@ -96,8 +97,9 @@ export function recordCoversWindow(dates: string[], cutoff: Date | number): bool
  *   - annualization = `periodsPerYear` trading days / year (#597: 252
  *     traditional / 365 crypto; default 252 keeps every existing caller
  *     byte-identical). Applies to vol/Sharpe/Sortino only — CAGR stays on the
- *     CALENDAR year (days / 365.25), which is asset-class-invariant.
- *   - population stdev (not sample) — `statistics.pstdev`
+ *     CALENDAR year (first to last date, whole days / 365: F-5, Q1), which is
+ *     asset-class-invariant.
+ *   - sample sd (ddof 1, F-5) for annualized dispersion; population moments for skew and kurtosis
  *   - CAGR = eq[-1] ** (1 / years) - 1 by default (geometric); under the
  *     arithmetic method (`conventions.cumulativeMethod`) it is the mean daily
  *     return times periodsPerYear (see the CAGR block below)
@@ -130,15 +132,25 @@ export function compute(
   const arithmetic = conventions.cumulativeMethod === "arithmetic";
   const eq = arithmetic ? arithmeticEquity(rets) : cumEq(rets);
   const dd = arithmetic ? arithmeticUnderwater(rets) : drawdowns(eq);
-  // Phase 166.2 (D-17, D-07): the mean and the population sd come from the
-  // shared return-stats module, which reports a float-residue sd (a
-  // compounding constant yield) as exactly 0, so ann_vol, skew and kurtosis
-  // below answer such a series exactly as they answer an all-zero one.
+  // Phase 166.2 (D-17, D-07): the mean and the sd come from the shared
+  // return-stats module, which reports a float-residue sd (a compounding
+  // constant yield) as exactly 0, so ann_vol, skew and kurtosis below answer
+  // such a series exactly as they answer an all-zero one.
+  // Phase 236 (F-5): skew and kurtosis are standardised POPULATION moments,
+  // not annualized, so they stay outside the sample-sd rule that ann_vol and
+  // the Sharpe follow below.
   const { mean: m, sd: s } = dispersion(rets, 0);
   const startDate = new Date(dates[0]);
   const endDate = new Date(dates[n - 1]);
-  const days = Math.max(1, (endDate.getTime() - startDate.getTime()) / 86_400_000);
-  const years = days / 365.25;
+  // An unparseable first or last date has no span: `years` is NaN, never the
+  // one-day floor, which would compound the whole record over a single day
+  // (eq ** 365 - 1) and print it as a measured CAGR.
+  const firstMs = startDate.getTime();
+  const lastMs = endDate.getTime();
+  const days = Number.isFinite(firstMs) && Number.isFinite(lastMs)
+    ? Math.max(1, wholeCalendarDays(firstMs, lastMs))
+    : NaN;
+  const years = days / CALENDAR_DAYS_PER_YEAR;
 
   // D-30 / D-36 (W2): the day basis moves EXACTLY ann_vol, sharpe, sortino and
   // the arithmetic CAGR (so calmar under arithmetic). They run over the basis
@@ -150,7 +162,7 @@ export function compute(
   // calendar series the engine computes them over (D-32; see metricsBasisSeries).
   const basisReturns = metricsBasisSeries(rets, dates, conventions).returns;
   const basisN = basisReturns.length;
-  const { mean: basisMean, sd: basisSd } = dispersion(basisReturns, 0);
+  const { mean: basisMean, sd: basisSd } = dispersion(basisReturns, SD_DDOF);
 
   const cumRet = eq[n - 1] - 1;
   // Geometric: a calendar-span compound, on either day basis (the engine's is).
@@ -162,7 +174,9 @@ export function compute(
   // calendar-day count), and the observations otherwise. An active basis with no
   // non-zero day has no mean: NaN, as the engine's None.
   let cagr: number;
-  if (arithmetic) {
+  if (!(Number.isFinite(years) && years > 0)) {
+    cagr = NaN;
+  } else if (arithmetic) {
     cagr = basisN > 0 ? (sumOf(basisReturns) / basisN) * periodsPerYear : NaN;
   } else {
     cagr = years > 0 && eq[n - 1] > 0 ? Math.pow(eq[n - 1], 1 / years) - 1 : 0;
@@ -180,7 +194,7 @@ export function compute(
   // decision D7, 2026-09-26, reversing D-07's "answer null as 0" for display).
   // `ComputeResult.sharpe` stays a `number`; NaN (or the null a JSON cache turns
   // it into) is the absent value, so a consumer tests `Number.isFinite`.
-  const sharpe = sharpeRatio(basisReturns, { periodsPerYear, ddof: 0, rf }) ?? NaN;
+  const sharpe = sharpeRatio(basisReturns, { periodsPerYear, ddof: SD_DDOF, rf }) ?? NaN;
 
   const neg = basisReturns.filter(x => x < 0);
   const ddDev = neg.length > 0 ? Math.sqrt(neg.reduce((a, x) => a + x * x, 0) / basisN) * Math.sqrt(periodsPerYear) : 0;

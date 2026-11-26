@@ -339,6 +339,9 @@ class OptimizeWeightsRequest(BaseModel):
     # strategy_id -> its daily-return series (intersection-aligned server-side).
     series: dict[str, list[OptimizerDailyPoint]]
     objective: Literal["min_vol", "max_sharpe"] = "min_vol"
+    # The blend's frequency clock (Phase 236 CONTEXT A5): 365 if any leg is crypto or unknown,
+    # else 252. Required and closed: a forged value is a 422, never a silent default.
+    periods_per_year: Literal[252, 365]
 
 
 class OptimizeWeightsResponse(BaseModel):

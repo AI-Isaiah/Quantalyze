@@ -272,6 +272,68 @@ describe("the share card is gated on the strategy's total record (B3, D-15)", ()
   });
 });
 
+/**
+ * Phase 252 DERIBITOPTIONS plan 01: a row whose flags carry the options-book reason prints three
+ * dashes AND one muted line naming it, on every path the route reads (admitted or not), and the
+ * D-15 record line never overwrites it. The sentence is typed by hand.
+ */
+describe("252: the share card names the options-book reason", () => {
+  const CARD_SENTENCE = "Figures withheld: measured on the cash wallet, which leaves out open option positions.";
+  const OPTIONS_FLAGS = { composite: true, mtm_gated_reason: "unsmoothed_options_book" };
+  const cardLines = () =>
+    textElements(ogCalls[ogCalls.length - 1].element).filter((t) => t.text.startsWith("Figures withheld"));
+  const flagsOf = (flags: Record<string, unknown>) => {
+    const analytics = (STATE.strategyRow!.strategy_analytics as Array<Record<string, unknown>>)[0];
+    analytics.data_quality_flags = flags;
+    return analytics;
+  };
+
+  it("an admitted triggered row prints three dashes and the card sentence; the D-15 record line does not overwrite it", async () => {
+    // A 25-day record: without the trigger the D-15 arm draws the "Annualized figures appear" line.
+    setRow({
+      series: dated(25, "2026-01-01"),
+      scalars: { series_start: "2026-01-01", series_end: "2026-01-25", record_observations: 25 },
+    });
+    flagsOf(OPTIONS_FLAGS);
+    const card = await renderCard();
+    expect([card.sharpe, card.cagr, card.maxDd]).toEqual(["—", "—", "—"]);
+    expect(card.lines, "the record line must not draw").toHaveLength(0);
+    const lines = cardLines();
+    expect(lines.map((l) => l.text)).toEqual([CARD_SENTENCE]);
+    expect(lines[0].style.color).toBe("#64748B");
+  });
+
+  it("a triggered row that is NOT admitted (failed) prints three dashes and the same sentence", async () => {
+    setRow({ series: dated(400, "2025-01-01") });
+    const analytics = flagsOf(OPTIONS_FLAGS);
+    analytics.computation_status = "failed";
+    const card = await renderCard();
+    expect([card.sharpe, card.cagr, card.maxDd]).toEqual(["—", "—", "—"]);
+    expect(cardLines().map((l) => l.text)).toEqual([CARD_SENTENCE]);
+  });
+
+  it("the same row WITHOUT the reason key is today's card: figures, and the D-15 line where it applies", async () => {
+    setRow({
+      series: dated(25, "2026-01-01"),
+      scalars: { series_start: "2026-01-01", series_end: "2026-01-25", record_observations: 25 },
+    });
+    flagsOf({ composite: true });
+    const card = await renderCard();
+    expect([card.sharpe, card.cagr]).toEqual(["—", "—"]);
+    expect(card.maxDd).toBe("-3.7%");
+    expect(card.lines.map((l) => l.text)).toEqual([
+      "Annualized figures appear once the record reaches 90 days. This record covers 25 days.",
+    ]);
+    expect(cardLines()).toHaveLength(0);
+
+    setRow({ series: dated(400, "2025-01-01") });
+    flagsOf({ composite: true });
+    const full = await renderCard();
+    expect([full.sharpe, full.cagr, full.maxDd]).toEqual(["0.12", "+40.0%", "-3.7%"]);
+    expect(cardLines()).toHaveLength(0);
+  });
+});
+
 describe("the embed projection (T-194.1-12)", () => {
   /** The comma-split entries inside the `strategy_analytics ( ... )` embed. */
   function embedEntries(select: string): string[] {

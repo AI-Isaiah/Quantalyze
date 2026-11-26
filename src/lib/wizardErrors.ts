@@ -6,6 +6,8 @@
  */
 
 import type { GateFailureCode } from "./strategyGate";
+import type { AccountHolder } from "./own-account-holder";
+import { formatDay } from "./utils";
 // ⚠️ LOAD-BEARING IMPORT PATH (Phase 140 / SEAM-04, blocker B-1). `seam-errors`
 // is the dependency-free LEAF: zero imports, zero env reads, zero module-load
 // side effects. This module is VALUE-imported by ten `"use client"` components
@@ -618,6 +620,22 @@ export type WizardErrorCode =
   // wedging and account eviction (164.6.5 / 164.6.6), so the Retry is not
   // merely useless, it is the harmful action.
   | "KEY_SIGN_IN_FAILED"
+  // Phase 225 (SIGNINREFUSED) — the MT5 sibling of `KEY_SIGN_IN_FAILED` for the ONE
+  // login-stage answer that DOES say why: `login()` returned `last_error` -6,
+  // `RES_E_AUTH_FAILED` ("authorization failed", the MT5 Python docs'
+  // `mt5lasterror_py` table). MEASURED on PROD 2026-11-25: a wrong broker server
+  // with a real investor password answered -6 in about 0.5 s, so the broker DID
+  // answer and refuse, and `KEY_SIGN_IN_FAILED`'s "did not get far enough for the
+  // venue to tell us why" was false for it. Wire `MT5_SIGN_IN_REFUSED` (424,
+  // `recoverable=False`), minted by `_validate_mt5_key_probe` at the validate
+  // surface ONLY: the daily poll, ingestion and allocator positions classify -6
+  // exactly as before. -6 gives the same answer for a wrong login, a wrong
+  // investor password and a wrong server, so the copy names all three and never
+  // claims one of them. NOT recoverable, DERIVED: `actions` carries neither member
+  // of `RECOVERABLE_ACTIONS`, so no Retry renders, on `KEY_SIGN_IN_FAILED`'s
+  // reasoning (re-submitting the same credential against the one shared terminal is
+  // the harmful action).
+  | "KEY_MT5_SIGN_IN_REFUSED"
   // Sync + gate (SyncPreviewStep) — these wrap strategyGate.ts codes
   | "SYNC_TIMEOUT"
   | "SYNC_FAILED"
@@ -2817,9 +2835,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     title: "This key is already stored, but no strategy uses it.",
     cause:
       "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again is refused until the saved key is disconnected.",
+    // Founder 2026-11-25: entering a key you already stored usually means you
+    // want to FINISH that setup, so that remedy leads. ⚠️ The destination is
+    // verified: `/strategies` serves manager, allocator and `both`
+    // (`strategies/page.tsx`), and its "No strategy yet" rows are every live key
+    // with no live strategy, whatever the role (`getStrategylessActiveKeys`).
+    // They render below the strategies and only on the LAST page of a paged
+    // list (`StrategyTable.tsx`, `showPlaceholders`), so "at the end of the
+    // list" was only half the truth. The in-wizard "Finish setup" switch is not
+    // offered from this refusal: the saved-key step is chosen by the host that
+    // mounts the wizard (`preselectKey`), which the credential form cannot reach.
     fix: [
-      "Connect this strategy with a different account — one whose key is not already stored here.",
-      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "Or connect this strategy with a different account — one whose key is not already stored here.",
       "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.",
       "If the Strategies page does not list this key, send the correlation id below through the contact form.",
     ],
@@ -3024,6 +3052,34 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // docblock. THE ABSENCE IS AFFIRMATIVE (D-08), not incidental: offering a
     // Retry here would re-run the identical validate against a terminal a
     // wrong password may have wedged behind a modal login dialog.
+    actions: ["request_call", "expand_log"],
+  },
+
+  // Phase 225 (SIGNINREFUSED) — see the union member's docblock. The copy is STATIC
+  // and may claim only what `last_error` -6 establishes: the broker answered and
+  // refused the sign-in. ⛔ It must NOT name the server as the cause, because -6 is
+  // the same answer for a wrong login, a wrong investor password and a wrong server,
+  // so all three are listed.
+  // ⚠️ Slot 3 ("submit again") is suppressed on the saved-key summary screen, which
+  // paints no credential form to resubmit at — `NOT_ON_PRESELECT_SURFACE`, reused
+  // from `KEY_SIGN_IN_FAILED`. Slots 0-2 name MT5 things and this code is only ever
+  // minted for MT5, so they are unconditional.
+  // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`: no Retry (the wire says
+  // `recoverable=False` and the two agree).
+  KEY_MT5_SIGN_IN_REFUSED: {
+    title: "Your broker refused this sign-in.",
+    cause:
+      "Your broker answered and refused the sign-in. MT5 gives the same answer for a wrong account number, a wrong investor password and a wrong server, so we cannot tell you which to check first.",
+    fix: [
+      "Check the account number (login) is the account you want to connect.",
+      "Check the investor (read-only) password. Your broker can reset it, and changing the master password changes it too.",
+      "Check the server: copy it exactly from your MT5 terminal's login window. Another server of the same broker refuses the sign-in.",
+      "Then submit again with the corrected details. The same details unchanged get the same answer.",
+      "If all three are right and this keeps happening, send the correlation id below through the contact form.",
+    ],
+    // Index-aligned to `fix`.
+    fixRequires: [null, null, null, NOT_ON_PRESELECT_SURFACE, null],
+    docsHref: "/security#readonly-key",
     actions: ["request_call", "expand_log"],
   },
 
@@ -4736,6 +4792,15 @@ export interface WizardErrorContext {
    * `charCount` state for numbers).
    */
   strategyName?: string;
+  /**
+   * The caller's OWN strategy or key that already holds the account they just
+   * tried to add again (`own-account-holder.ts`), for `VENUE_ALREADY_CONNECTED`,
+   * `KEY_ORPHANED` and `KEY_VENUE_ALREADY_CONNECTED`. Shape-checked by
+   * `parseAccountHolder` before it gets here. ABSENT means "we were not told":
+   * every table `cause` is complete and true with no holder, and the naming
+   * sentence and the link are added only when this is present.
+   */
+  holder?: AccountHolder;
 }
 
 /**
@@ -4814,6 +4879,36 @@ function applyFixRequirements(
 }
 
 /**
+ * The text of the one link a holder-carrying refusal shows, or null when the
+ * code carries none. A strategy opens its factsheet; a stored key opens the
+ * Strategies page, where it is listed (and, for `KEY_ORPHANED`, where
+ * "Finish setup" is). The href is the holder's own, already shape-checked.
+ */
+export function holderLink(
+  code: WizardErrorCode,
+  holder: AccountHolder | undefined,
+): { label: string; href: string } | null {
+  if (holder === undefined) return null;
+  if (
+    code !== "VENUE_ALREADY_CONNECTED" &&
+    code !== "KEY_ORPHANED" &&
+    code !== "KEY_VENUE_ALREADY_CONNECTED"
+  ) {
+    return null;
+  }
+  if (holder.kind === "strategy") {
+    return { label: `Open “${holder.name}”`, href: holder.href };
+  }
+  return {
+    label:
+      code === "KEY_ORPHANED"
+        ? `Open Strategies to finish setup on “${holder.name}”`
+        : `Open Strategies to find “${holder.name}”`,
+    href: holder.href,
+  };
+}
+
+/**
  * Returns pure data (not JSX) so error copy can be tested, serialized
  * to PostHog, and rendered by multiple components with different markup.
  */
@@ -4872,16 +4967,45 @@ export function formatKeyError(
   // `undefined` or an empty pair of quotes. The blank check is deliberate —
   // `strategies.name` is NOT NULL at the database, but a whitespace-only value
   // would still produce a sentence pointing at nothing.
-  if (
-    code === "VENUE_ALREADY_CONNECTED" &&
-    context?.strategyName !== undefined &&
-    context.strategyName.trim().length > 0
-  ) {
+  const connectedName =
+    context?.strategyName !== undefined && context.strategyName.trim().length > 0
+      ? context.strategyName.trim()
+      : context?.holder?.kind === "strategy"
+        ? context.holder.name
+        : null;
+  if (code === "VENUE_ALREADY_CONNECTED" && connectedName !== null) {
     return {
       ...base,
-      cause:
-        `It is connected to "${context.strategyName.trim()}". ` + base.cause,
+      cause: `It is connected to "${connectedName}". ` + base.cause,
     };
+  }
+
+  // Founder 2026-11-25 — the same account on many accounts of the platform is
+  // fine; adding it twice from ONE account double-counts it. So the two key
+  // refusals name what the caller already has, from their OWN rows only
+  // (`own-account-holder.ts`), prepended like the arms around it so the table
+  // sentence stays intact and the copy degrades to it when there is no holder.
+  if (code === "KEY_ORPHANED" && context?.holder?.kind === "key") {
+    const added =
+      context.holder.added_at !== undefined && formatDay(context.holder.added_at) !== "—"
+        ? `, added ${formatDay(context.holder.added_at)}`
+        : "";
+    return {
+      ...base,
+      cause: `You already stored this account as your key "${context.holder.name}"${added}. ` + base.cause,
+    };
+  }
+  if (code === "KEY_VENUE_ALREADY_CONNECTED" && context?.holder !== undefined) {
+    const h = context.holder;
+    const lead =
+      h.kind === "strategy"
+        ? `Your strategy "${h.name}" already uses this account. `
+        : `Your key "${h.name}"${
+            h.added_at !== undefined && formatDay(h.added_at) !== "—"
+              ? `, added ${formatDay(h.added_at)},`
+              : ""
+          } already connects this account. `;
+    return { ...base, cause: lead + base.cause };
   }
 
   // 225-05 / CONN-01 — NAME THE DRAFT BY EXCHANGE AND NAME when we were given its
@@ -5313,6 +5437,13 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // table's stated discipline that the wire answer stays the one the service
   // chose.
   ["SIGN_IN_FAILED", { code: "KEY_SIGN_IN_FAILED", status: 424 }],
+  // Phase 225 (SIGNINREFUSED) — minted by the SAME `_validate_mt5_key_probe` arm as
+  // `SIGN_IN_FAILED`, for a login-stage `last_error` of exactly -6 (broker answered
+  // and refused). Status 424 on the row, equal to the emitter's own, per this table's
+  // discipline. The row is not optional beside the mint, for the reason the
+  // `SIGN_IN_FAILED` row gives: the table is resolved BEFORE the substring cascade,
+  // and without a row the user lands on `UNKNOWN`, whose copy offers a Retry.
+  ["MT5_SIGN_IN_REFUSED", { code: "KEY_MT5_SIGN_IN_REFUSED", status: 424 }],
   // Phase 164.6.6.3 / item 9 (D-09, D-10) — minted by the Python known-server
   // pre-check in `_validate_mt5_key_probe`, before any client, lease or `login()`.
   // Status 424 on the row, equal to the emitter's own status, per this table's
@@ -5504,7 +5635,7 @@ export const VENUE_WIRE_CODES_WITHOUT_VERDICT: ReadonlyMap<string, string> =
     ],
     [
       "VALIDATION_UNEXPECTED",
-      "Detail: 'Key validation failed unexpectedly. Contact support if this " +
+      "Detail: 'Key validation failed unexpectedly. Use the contact form if this " +
         "persists.' It is BY DEFINITION the unclassified residue of the Python " +
         "side's own classification, so mapping it to a specific wizard verdict " +
         "would manufacture a diagnosis the producer explicitly declined to make. " +
@@ -6510,6 +6641,12 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // recoverable — and the founder gets a Retry control for a fault the
       // emitter marked `recoverable=False`.
       "KEY_SIGN_IN_FAILED",
+      // 225 (SIGNINREFUSED) — the -6 half of the same refusal, on the same footing
+      // as the row above: `rotate_key_secret` runs `_validate_mt5_key_probe`, which
+      // answers wire `MT5_SIGN_IN_REFUSED` (424, `recoverable=False`) for a login-stage
+      // `last_error` of -6, and the code reaches this route through `seamCode`. Omit
+      // this line and the dialog renders `UNKNOWN`, whose copy IS recoverable.
+      "KEY_MT5_SIGN_IN_REFUSED",
       // 164.6.5 / D-17 (review round 1 / CR-02) — the wedged-terminal verdict,
       // on the same footing as the row above. `_validate_mt5_key_probe` mints
       // wire `MT5_TERMINAL_UNRESPONSIVE` when the gateway terminal's IPC
@@ -6700,6 +6837,8 @@ export const KNOWN_VALIDATE_AND_ENCRYPT_CODES: ReadonlySet<WizardErrorCode> =
     // row here, is rendered by the dashboard forms.
     "KEY_VENUE_ALREADY_CONNECTED",
     "UNKNOWN",
+    // Phase 225 PR-2b-2: an MT5 key with no usable server is refused (400).
+    "KEY_MT5_WRONG_SERVER",
   ]);
 
 /**
@@ -6816,6 +6955,23 @@ export function recogniseValidateAndEncryptCode(
       if (row.status === 400 && row.code === wire) {
         return { code: row.code, recognised: true };
       }
+    }
+  }
+
+  // ⭐ Phase 225 (SIGNINREFUSED) — ONE named 424, recognised on purpose. The arm above
+  // leaves every 424 transient to the curated-cause path, because their copy is
+  // un-audited on these two forms and some state a wait nobody measured
+  // (`MT5_TERMINAL_BUSY`). `MT5_SIGN_IN_REFUSED` is the exception, and it is named, not
+  // a status rule: a login-stage MT5 `last_error` -6 is the broker's own refusal, its
+  // `KEY_MT5_SIGN_IN_REFUSED` copy states only that and lists the three things -6 cannot
+  // tell apart, and it offers NO Retry (`actions` has neither `clear_and_retry` nor
+  // `try_another_key`). Without this line both forms rendered UNKNOWN's shell, whose
+  // copy IS recoverable, over the honest sentence, which is the Retry the emitter's
+  // `recoverable=False` forbids. `SIGN_IN_FAILED` and every other 424 stay unrecognised.
+  if (status === 424 && wire === "MT5_SIGN_IN_REFUSED") {
+    const refused = VENUE_WIRE_CODE_TO_VERDICT.get(wire);
+    if (refused !== undefined && refused.status === 424) {
+      return { code: refused.code, recognised: true };
     }
   }
 

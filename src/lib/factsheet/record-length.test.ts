@@ -12,7 +12,7 @@
  * or of clock fails here first.
  */
 import { describe, it, expect } from "vitest";
-import { formatRecordLength } from "./record-length";
+import { formatCagrSpan, formatRecordLength } from "./record-length";
 
 describe("formatRecordLength — calendar years plus daily observations (D-12)", () => {
   it("states a 166-point, 0.45-calendar-year record once, in calendar years with two decimals", () => {
@@ -53,5 +53,31 @@ describe("formatRecordLength — calendar years plus daily observations (D-12)",
     const out = formatRecordLength({ n: Number.NaN, years: 0.45 });
     expect(out.observations).toBe("— daily observations");
     expect(out.text).not.toContain("NaN");
+  });
+});
+
+describe("formatCagrSpan, the span CAGR covers (236 plan 11, CONTEXT Q1)", () => {
+  it("states the dates and the whole first-to-last days, 598 for 2024-03-14 to 2025-11-02", () => {
+    expect(formatCagrSpan("2024-03-14", "2025-11-02")).toBe("CAGR over Mar\u00a014,\u00a02024 to Nov\u00a02,\u00a02025 (598 days)");
+  });
+
+  it("counts whole first-to-last days, not coveredDays' inclusive count: one day apart is 1 day, not 2", () => {
+    expect(formatCagrSpan("2025-01-01", "2025-01-02")).toBe("CAGR over Jan\u00a01,\u00a02025 to Jan\u00a02,\u00a02025 (1 day)");
+  });
+
+  it("is null when either end is absent, so an old row renders nothing", () => {
+    expect(formatCagrSpan(null, "2025-11-02")).toBeNull();
+    expect(formatCagrSpan("2024-03-14", undefined)).toBeNull();
+    expect(formatCagrSpan(undefined, undefined)).toBeNull();
+  });
+
+  it("is null for a value that is not a day, never invented text", () => {
+    expect(formatCagrSpan("not-a-date", "2025-11-02")).toBeNull();
+    expect(formatCagrSpan("2024-03-14", "2025-13-45")).toBeNull();
+  });
+
+  it("is null when the span is not a span (same day or reversed)", () => {
+    expect(formatCagrSpan("2025-01-01", "2025-01-01")).toBeNull();
+    expect(formatCagrSpan("2025-02-01", "2025-01-01")).toBeNull();
   });
 });

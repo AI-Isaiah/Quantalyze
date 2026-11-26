@@ -17,7 +17,7 @@
 - **F-7 `189-OPTIONREPLAY-NEXT-MILESTONE` and `164.8.4-REDACT-NO-POSITIVE-SCAN` stay in `TODOS.md`** ("Bleiben in todos"). They are not v1.22 scope.
 - **F-8 The `poll_positions` enqueue is live.** Measured on PROD 2026-11-23: `poll_positions` jobs ran on 21 days between 2026-10-24 and 2026-11-23, for one strategy only. Phase 224 must NOT retire it. The direction of `FANOUT-COHORT-SIBLING-POLL-01` (widen the cohort) is right. This overrides the wording of Phase 224's ROADMAP goal and of `TODOS.md` `L2925` for `poll_positions`.
 - **F-9 Deribit stale returns** (debug sweep 2026-11-23): one Deribit account's stored returns end 2026-10-26 while its inputs carry a 2026-11-09 flow and its derives report `done`. It gets a stale-returns requirement and a per-venue freshness invariant.
-- **F-10 Two milestones** ("Yes, split into two milestones", 2026-11-23). v1.22 TRUTH keeps the data-integrity and user-facing tiers: the carried Phases 155.2, 157, 222, 223 and 225, the groups MT5D, VREAD, DBOOK, FRESH, HOLD, NOCAP, HEAL, FIG, FACT, CACHE, CONN, RLIM and SOAK (SOAK is the independent MT5 oracle, so it stays as wave 0), and PROOF-01. ⭐ Exception: SECR-01 and SECR-02 (delete the two demo accounts, remove the committed demo credentials) stay in v1.22 because `158-OPS-03` is the only HIGH item. v1.23 HARDEN (security, alerting, tooling; planned, starts after v1.22) takes the carried Phases 221 and 224 and the groups SECR-03/04, DBACC, HELD, ALRT, SQLG and LANE, listed under "Planned for v1.23" below. PROOF-01 applies there too. F-1's tier order holds inside each milestone.
+- **F-10 Two milestones** ("Yes, split into two milestones", 2026-11-23). v1.22 TRUTH keeps the data-integrity and user-facing tiers: the carried Phases 155.2, 157, 222, 223 and 225, the groups MT5D, VREAD, DBOOK, FRESH, HOLD, NOCAP, HEAL, FIG, FACT, CACHE, CONN, RLIM and SOAK (SOAK is the independent MT5 oracle, so it stays as wave 0), and PROOF-01. ⭐ Exception: SECR-01 and SECR-02 (delete the two demo accounts, remove the committed demo credentials) stay in v1.22 because `158-OPS-03` is the only HIGH item. v1.23 HARDEN (security, alerting, tooling; planned, starts after v1.22) takes the carried Phases 221 and 224 and the groups SECR-03/04, DBACC, HELD, ALRT, SQLG and LANE, listed under "Planned for v1.23" below. PROOF-01 applies there too. F-1's tier order holds inside each milestone. ⭐ **2026-11-25 (founder ruling in chat; also in `ROADMAP.md` and in each phase's CONTEXT.md):** "We will Move 157 and 155.2 into the next milestone". The carried Phases 155.2 and 157 moved to v1.23 HARDEN, with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. Their requirement text stays under its "Carried" headings below; the traceability table maps them to v1.23.
 
 **Carried with Phase 155.2 and still binding (verbatim from `milestones/v1.18-REQUIREMENTS.md`):**
 
@@ -41,6 +41,8 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried: MT5 verification (Phase 155.2, verbatim from `milestones/v1.18-REQUIREMENTS.md`)
 
+⭐ **Moved to v1.23 HARDEN, 2026-11-25** (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The six requirements below keep their ids and text, and are mapped to v1.23 in the traceability table. The text stays here so that its citations keep resolving.
+
 - [ ] **MT5-07**: Rendered performance matches an external oracle within `MT5_PARITY_TOLERANCE` as defined in D-B: Gate A (pre-`S`, closed-trade balance basis) against the terminal's All-History export, and Gate B (from `S`, open P&L included) against broker statements and the weekend reading (D-C, D-E), over windows that end before the run day.
 - [ ] **MT5-08**: The verification runs against the live funded accounts MM2, MM3 and FX-AI_V, with the founder at the terminal on a trading day; a demo, the v1.15 soak account or a weekend-only run does not satisfy it (the weekend reading is an edge input, not the run).
 - [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5 numbers for these accounts. ⚠️ Re-mapped 2026-11-13: the portfolio PDF (retired in Phase 195 TRIM) and `scenario-blend-panels.ts` (deleted) are dropped; the current surface list is fixed at discuss-phase, cited by symbol.
@@ -49,6 +51,8 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **MT5-GOAL-01** *(umbrella acceptance, no implementation of its own)*: An MT5 strategy is usable end-to-end by the allocator who uploaded it (ingests, projects in a scenario, factsheet viewable), confirmed live by the founder.
 
 ### Carried: founder confirmations (Phase 157, verbatim from `milestones/v1.18-REQUIREMENTS.md`)
+
+⭐ **Moved to v1.23 HARDEN, 2026-11-25** (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The four requirements below keep their ids and text, and are mapped to v1.23 in the traceability table. The text stays here so that its citations keep resolving.
 
 - [ ] **FCONF-01**: The founder confirms the 2026-08-04 wizard restart is gone: with a live draft, `+ Strategy` shows the resume banner and Resume lands on the draft's step.
 - [ ] **FCONF-02**: The founder sees the amber `wizard-sync-recomputing` block render as specified (heading, no red envelope, no metric numbers).
@@ -60,22 +64,22 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [x] **MT5D-01**: Every failed attempt of a compute job leaves an append-only record of its cause, written before the re-claim clears `last_error`. The record tells a stall or watchdog reset apart from a real error, and stays readable after a later attempt succeeds. The deliberate `last_error` clear on re-claim stays. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-02**: Once that record has collected real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root, so that over seven consecutive nights every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. (covers: 175-NIGHTLY-MT5-DERIVE-CHECK)
 - [ ] **MT5D-03**: The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause. (covers: 202-MT5-CLOCK-LEAD-01)
-- [ ] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
-- [ ] **MT5D-05**: An inception day's P&L is booked, or flagged by name. It is never dropped as NaN without a flag. (covers: 164.6.6.2.3-INCEPTION-DAY0-PNL)
-- [ ] **MT5D-06**: A day-level flow just under the previous day's NAV either carries the large-flow annotation, or the band is recorded as accepted (founder ruling at plan time on the D-15 band). `FLOW_TIMING_LARGE_RATIO` is never widened to make a check pass. (covers: 164.6.6.2.3-D15-THRESHOLD-BAND)
-- [ ] **MT5D-07**: A timed MT5 key with no writer basis is counted or blocked with a named signal. It never composes silently on the legacy roll. (covers: 164.6.6.2.3-MT5-BASIS-SILENT-NONE)
+- [x] **MT5D-04**: A timed re-funding day with an empty cohort 0 keeps the return chain intact instead of being dropped by a guard. (covers: 164.6.6.2.3-EMPTY-COHORT0-REFUND)
+- [x] **MT5D-05**: An inception day's P&L is booked, or flagged by name. It is never dropped as NaN without a flag. (covers: 164.6.6.2.3-INCEPTION-DAY0-PNL)
+- [x] **MT5D-06**: A day-level flow just under the previous day's NAV either carries the large-flow annotation, or the band is recorded as accepted (founder ruling at plan time on the D-15 band). `FLOW_TIMING_LARGE_RATIO` is never widened to make a check pass. (covers: 164.6.6.2.3-D15-THRESHOLD-BAND)
+- [x] **MT5D-07**: A timed MT5 key with no writer basis is counted or blocked with a named signal. It never composes silently on the legacy roll. (covers: 164.6.6.2.3-MT5-BASIS-SILENT-NONE)
 - [ ] **MT5D-08**: An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. (covers: 167.1.2-MT5-FAILING-HOLDER)
 
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
 
-- [ ] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
+- [x] **VREAD-01**: The Bybit derive anchor sums the same set of stable coins as the current-equity read, through one shared coin-set constant. (covers: 167.2.1.1-DERIVE-USDT-ONLY-ANCHOR)
 - [x] **VREAD-02**: The Bybit holdings poll includes USDC-settled and inverse positions and their uPnL, not only USDT-linear ones. (covers: 167.2.1.1-BYBIT-POSITIONS-USDT-LINEAR-ONLY)
 - [x] **VREAD-03**: A Bybit strategy trade sync whose start is older than seven days returns every execution in the requested window, or refuses by name. (covers: 167.2.1.1.2.1-STRATEGY-BYBIT-7DAY)
 - [x] **VREAD-04**: A Bybit on-chain deposit is counted exactly once. Replace or union is decided on probe evidence, and recorded as undecided if the probe cannot tell the two apart. (covers: 186-BYBIT-ONCHAIN-DEPOSIT-UNVERIFIED)
 - [x] **VREAD-05**: The Bybit owner's static egress IP is allow-listed (a founder action, recorded with its date), and that key's daily derive no longer errors for that reason. (covers: 167.1.2.2-BYBIT-STATIC-EGRESS)
-- [ ] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
-- [ ] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
-- [ ] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
+- [x] **VREAD-06**: An OKX daily P&L bill in a currency other than USDT is converted at a stated rate or refused by name. It is never summed at face value. (covers: 167.1.2.2.2.1-OKX-DAILY-PNL-MIXED-CCY)
+- [x] **VREAD-07**: An OKX first window longer than the page cap completes across ticks instead of truncating every day. Raising `OKX_BILLS_PAGE_CAP` is not a close. If an earlier phase already closed this, the closing evidence is recorded instead. (covers: 167.1.2.2.2-OKX-PERSISTENT-TRUNCATION)
+- [x] **VREAD-08**: `api_keys.last_fetched_trade_timestamp` never reads ahead of the newest stored trade, and a key found ahead has its skipped days re-read. (covers: 167.1.2.2.2-LAST-FETCHED-TRADE-TS-AHEAD)
 
 ### Data integrity: Deribit book and freshness (DERIBITBOOK, Deribit stale returns)
 
@@ -88,16 +92,16 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 - [ ] **HOLD-01**: A Holdings row whose key is missing from the identity read fails loud. It never counts as an account of its own. (covers: 170.4-IDENTITY-READ-COMPLETENESS)
 - [ ] **HOLD-02**: Match scoring applies the native-unpriced marker per account, so for a multi-key account match AUM and unpriced days equal what Holdings reports. (covers: 170.4-MATCH-UNPRICED-PER-KEY)
-- [ ] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES)
+- [x] **HOLD-03**: The writer-basis gate compares per-day values as well as the calendar, and refuses a same-day re-derive pair whose P&L does not match. (covers: 167.1.2.2.1-WRITER-BASIS-VALUES) ⭐ NOTE 2026-11-24 (planning, recorded in 229-CONTEXT.md): the per-day comparison is a compose-side `returns_stamp` (each derive stores the per-day returns it wrote in its `key_inputs` row; the compose compares it per raw key before the stitch and refuses a differing pair as the blocking `key_inputs_mismatch`). `read_writer_basis` stays byte-unchanged, because editing it fires the open entry `167.1.2.2.1-WRITER-BASIS-EMPTY-READS-LEGACY` and a post-stitch check reads the stitched series. Known limit: a correction confined to a day with no stored return that moves no other return leaves the pair content-consistent and is not refused; a row written before this change carries no stamp and is counted, not refused.
 - [ ] **HOLD-04**: When the dashboard's unpriced-marker read fails, the page shows a note and a Sentry event fires. Stale rows are never shown silently. (covers: 170.4-DASHBOARD-MARKER-READ-SILENT)
 - [ ] **HOLD-05**: Every failing key of a shared account is named in the missing-data message, even when another key with the same cause already prints a line. (covers: 198-SHARED-ACCOUNT-FALLBACK-UNNAMED)
 
 ### Data integrity: no-capital keys (NOCAPITAL)
 
-- [ ] **NOCAP-01**: An MT5 key whose stored terminal reads zero for one tick is never dropped as no-capital while it is funded. (covers: 166.3.1-NOCAP-MT5-A2-CIRCULAR)
-- [ ] **NOCAP-02**: Any exception raised by a no-capital candidate, not only `NavReconstructionError`, leaves the previous row intact. The row never goes stale across retries. (covers: 166.3.1-NOCAP-NONNAV-EXCEPTIONS)
-- [ ] **NOCAP-03**: A fallback to `dropped_key` stores a payload flag naming why, and is counted per run. A log line alone is not enough. (covers: 166.3.1-NOCAP-FALLBACK-TRACE)
-- [ ] **NOCAP-04**: A refused candidate leaves no residue reason (such as `key_inputs_mismatch`) in the stored payload. (covers: 166.3.1-NOCAP-SEGMENT-REASON-RESIDUE)
+- [x] **NOCAP-01**: An MT5 key whose stored terminal reads zero for one tick is never dropped as no-capital while it is funded. (covers: 166.3.1-NOCAP-MT5-A2-CIRCULAR)
+- [x] **NOCAP-02**: Any exception raised by a no-capital candidate, not only `NavReconstructionError`, leaves the previous row intact. The row never goes stale across retries. (covers: 166.3.1-NOCAP-NONNAV-EXCEPTIONS)
+- [x] **NOCAP-03**: A fallback to `dropped_key` stores a payload flag naming why, and is counted per run. A log line alone is not enough. (covers: 166.3.1-NOCAP-FALLBACK-TRACE)
+- [x] **NOCAP-04**: A refused candidate leaves no residue reason (such as `key_inputs_mismatch`) in the stored payload. (covers: 166.3.1-NOCAP-SEGMENT-REASON-RESIDUE)
 
 ### Data integrity: no stranded strategy (JOBHEAL)
 
@@ -117,18 +121,19 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### User-facing: honest factsheets (FACTSHEETHONEST)
 
-- [ ] **FACT-01**: A withheld factsheet prints no whole-record reading beside rail figures that read as dashes. The three deferred D6 items are a founder ruling at plan time. (covers: 164.6.6.3.3-WITHHELD-RESIDUE)
-- [ ] **FACT-02**: During a re-run, every surface that shows a strategy's figures (share card, tear sheet, PDFs, returns API, recommendations, portfolios, composer) shows the same state as the factsheet: it stays published, with a quiet Updating line (Phase 190). A census test lists every reader of the recompute verdict. (covers: 190-RERUN-SURFACES-NOT-HOLDING)
+- [x] **FACT-01**: A withheld factsheet prints no whole-record reading beside rail figures that read as dashes. The three deferred D6 items are a founder ruling at plan time. (covers: 164.6.6.3.3-WITHHELD-RESIDUE)
+- [x] **FACT-02**: During a re-run, every surface that shows a strategy's figures (share card, tear sheet, PDFs, returns API, recommendations, portfolios, composer) shows the same state as the factsheet: it stays published, with a quiet Updating line (Phase 190). A census test lists every reader of the recompute verdict. (covers: 190-RERUN-SURFACES-NOT-HOLDING)
 - [ ] **FACT-03**: A never-computed analytics row never reads "Analytics last computed", and freshness checks never take its insert time as a compute time. Whether this uses a nullable `computed_at` (which reverses CONTEXT R-04) or a separate marker is a founder ruling at plan time. (covers: 166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT)
-- [ ] **FACT-04**: The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —". (covers: 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED)
+- [x] **FACT-04**: The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —". (covers: 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED)
 - [ ] **FACT-05**: For a failed, stalled or never-started row, the /strategies note never tells the owner to wait. (covers: 170.1-STRATEGIES-NOTE-WAIT-WORDING)
 
 ### User-facing: cached state matches the truth (SURFACECACHE)
 
-- [ ] **CACHE-01**: A strategy published after its OG card was first requested shows its real card on the next request. A not-found card is never long-cached. (covers: 170.3-OG-NOTFOUND-CACHE)
-- [ ] **CACHE-02**: The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front. (covers: 201.1-COMPOSER-RANGE-AS-DATES)
-- [ ] **CACHE-03**: A failed BTC price read is never cached as a normal payload. The next view retries it, so the USD toggle is not disabled for the cache lifetime. (covers: 164.6.6.2.1-USDVIEW-READFAIL-CACHED)
-- [ ] **CACHE-04**: Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable. (covers: 164.6.6.2.1-DISCOVERY-RANKING-HONESTY)
+- [x] **CACHE-01**: A strategy published after its OG card was first requested shows its real card on the next request. A not-found card is never long-cached. (covers: 170.3-OG-NOTFOUND-CACHE)
+- [x] **CACHE-02**: The composer stores its selected range as dates, so a 12M preset always ends on the latest day and keeps the same dates when the series grows at the front. (covers: 201.1-COMPOSER-RANGE-AS-DATES)
+- [x] **CACHE-03**: A failed BTC price read is never cached as a normal payload. The next view retries it, so the USD toggle is not disabled for the cache lifetime. (covers: 164.6.6.2.1-USDVIEW-READFAIL-CACHED)
+- [x] **CACHE-04**: Discovery never ranks a BTC-unit return beside USD returns as if the two were comparable. (covers: 164.6.6.2.1-DISCOVERY-RANKING-HONESTY)
+  ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 239 CONTEXT): BTC-unit and USD returns are ranked together as pure performance, with no BTC price conversion; the "in BTC" chip stays. The line above is kept as lineage.
 
 ### User-facing: honest connect answers (CONNECTTRUTH)
 
@@ -136,17 +141,18 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [ ] **CONN-02**: Reconnecting an MT5 account with a rotated or mistyped password gets a named answer that matches what was stored. Validating and storing the new password, or refusing by name, is a founder ruling at plan time. (covers: L4097)
 - [ ] **CONN-03**: MT5 account identity includes the broker server, so the same login on two servers never collides. The backfill uses no data-reading `DO` guard. (covers: L4105)
 - [ ] **CONN-04**: `KEY_ORPHANED` copy tells an allocator-role owner which key to Disconnect. The archived-composite case is out (F-2). (covers: 167.1.2-ORPHAN-COPY-FIX)
-- [ ] **CONN-05**: Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings (permanence plumbing with one consumer, coordinate drift) are fixed or recorded with a reason. (covers: L2510)
-- [ ] **CONN-06**: A month-name date cell in a numeric-date CSV column is either parsed or rejected with a message naming the cell and the expected format (founder ruling at plan time). (covers: 170.1-CSV-ODD-SPELLING-REJECTED)
+- [x] **CONN-05**: Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings (permanence plumbing with one consumer, coordinate drift) are fixed or recorded with a reason. (covers: L2510)
+- [x] **CONN-06**: A month-name date cell in a numeric-date CSV column is either parsed or rejected with a message naming the cell and the expected format (founder ruling at plan time). (covers: 170.1-CSV-ODD-SPELLING-REJECTED)
 
 ### User-facing: fair anonymous limits (RATELIMITFAIR)
 
-- [ ] **RLIM-01**: A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time. (covers: L4491)
-- [ ] **RLIM-02**: A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. (covers: L4501)
+- [x] **RLIM-01**: A few anonymous visitors from different IPs cannot exhaust the shared anonymous verify-strategy bucket, and no limit is keyed on the proxy's IP. A per-IP anonymous tier through the signed claim, or a raised shared tier, is a founder ruling at plan time. (covers: L4491)
+- [x] **RLIM-02**: A signed-in user validating a CSV within the edge limit never gets an upstream 429, because the edge limit and the shared `/process-key` tenant tier agree. The limiter's docblock cites the current upstream cap. (covers: L4501) ⛔ CORRECTED 2026-11-24 (founder ruling, Phase 240 CONTEXT): agreement is met by a CSV-scoped per-tenant `/process-key` tier (60/minute, exempt from the 500/hour ceiling), not by retuning the shared tenant tier, which stays 100/hour.
 
 ### Security: demo credentials (SECRETSHYGIENE; in v1.22 by founder exception, F-10)
 
 - [ ] **SECR-01**: The two demo accounts no longer exist on TEST or PROD, and the deletion is recorded with its date (F-3). (covers: 158-OPS-03, HIGH entry)
+  ⛔ **CORRECTED 2026-11-24 (founder ruling, Phase 241 CONTEXT and ROADMAP):** narrowed. The seed allocator account is deleted on TEST and PROD. The shared e2e login stays, because it is in active PROD use, and the founder resets its password so the leaked credential is dead. The sentence above is kept as lineage.
 - [ ] **SECR-02**: No tracked file contains either demo password literal. The absence guard checks a digest instead of the literal and is shown RED by planting a matching literal. Removing the text alone does not close the entry, and history is not rewritten. (covers: 158-OPS-03, HIGH entry)
 
 ### CI and tooling: MT5 soak (MT5SOAK)
@@ -157,14 +163,14 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried phase 222 ALERTTRUTH
 
-- [ ] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
-- [ ] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
-- [ ] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
+- [x] **ERRC-01**: No user-readable string in `analytics-service` or in the `computation_error_copy` arms says "contact support". Each names the contact form or a remedy that works, and csv-finalize's copy is in byte parity with the SQL arm, checked by reading the SQL arm. (covers: 212-CONTACT-SUPPORT-SURVIVORS)
+- [x] **ERRC-02**: A total benchmark source failure shows wording distinct from a stale benchmark. (covers: 166.4.1-BENCHMARK-OUTAGE-LABEL)
+- [x] **ERRC-03**: A failed follow-on analytics enqueue in `run_sync_trades_job` never leaves the strategy reading `complete` with no analytics. The exact behaviour is a founder ruling at plan time. (covers: SYNCTRADES-ENQUEUE-DONE)
 
 ### Carried phase 223 FLOWKINDS (flow-source half only, F-2)
 
-- [ ] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
-- [ ] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
+- [x] **FLOWK-02**: `run_sync_funding_job` and `okx_archive_job` each have a recorded, test-pinned decision to refuse a malformed funding row by name or to keep dropping it. The decision is taken with the founder wherever a published number changes. (covers: 186-OTHER-FUNDING-CALLERS-DROP, non-composite callers)
+- [x] **FLOWK-03**: The per-key count of `daily_pnl_malformed_<venue>` flags on PROD is recorded read-only, and the founder's ruling on refusing a malformed realized row is recorded before any such refusal is switched on. (covers: 186-REALIZED-MALFORMED-COUNT)
 
 ### Carried phase 225 ONEACCOUNTONCE
 
@@ -271,24 +277,24 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| MT5-07 | Phase 155.2 | Pending |
-| MT5-08 | Phase 155.2 | Pending |
-| MT5-09 | Phase 155.2 | Pending |
-| MT5-10 | Phase 155.2 | Pending |
-| MT5-15 | Phase 155.2 | Pending |
-| MT5-GOAL-01 | Phase 155.2 | Pending |
-| FCONF-01 | Phase 157 | Pending |
-| FCONF-02 | Phase 157 | Pending |
-| FCONF-03 | Phase 157 | Pending |
-| FCONF-04 | Phase 157 | Pending |
+| MT5-07 | Phase 155.2 (v1.23) | Pending |
+| MT5-08 | Phase 155.2 (v1.23) | Pending |
+| MT5-09 | Phase 155.2 (v1.23) | Pending |
+| MT5-10 | Phase 155.2 (v1.23) | Pending |
+| MT5-15 | Phase 155.2 (v1.23) | Pending |
+| MT5-GOAL-01 | Phase 155.2 (v1.23) | Pending |
+| FCONF-01 | Phase 157 (v1.23) | Pending |
+| FCONF-02 | Phase 157 (v1.23) | Pending |
+| FCONF-03 | Phase 157 (v1.23) | Pending |
+| FCONF-04 | Phase 157 (v1.23) | Pending |
 | SCRB-01 | Phase 221 (v1.23) | Pending |
 | SCRB-02 | Phase 221 (v1.23) | Pending |
 | SCRB-03 | Phase 221 (v1.23) | Pending |
-| ERRC-01 | Phase 222 | Pending |
-| ERRC-02 | Phase 222 | Pending |
-| ERRC-03 | Phase 222 | Pending |
-| FLOWK-02 | Phase 223 | Pending |
-| FLOWK-03 | Phase 223 | Pending |
+| ERRC-01 | Phase 222 | Complete |
+| ERRC-02 | Phase 222 | Complete |
+| ERRC-03 | Phase 222 | Complete |
+| FLOWK-02 | Phase 223 | Complete |
+| FLOWK-03 | Phase 223 | Complete |
 | DEAD-01 | Phase 224 (v1.23) | Pending |
 | DEAD-02 | Phase 224 (v1.23) | Pending |
 | DEAD-03 | Phase 224 (v1.23) | Pending |
@@ -302,59 +308,59 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Pending |
 | MT5D-03 | Phase 230 | Pending |
-| MT5D-04 | Phase 229 | Pending |
-| MT5D-05 | Phase 229 | Pending |
-| MT5D-06 | Phase 229 | Pending |
-| MT5D-07 | Phase 229 | Pending |
+| MT5D-04 | Phase 229 | Complete |
+| MT5D-05 | Phase 229 | Complete |
+| MT5D-06 | Phase 229 | Complete |
+| MT5D-07 | Phase 229 | Complete |
 | MT5D-08 | Phase 225 | Pending |
-| VREAD-01 | Phase 231 | Pending |
+| VREAD-01 | Phase 231 | Complete |
 | VREAD-02 | Phase 231 | Complete |
 | VREAD-03 | Phase 231 | Complete |
 | VREAD-04 | Phase 231 | Complete |
 | VREAD-05 | Phase 231 | Complete |
-| VREAD-06 | Phase 232 | Pending |
-| VREAD-07 | Phase 232 | Pending |
-| VREAD-08 | Phase 232 | Pending |
+| VREAD-06 | Phase 232 | Complete |
+| VREAD-07 | Phase 232 | Complete |
+| VREAD-08 | Phase 232 | Complete |
 | DBOOK-01 | Phase 233 | Pending |
 | DBOOK-02 | Phase 233 | Pending |
 | FRESH-01 | Phase 233 | Pending |
 | FRESH-02 | Phase 233 | Pending |
 | HOLD-01 | Phase 235 | Pending |
 | HOLD-02 | Phase 235 | Pending |
-| HOLD-03 | Phase 229 | Pending |
+| HOLD-03 | Phase 229 | Complete |
 | HOLD-04 | Phase 235 | Pending |
 | HOLD-05 | Phase 235 | Pending |
-| NOCAP-01 | Phase 234 | Pending |
-| NOCAP-02 | Phase 234 | Pending |
-| NOCAP-03 | Phase 234 | Pending |
-| NOCAP-04 | Phase 234 | Pending |
+| NOCAP-01 | Phase 234 | Complete |
+| NOCAP-02 | Phase 234 | Complete |
+| NOCAP-03 | Phase 234 | Complete |
+| NOCAP-04 | Phase 234 | Complete |
 | HEAL-01 | Phase 227 | Complete |
 | HEAL-02 | Phase 227 | Complete |
 | HEAL-03 | Phase 227 | Complete |
 | HEAL-04 | Phase 227 | Complete |
 | HEAL-05 | Phase 227 | Complete |
-| FIG-01 | Phase 236 | Pending |
-| FIG-02 | Phase 236 | Pending |
-| FIG-03 | Phase 236 | Pending |
-| FIG-04 | Phase 236 | Pending |
-| FIG-05 | Phase 236 | Pending |
-| FACT-01 | Phase 237 | Shipped (#1316), human verification pending |
-| FACT-02 | Phase 237 | Shipped (#1316), human verification pending |
+| FIG-01 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-02 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-03 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-04 | Phase 236 | Shipped (#1354), human verification pending |
+| FIG-05 | Phase 236 | Shipped (#1354); PROD fleet re-derive pending |
+| FACT-01 | Phase 237 | Complete |
+| FACT-02 | Phase 237 | Complete |
 | FACT-03 | Phase 238 | Pending |
-| FACT-04 | Phase 237 | Shipped (#1316), human verification pending |
+| FACT-04 | Phase 237 | Complete |
 | FACT-05 | Phase 238 | Pending |
-| CACHE-01 | Phase 237 | Shipped (#1316), human verification pending |
-| CACHE-02 | Phase 239 | Pending |
-| CACHE-03 | Phase 237 | Shipped (#1316), human verification pending |
-| CACHE-04 | Phase 239 | Pending |
+| CACHE-01 | Phase 237 | Complete |
+| CACHE-02 | Phase 239 | Complete |
+| CACHE-03 | Phase 237 | Complete |
+| CACHE-04 | Phase 239 | Complete |
 | CONN-01 | Phase 225 | Pending |
 | CONN-02 | Phase 228 | Pending |
 | CONN-03 | Phase 225 | Pending |
 | CONN-04 | Phase 228 | Pending |
-| CONN-05 | Phase 240 | Pending |
-| CONN-06 | Phase 240 | Pending |
-| RLIM-01 | Phase 240 | Pending |
-| RLIM-02 | Phase 240 | Pending |
+| CONN-05 | Phase 240 | Complete |
+| CONN-06 | Phase 240 | Complete |
+| RLIM-01 | Phase 240 | Complete |
+| RLIM-02 | Phase 240 | Complete |
 | SECR-01 | Phase 241 | Pending |
 | SECR-02 | Phase 241 | Pending |
 | SECR-03 | Phase 242 (v1.23) | Pending |
@@ -390,11 +396,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 
 **Coverage:**
 - 116 requirements in all, across two milestones (F-10). FLOWK-01 was dropped by the founder on 2026-11-23 and is not counted.
-- **v1.22 TRUTH: 81.** Carried: 10 (MT5 6 on 155.2, FCONF 4 on 157). Phases 222, 223 and 225: 9 (ERRC 3, FLOWK 2, ONCE 4). New groups: 61 (MT5D 8, VREAD 8, DBOOK 2, FRESH 2, HOLD 5, NOCAP 4, HEAL 5, FIG 5, FACT 5, CACHE 4, CONN 6, RLIM 2, SOAK 3, SECR-01/02 2). Milestone-wide: 1 (PROOF-01). Mapped: 81/81, to 21 phases (155.2, 157, 222, 223, 225, 226–241).
-- **v1.23 HARDEN, planned: 35.** Carried Phases 221 and 224: 8 (SCRB 3, DEAD 5). New groups: 27 (SECR-03/04 2, DBACC 6, ALRT 8, HELD 2, SQLG 5, LANE 4). Mapped: 35/35, to 10 phases (221, 224, 242–249). PROOF-01 applies there too and is counted once, under v1.22.
+- **v1.22 TRUTH: 71.** ⭐ 2026-11-25: was 81; the carried 10 (MT5 6 on 155.2, FCONF 4 on 157) moved to v1.23 with their phases (founder: "We will Move 157 and 155.2 into the next milestone"). Phases 222, 223 and 225: 9 (ERRC 3, FLOWK 2, ONCE 4). New groups: 61 (MT5D 8, VREAD 8, DBOOK 2, FRESH 2, HOLD 5, NOCAP 4, HEAL 5, FIG 5, FACT 5, CACHE 4, CONN 6, RLIM 2, SOAK 3, SECR-01/02 2). Milestone-wide: 1 (PROOF-01). Mapped: 71/71, to 19 phases (222, 223, 225, 226–241). Phases 250–252, booked later, own no requirement row.
+- **v1.23 HARDEN, planned: 45.** Carried Phases 221 and 224: 8 (SCRB 3, DEAD 5). Moved from v1.22 on 2026-11-25 with Phases 155.2 and 157: 10 (MT5 6, FCONF 4). New groups: 27 (SECR-03/04 2, DBACC 6, ALRT 8, HELD 2, SQLG 5, LANE 4). Mapped: 45/45, to 12 phases (155.2, 157, 221, 224, 242–249). PROOF-01 applies there too and is counted once, under v1.22.
 - Unmapped: 0. Every requirement maps to exactly one phase, and PROOF-01 is milestone-wide.
 - TODOS coverage: every open MEDIUM-and-higher entry in the 2026-11-23 triage (94 open, counting `158-OPS-03`'s HIGH and MEDIUM entries separately), plus the MEDIUM entries already owned by 221–223, maps to a requirement above, to a Future Requirement (MTWEDGE-01, LATENT-01, LATENT-02), or to a recorded exclusion (F-2 composite, F-7). None is unplaced. Basis: the triage's per-entry table, checked by id; `TODOS.md` at HEAD was not re-read. The LOW entries that Phase 224 owns are covered by DEAD-01..05 because the phase owns them by name.
 
 ---
 *Requirements defined: 2026-11-23*
-*Last updated: 2026-11-23, roadmap created: traceability filled, and the v1.23 requirements moved under "Planned for v1.23" by F-10*
+*Last updated: 2026-11-25, Phases 155.2 and 157 and their 10 requirements moved to v1.23 by founder ruling (2026-11-23: roadmap created, traceability filled, and the v1.23 requirements moved under "Planned for v1.23" by F-10)*

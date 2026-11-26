@@ -19,7 +19,7 @@ import pytest
 
 from routers import match as match_mod
 from services.allocator_equity_derive import HoldingsUpdatedAtError
-from tests.fake_postgrest import FakeDb
+from tests.fake_postgrest import FakeDb, FakeQuery
 
 ALLOCATOR = "alloc-1"
 
@@ -375,3 +375,117 @@ def test_every_holdings_read_is_owner_filtered_and_scoped_to_one_key(
     history = [r for r in holdings_reads if any(col == "asof" for col, _ in r.gte)]
     assert history, "the history read must be bounded by a window start"
     assert ctx["portfolio_aum"] == pytest.approx(40000.0)
+
+
+# ---------------------------------------------------------------------------
+# 225 CONN-03 (plan 14, CONTEXT Q6): the scorer groups keys by the same identity as
+# the derive, so one login on two broker servers is two accounts.
+#
+# ``FakeQuery.select`` ignores its argument (it is shared by other suites), so these
+# tests project ``api_keys`` rows to the columns the select names, as PostgREST does:
+# a scorer whose select forgot ``venue_server`` sees no server at all.
+# ---------------------------------------------------------------------------
+
+
+class _ProjectingQuery(FakeQuery):
+    _columns: list[str] | None = None
+
+    def select(self, *_a: Any, **_k: Any) -> "_ProjectingQuery":
+        if _a and isinstance(_a[0], str) and _a[0] != "*":
+            self._columns = [c.strip() for c in _a[0].split(",")]
+        return self
+
+    def execute(self) -> Any:
+        response = super().execute()
+        if self._name == "api_keys" and self._columns is not None:
+            response.data = [
+                {c: row[c] for c in self._columns if c in row} for row in response.data
+            ]
+        return response
+
+
+class _ProjectingDb(FakeDb):
+    def table(self, name: str) -> FakeQuery:
+        return _ProjectingQuery(self, name)
+
+
+def _server_key(key_id: str, server: str | None) -> dict[str, Any]:
+    return _key(key_id, venue_account_id="L-1", venue_server=server)
+
+
+def test_one_login_on_two_servers_is_two_accounts_and_both_are_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # key-a (srv-a) is newest on 10-11, key-b (srv-b) on 10-10. Two accounts, so each
+    # takes its OWN newest day: 40000 + 25000 = 65000. Grouped on the login alone they
+    # would be one account whose newest day is 10-11, and key-b's 25000 would be lost.
+    db = _ProjectingDb(
+        {
+            "api_keys": [_server_key("key-a", "srv-a"), _server_key("key-b", "srv-b")],
+            "allocator_holdings": [
+                _holding("key-a", "BTC", 40000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
+                _holding("key-b", "BTC", 25000.0, "2026-10-10", "2026-10-10T04:00:00+00:00"),
+            ],
+            "allocator_equity_derived": [],
+        }
+    )
+    ctx = _ctx(monkeypatch, db)
+
+    assert ctx["portfolio_aum"] == pytest.approx(65000.0)
+
+
+def test_a_key_with_no_server_beside_two_servers_is_its_own_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # key-n has no server on a login that carries srv-a and srv-b: it may read either,
+    # so it joins neither and counts as key:key-n (the TS keyAccountOf and the SQL
+    # key_account give the same answer). Three accounts, each at its own newest day:
+    # BTC 40000 + BTC 25000 + ETH 7000 = 72000.
+    db = _ProjectingDb(
+        {
+            "api_keys": [
+                _server_key("key-a", "srv-a"),
+                _server_key("key-b", "srv-b"),
+                _server_key("key-n", None),
+            ],
+            "allocator_holdings": [
+                _holding("key-a", "BTC", 40000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
+                _holding("key-b", "BTC", 25000.0, "2026-10-10", "2026-10-10T04:00:00+00:00"),
+                _holding("key-n", "ETH", 7000.0, "2026-10-09", "2026-10-09T04:00:00+00:00"),
+            ],
+            "allocator_equity_derived": [],
+        }
+    )
+    ctx = _ctx(monkeypatch, db)
+
+    assert ctx["portfolio_aum"] == pytest.approx(72000.0)
+    assert sorted(s["strategy_id"] for s in ctx["portfolio_strategies"]) == [
+        "holding:binance:BTC:spot",
+        "holding:binance:ETH:spot",
+    ]
+
+
+def test_the_scorers_key_select_reads_venue_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CR-01 step 3: the select itself, so a refactor that moves the grouping cannot hide
+    a dropped column behind a fake that returns every column."""
+    db = _ProjectingDb(
+        {
+            "api_keys": [_server_key("key-a", "srv-a")],
+            "allocator_holdings": [
+                _holding("key-a", "BTC", 40000.0, "2026-10-11", "2026-10-11T04:00:00+00:00"),
+            ],
+            "allocator_equity_derived": [],
+        }
+    )
+    selected: list[str] = []
+    original = _ProjectingQuery.select
+
+    def _record(self: _ProjectingQuery, *a: Any, **k: Any) -> _ProjectingQuery:
+        if self._name == "api_keys" and a:
+            selected.append(str(a[0]))
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(_ProjectingQuery, "select", _record)
+    _ctx(monkeypatch, db)
+
+    assert selected and all("venue_server" in cols for cols in selected), selected

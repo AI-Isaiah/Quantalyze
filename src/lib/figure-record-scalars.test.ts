@@ -129,3 +129,42 @@ describe("recordFromScalars: coercion matches readRecordSpan", () => {
     expect(r.observations).toBeNull();
   });
 });
+
+// Phase 252 plan 03: the carrier. WHY: the reason is not one of the four aliases (that list is the
+// boundary the admin and wizard callers share), so a caller puts the reason it read from its own
+// EFFECTIVE flags generation on the row, and only the exact options-book reason marks the record.
+describe("252 recordFromScalars: the options-book marker", () => {
+  const long = row(400, 400);
+
+  it("marks the record for the exact reason, and the gate withholds a record that would clear", () => {
+    expect(gateAnnualized(recordFromScalars(long, "crypto"))).toBe("full");
+    const r = recordFromScalars({ ...long, mtm_gated_reason: "unsmoothed_options_book" }, "crypto");
+    expect(r.withheldBy).toBe("options_cash_wallet");
+    expect(gateAnnualized(r)).toBe("withheld");
+  });
+
+  it.each([
+    ["another reason", "mtm_basis_unavailable_for_venue"],
+    ["a case variant", "Unsmoothed_Options_Book"],
+    ["a padded string", " unsmoothed_options_book"],
+    ["a boolean", true],
+    ["an array", ["unsmoothed_options_book"]],
+    ["null", null],
+    ["undefined", undefined],
+  ])("carries no marker for %s", (_name, reason) => {
+    const r = recordFromScalars({ ...long, mtm_gated_reason: reason }, "crypto");
+    expect("withheldBy" in r).toBe(false);
+    expect(gateAnnualized(r)).toBe("full");
+  });
+
+  it("carries no marker when the key is absent, and for a null row", () => {
+    expect("withheldBy" in recordFromScalars(long, "crypto")).toBe(false);
+    expect("withheldBy" in recordFromScalars(null, "crypto")).toBe(false);
+  });
+
+  it("RECORD_SCALAR_ALIASES is still the four-alias string byte for byte", () => {
+    expect(RECORD_SCALAR_ALIASES).toBe(
+      "series_start:returns_series->0->>date, series_end:returns_series->-1->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations",
+    );
+  });
+});

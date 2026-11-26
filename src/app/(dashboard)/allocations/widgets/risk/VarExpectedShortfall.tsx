@@ -9,6 +9,7 @@ import { riskWidgetDataSchema, type RiskWidgetData } from "../lib/widget-data";
 import { formatPercent } from "@/lib/utils";
 import { Term } from "@/components/ui/Term";
 import { signTone } from "@/lib/factsheet/display-sign";
+import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
 
 // ---------------------------------------------------------------------------
 // VaR & Expected Shortfall Widget
@@ -37,7 +38,7 @@ const ZONE_COLORS = {
  * 2 dp) rounds below zero. A positive or rounded-zero figure takes the neutral primary text colour
  * (DESIGN.md `--color-text-primary`), not green: a positive VaR is not a gain to celebrate.
  */
-function figureColor(v: number): string {
+function figureColor(v: number | null): string {
   return signTone(v, 2, 100) === "negative" ? ZONE_COLORS.red : "var(--color-text-primary)";
 }
 
@@ -48,17 +49,21 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
     const allReturns = composite.map((d) => d.value);
 
     if (allReturns.length < 10) {
-      return { var95: 0, var99: 0, es95: 0, zone: "green" as const };
+      return { var95: 0, var99: 0, es95: null, zone: "green" as const };
     }
 
     const v95 = computeVaR(allReturns, 0.95);
     const v99 = computeVaR(allReturns, 0.99);
-    const e95 = computeExpectedShortfall(allReturns, 0.95);
+    // Phase 236 FIG-03 (F-6, CONTEXT Q2 "Total record only"): `allReturns` is the book's TOTAL
+    // return record, so its CVaR is the dash below CVAR_MIN_OBS observations. VaR is not floored
+    // (F-6 names CVaR only), and the n<10 insufficient state above is unchanged.
+    const e95 = allReturns.length >= CVAR_MIN_OBS ? computeExpectedShortfall(allReturns, 0.95) : null;
 
     return { var95: v95, var99: v99, es95: e95, zone: riskZone(v95) };
   }, [data]);
 
-  if (var95 === 0 && var99 === 0 && es95 === 0) {
+  // A null ES95 alone is the CVaR floor, not missing data: only an all-zero reading is insufficient.
+  if (var95 === 0 && var99 === 0 && (es95 === null || es95 === 0)) {
     return (
       <div
         className="flex h-full items-center justify-center text-sm"
@@ -117,6 +122,16 @@ function VarExpectedShortfallInner({ data }: { data: RiskWidgetData } & BaseWidg
           >
             <Term k="cvar_95">CVaR 95%</Term>
           </div>
+          {/* SFH #8: a null ES95 here is the CVaR floor alone (the n<10 state returned above), so name it. */}
+          {es95 === null && (
+            <div
+              className="mt-0.5 font-sans text-fixed-10 italic"
+              style={{ color: "#64748B" }}
+              data-testid="cvar-floor-note"
+            >
+              Needs {CVAR_MIN_OBS} observations
+            </div>
+          )}
         </div>
       </div>
 

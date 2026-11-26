@@ -208,7 +208,7 @@ describe("FactsheetBody — Phase 90 FS-03 basis toggle (RED until 90-05)", () =
     const bMtm = within(b.container).getByText("Mark-to-market");
     expect(bMtm.getAttribute("aria-disabled")).toBe("true");
     expect(bMtm.getAttribute("title")).toBe(
-      "Mark-to-market unavailable: composites that include options positions report cash settlement only.",
+      "Mark-to-market unavailable: this strategy's open option positions are not valued at market prices, so its headline figures measured on the cash wallet are withheld.",
     );
 
     // (d) gated with no reason: the basis-agnostic default fallback copy (Phase 102

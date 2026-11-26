@@ -935,6 +935,30 @@ describe("PATCH /api/keys/[id]/rotate-secret — 164.6.5 R2-SFH-10: our-defect v
   });
 
   /**
+   * Phase 225 (SIGNINREFUSED) — `rotate_key_secret` runs the same probe, which answers the
+   * flat 424 `MT5_SIGN_IN_REFUSED` for a login-stage -6 (the broker answered and refused).
+   * Not captured (a refused credential is not our defect) and nothing is mutated.
+   */
+  it("[225] a login-stage MT5 -6 answers KEY_MT5_SIGN_IN_REFUSED/424, not UNKNOWN, and is NOT captured", async () => {
+    mockResilientFetch.mockResolvedValue(
+      seamResponse(false, 424, {
+        detail:
+          "Your broker answered and refused this sign-in. Check the account number, the investor password and the server name.",
+        code: "MT5_SIGN_IN_REFUSED",
+        recoverable: false,
+      }),
+    );
+    const res = await PATCH(makeReq({ new_secret: SYNTHETIC_NEW_SECRET }), makeCtx());
+    expect(res.status).toBe(424);
+    const envelope = (await res.json()) as Record<string, unknown>;
+    expect(envelope.code).toBe("KEY_MT5_SIGN_IN_REFUSED");
+    expect(envelope.code).not.toBe("UNKNOWN");
+    expect(ADMIN_STATE.updates).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(vi.mocked(captureToSentry)).not.toHaveBeenCalled();
+  });
+
+  /**
    * Phase 218 (SELFHEAL) — the BUSY twin's sibling. `rotate_key_secret` runs the same
    * `_validate_mt5_key_probe`, whose owed gate answers the flat 424 `MT5_TERMINAL_NOT_READY`
    * after an unhealed inline scrub. The Python scrub pages per cause, so no Next-side capture.

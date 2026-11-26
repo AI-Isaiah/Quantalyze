@@ -6,7 +6,9 @@ the unified backbone (``services.metrics.compute_all_metrics``) cannot reproduce
 absorbed into the backbone and deleted in Phase 114 (E1); the scenario/allocator
 Sharpe and TWR now derive from that one backbone.
 
-Uses 252 trading days for annualisation (matching services/metrics.py).
+The money-weighted rate annualises on the calendar clock: whole days over the 365-day
+year ``CALENDAR_DAYS_PER_YEAR`` (Phase 236 CONTEXT A5 and F-5), like the stored CAGR in
+services/metrics.py.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import brentq, newton
 
+from services.figure_conventions import CALENDAR_DAYS_PER_YEAR
 from services.metrics import _safe_float
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_metrics")
@@ -82,7 +85,9 @@ def compute_mwr(
     end_date: optional explicit end date for the final_value cash flow.
               Defaults to the latest date found in cash_flows.
 
-    Returns the annualised IRR as a decimal, or None if it cannot be solved.
+    Returns the annualised IRR as a decimal, or None if it cannot be solved. The year is
+    ``CALENDAR_DAYS_PER_YEAR`` (365; Phase 236 CONTEXT A5 and F-5): a deposit of 100 and a
+    withdrawal of 110 exactly 365 days later solve to a rate of exactly 0.10.
     """
     if not cash_flows:
         return None
@@ -110,7 +115,7 @@ def compute_mwr(
 
     t0 = parsed[0][0]
     # Convert dates to year fractions from t0.
-    t_years = np.array([(d - t0).days / 365.25 for d, _ in parsed])
+    t_years = np.array([(d - t0).days / CALENDAR_DAYS_PER_YEAR for d, _ in parsed])
     amounts = np.array([a for _, a in parsed])
 
     def npv(rate: float) -> float:

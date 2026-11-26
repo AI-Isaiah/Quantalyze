@@ -23,6 +23,7 @@ no HTTPX, no real workload. Exchanges and DB are the outer boundary.
 """
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt
@@ -3052,13 +3053,17 @@ class TestDeriveBrokerDailies:
         assert captured["csv_rows"], "expected a reconstructed daily-return series"
 
     @pytest.mark.asyncio
-    async def test_sync_trades_enqueue_failure_does_not_fail_job(
+    async def test_sync_trades_enqueue_failure_with_nothing_published_fails_transient(
         self,
     ) -> None:
-        """The enqueue is best-effort. If it raises (e.g., RPC unavailable),
-        run_sync_trades_job MUST still return DONE so the job doesn't
-        retry-loop on a transient infra issue. The cron-driven daily sync
-        will re-enqueue cleanly on the next tick."""
+        """Phase 222 ERRC-03 (founder rulings OQ2 and OQ4, 2026-11-25): when the
+        follow-on enqueue raises and the strategy has NOTHING published,
+        run_sync_trades_job returns FAILED / ``transient``. Returning DONE let the
+        status bridge take branch (c) and read ``complete`` with no analytics
+        (ROADMAP SC-3). Transient because an enqueue fault is not a property of
+        the strategy: the retry re-runs the sync, the row reads ``computing``
+        between attempts and ``failed`` at the last. The message is a constant
+        operator sentence; it carries no exception text."""
         from services.job_worker import run_sync_trades_job
 
         mock_exchange = AsyncMock()
@@ -3092,6 +3097,10 @@ class TestDeriveBrokerDailies:
         mock_eq.execute.return_value = MagicMock(data=[])
         mock_update.eq.return_value = mock_eq
         mock_ctx.supabase.table.return_value.update.return_value = mock_update
+        # The publish read: no strategy_analytics row -> nothing published. Scripted
+        # explicitly because a bare MagicMock chain returns a truthy MagicMock.
+        mock_ctx.supabase.table.return_value.select.return_value.eq.return_value \
+            .maybe_single.return_value.execute.return_value = MagicMock(data=None)
 
         job = {
             "id": "job-degraded",
@@ -3116,15 +3125,21 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_sync_trades_job(job)
 
-        # Job must succeed — enqueue is best-effort.
-        assert result.outcome == DispatchOutcome.DONE
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert result.error_message, "FAILED must carry an operator-readable cause"
+        assert "simulated transient enqueue failure" not in result.error_message, (
+            "T-222-11: the exception text must not reach compute_jobs.last_error"
+        )
+        assert result.trade_count is None
 
     @pytest.mark.asyncio
-    async def test_enqueue_failure_marks_strategy_analytics_failed(
+    async def test_enqueue_failure_with_nothing_published_writes_the_five_key_failed_row(
         self,
     ) -> None:
-        """Wizard-hang regression: when the enqueue_compute_job RPC fails,
-        run_sync_trades_job MUST upsert strategy_analytics with
+        """Wizard-hang regression: when the enqueue_compute_job RPC fails and
+        NOTHING is published (Phase 222 ERRC-03: the handler now returns FAILED /
+        transient rather than DONE), run_sync_trades_job MUST upsert strategy_analytics with
         computation_status='failed' + a clear computation_error so the
         wizard's poll loop (SyncPreviewStep.tsx) surfaces a
         GATE_ANALYTICS_FAILED envelope instead of hanging at 'computing'
@@ -3176,6 +3191,9 @@ class TestDeriveBrokerDailies:
                 return stub
 
             mock_t.upsert.side_effect = _upsert
+            # The publish read: no row -> nothing published.
+            mock_t.select.return_value.eq.return_value.maybe_single.return_value \
+                .execute.return_value = MagicMock(data=None)
 
             # Keep the existing update().eq().execute() chain for the
             # api_keys cursor advance — same as the other tests.
@@ -3184,6 +3202,15 @@ class TestDeriveBrokerDailies:
             mock_eq.execute.return_value = MagicMock(data=[])
             mock_update.eq.return_value = mock_eq
             mock_t.update.return_value = mock_update
+
+            # 222-REVIEW SFH-01: the strategy_analytics failed write is a conditional
+            # UPDATE, so it is recorded here beside the upserts.
+            def _update(payload: dict, **kwargs):
+                if name == "strategy_analytics":
+                    upsert_calls.append((name, dict(payload), dict(kwargs)))
+                return mock_update
+
+            mock_t.update.side_effect = _update
 
             return mock_t
 
@@ -3212,10 +3239,11 @@ class TestDeriveBrokerDailies:
         ):
             result = await run_sync_trades_job(job)
 
-        # Job must still succeed — best-effort for the job, not for the UI.
-        assert result.outcome == DispatchOutcome.DONE
+        # Nothing published -> FAILED / transient (CONTEXT ERRC-03, OQ2).
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
 
-        # Find the upsert into strategy_analytics with the failed status.
+        # Find the write into strategy_analytics with the failed status.
         failed_upserts = [
             payload
             for (table_name, payload, _kwargs) in upsert_calls
@@ -3241,14 +3269,232 @@ class TestDeriveBrokerDailies:
             "computation_error must be a non-empty string so the wizard "
             "renders a meaningful GATE_ANALYTICS_FAILED envelope"
         )
-        # The on_conflict kwarg must be present so this is an upsert,
-        # not an insert that crashes on PK conflict for re-runs.
-        on_conflict = next(
-            kwargs.get("on_conflict")
-            for (table_name, _payload, kwargs) in upsert_calls
-            if table_name == "strategy_analytics"
+        # Exactly the five keys, and NO provenance marker: the payload stays
+        # deliberately unstamped (founder ruling 2026-11-25, Phase 222), so the
+        # bridge's branch (b) stores the curated kind sentence over it.
+        assert set(payload) == {
+            "strategy_id",
+            "computation_status",
+            "computation_warned",
+            "computing_started_at",
+            "computation_error",
+        }, f"the enqueue-failure payload must keep its five keys; got {sorted(payload)}"
+        assert payload["computation_error"] == (
+            "Analytics enqueue failed during sync. "
+            "The next scheduled sync will retry \u2014 "
+            "use the contact form if this persists."
         )
-        assert on_conflict == "strategy_id"
+        # (The write is a conditional UPDATE since 222-REVIEW SFH-01, so there is no
+        # on_conflict kwarg to pin; its filters are pinned by
+        # test_failed_write_is_conditional_on_nothing_published below.)
+
+
+class TestSyncTradesEnqueueFailurePublishState:
+    """Phase 222 ERRC-03 (founder rulings OQ2 and OQ4, 2026-11-25): what the
+    enqueue-failure tail does depends on whether the strategy has numbers
+    published. The publish read is scripted per case because a bare MagicMock
+    chain answers with a truthy MagicMock."""
+
+    @staticmethod
+    async def _run(
+        read: Any,
+        caplog: pytest.LogCaptureFixture,
+        writes: list[Any] | None = None,
+    ) -> tuple[Any, list[dict]]:
+        """Run run_sync_trades_job with a failing enqueue and the publish read
+        scripted: ``read`` is a response ``data`` value, or an Exception to raise.
+        ``writes``, when given, collects every strategy_analytics table mock so a case
+        can read the conditional-write chain off ``mock_calls``.
+        Returns (DispatchResult, strategy_analytics write payloads: the failed
+        UPDATE's, plus any upsert's)."""
+        from services.job_worker import run_sync_trades_job
+
+        mock_ctx = MagicMock()
+        mock_ctx.exchange = AsyncMock()
+        mock_ctx.supabase = MagicMock()
+        mock_ctx.strategy_row = {"id": "strat-pub", "user_id": "user-1"}
+        mock_ctx.key_row = {
+            "id": "key-1", "exchange": "okx",
+            "last_sync_at": None, "user_id": "user-1",
+        }
+
+        def _rpc(name: str, payload: dict) -> MagicMock:
+            if name == "enqueue_compute_job":
+                raise RuntimeError("simulated enqueue infra failure")
+            stub = MagicMock()
+            stub.execute.return_value = MagicMock(data=5)
+            return stub
+
+        mock_ctx.supabase.rpc.side_effect = _rpc
+        upserts: list[dict] = []
+
+        def _table(name: str) -> MagicMock:
+            mock_t = MagicMock()
+
+            def _upsert(payload: dict, **kwargs: Any) -> MagicMock:
+                if name == "strategy_analytics":
+                    upserts.append(dict(payload))
+                stub = MagicMock()
+                stub.execute.return_value = MagicMock(data=[])
+                return stub
+
+            def _update(payload: dict, **kwargs: Any) -> MagicMock:
+                # 222-REVIEW SFH-01: the failed write is a conditional UPDATE. Return
+                # the tracked child so the filter chain lands in mock_t.mock_calls.
+                if name == "strategy_analytics":
+                    upserts.append(dict(payload))
+                return mock_t.update.return_value  # type: ignore[no-any-return]
+
+            mock_t.upsert.side_effect = _upsert
+            mock_t.update.side_effect = _update
+            if writes is not None and name == "strategy_analytics":
+                writes.append(mock_t)
+            execute = mock_t.select.return_value.eq.return_value.maybe_single.return_value.execute
+            if isinstance(read, Exception):
+                execute.side_effect = read
+            else:
+                execute.return_value = MagicMock(data=read)
+            return mock_t
+
+        mock_ctx.supabase.table.side_effect = _table
+        job = {"id": "job-pub", "kind": "sync_trades", "strategy_id": "strat-pub"}
+        with patch(
+            "services.job_worker._exchange_preflight",
+            new=AsyncMock(return_value=mock_ctx),
+        ), patch(
+            "services.job_worker.fetch_all_trades",
+            new=AsyncMock(return_value=[{"test": "trade"}]),
+        ), patch(
+            "services.job_worker.fetch_usdt_balance",
+            new=AsyncMock(return_value=10000.0),
+        ), patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ), patch(
+            "services.job_worker._RAW_TRADE_INGESTION_ENABLED", False,
+        ), caplog.at_level("ERROR", logger="quantalyze.analytics.job_worker"):
+            result = await run_sync_trades_job(job)
+        return result, upserts
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "published_row",
+        [
+            {"computation_status": "complete_with_warnings", "metrics_json": {"sharpe": 1.0}},
+            {"computation_status": "complete", "metrics_json": {"sharpe": 1.0}},
+            {"computation_status": "computing", "metrics_json": {"sharpe": 1.0}},
+        ],
+        ids=["complete_with_warnings", "complete", "computing_with_figures"],
+    )
+    async def test_published_strategy_is_left_alone_and_returns_done(
+        self, published_row: dict, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """OQ4: for a published strategy the failed write that clears
+        computation_warned is skipped, and the job is DONE (the next cron tick
+        retries the enqueue)."""
+        result, upserts = await self._run(published_row, caplog)
+        assert result.outcome == DispatchOutcome.DONE
+        assert upserts == [], (
+            "a published strategy must get NO strategy_analytics write from the "
+            f"enqueue-failure tail; got {upserts}"
+        )
+        assert any(
+            r.levelname == "ERROR" and "strat-pub" in r.getMessage()
+            for r in caplog.records
+        ), "the skipped write must still be logged at ERROR, naming the strategy"
+
+    @pytest.mark.asyncio
+    async def test_computing_without_figures_is_not_published(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A 'computing' row with NULL metrics_json is the wizard's first sync, not a
+        published strategy: it takes the nothing-published path (FAILED / transient
+        plus the five-key upsert)."""
+        result, upserts = await self._run(
+            {"computation_status": "computing", "metrics_json": None}, caplog
+        )
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert len(upserts) == 1 and upserts[0]["computation_status"] == "failed"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "row",
+        [
+            {"computation_status": "failed", "metrics_json": {"sharpe": 1.0}},
+            {"computation_status": "pending", "metrics_json": {"sharpe": 1.0}},
+        ],
+        ids=["failed_with_old_figures", "pending_with_figures"],
+    )
+    async def test_a_non_success_row_with_old_figures_is_not_published(
+        self, row: dict, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """OQ4 / 222-REVIEW WR-01: published is a success status, or 'computing' WITH
+        metrics_json. A 'failed' row (a published strategy whose later recompute
+        failed: the bridge's branch (b) leaves the old metrics_json in place) and a
+        'pending' row are NOT published even though they carry figures. A predicate
+        collapsed to 'has metrics_json' would return DONE here, and the bridge's
+        branch (c) would then resurrect the row to 'complete'."""
+        result, upserts = await self._run(row, caplog)
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert len(upserts) == 1 and upserts[0]["computation_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_failed_write_is_conditional_on_nothing_published(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """222-REVIEW SFH-01: the publish read and the failed write are separate round
+        trips, so the write itself must refuse a row published in between. It is a
+        single UPDATE that skips the success statuses and a 'computing' row with
+        metrics_json; it is never an unconditional upsert (which would overwrite a
+        row published after the read). The behaviour against a real row is pinned
+        live in test_sync_trades_enqueue_failure_bridge_live.py."""
+        writes: list[Any] = []
+        result, payloads = await self._run(None, caplog, writes)
+        assert result.outcome == DispatchOutcome.FAILED
+        # One table mock per `.table("strategy_analytics")` call: the read and the
+        # write. Drop the read's select chain, and the `.data` truthiness probe the
+        # handler runs on the UPDATE's result (R2-WR-01: it is the mock's bookkeeping
+        # of `bool(res.data)`, not part of the query chain).
+        calls = [
+            c for table in writes for c in table.mock_calls
+            if not c[0].startswith("select") and ".data" not in c[0]
+        ]
+        by_name = {c[0]: c for c in calls}
+        assert [c[0] for c in calls] == [
+            "update",
+            "update().eq",
+            "update().eq().not_.in_",
+            "update().eq().not_.in_().or_",
+            "update().eq().not_.in_().or_().execute",
+        ], [c[0] for c in calls]
+        assert by_name["update().eq"][1] == ("strategy_id", "strat-pub")
+        assert by_name["update().eq().not_.in_"][1] == (
+            "computation_status", ["complete", "complete_with_warnings"],
+        )
+        assert by_name["update().eq().not_.in_().or_"][1] == (
+            "computation_status.neq.computing,metrics_json.is.null",
+        )
+        assert len(payloads) == 1 and payloads[0]["computation_status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_unreadable_publish_state_writes_nothing_and_returns_done(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """FAILED is only for a strategy with nothing published, and an unreadable
+        state is not that: a read hiccup must never unpublish a live strategy. The
+        handler writes nothing, returns DONE and logs at ERROR naming the strategy.
+        Known limit (T-222-13): enqueue AND read both failing on a never-published
+        strategy leaves today's outcome."""
+        result, upserts = await self._run(RuntimeError("simulated read failure"), caplog)
+        assert result.outcome == DispatchOutcome.DONE
+        assert upserts == []
+        assert any(
+            r.levelname == "ERROR" and "strat-pub" in r.getMessage()
+            and "publish" in r.getMessage().lower()
+            for r in caplog.records
+        ), "the unreadable-state exit must log at ERROR, naming the strategy"
 
 
 # ---------------------------------------------------------------------------

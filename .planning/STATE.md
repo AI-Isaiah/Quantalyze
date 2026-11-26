@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.22
 milestone_name: TRUTH — data you can trust
-current_phase: 225
-current_phase_name: ONEACCOUNTONCE
+current_phase: 222
+current_phase_name: ALERTTRUTH
 status: executing
-stopped_at: "Phase 225 gap plans 13-19 planned for CR-01; plan 10 (migration B, PR-3) held"
-last_updated: "2026-11-25T08:29:29.206Z"
-last_activity: 2026-11-25
-last_activity_desc: Phase 225 gap-closure plans 13-19 planned (CR-01)
-state_head: acb5e158986806e733453296dc6bced2efaed3b1
+stopped_at: Phase 222 closed; 252 and 236 records landed (human verification pending); follow-up phase for [250-BINANCE-STOP-BELOW-CURSOR] booked
+last_updated: "2026-11-25T23:20:00.261Z"
+last_activity: 2026-11-26
+last_activity_desc: "Phase 222 ALERTTRUTH complete (shipped #1352); 252 DERIBITOPTIONS shipped #1351, human verification pending; BINANCECURSOR follow-up booked"
+state_head: 7b31cdc4bf7f3d4923b4c8de26ddab026e58f062
 progress:
-  total_phases: 21
-  completed_phases: 2
-  total_plans: 74
-  completed_plans: 59
-  percent: 10
+  total_phases: 23
+  completed_phases: 11
+  total_plans: 91
+  completed_plans: 83
+  percent: 48
 ---
 
 ## ⭐ STATE lineage
@@ -32,7 +32,7 @@ STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 20
 
 See: .planning/PROJECT.md (updated 2026-11-23)
 
-**Current focus:** Phase 225 — ONEACCOUNTONCE
+**Current focus:** v1.22 TRUTH — data you can trust; roadmap created 2026-11-23 (21 phases, 81/81 requirements mapped); next: plan Phase 226 MT5SOAK (wave 0)
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
@@ -145,6 +145,8 @@ silently absorbed by a later phase.
 | Phase | Status | Blocked on | Resume with |
 |-------|--------|-----------|-------------|
 | ~~160~~ | 🟡 **PARTIAL 2026-08-25 21:38Z — arm PROVEN, 1 of 3 surfaces smoked** | **PROD persist smoke (Part A) PASSED.** Founder connected a real OKX read-only key through `ApiKeyManager` at `/strategies/<id>/edit` on production. BOTH confirmations hold: `api_keys` census 32 → 33 with the new row's `attested_venue` EQUAL to its `exchange` (`okx`/`okx` — the 160-02/RANK-03 invariant), and prod request logs show `/api/keys/validate-and-encrypt`, so the write went through the persist arm and not the Phase-156 RPC path. ⚠️ The gate was not merely untested — the arm was DEAD: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`, so every guarded analytics route refused and key-connect was impossible in production (TODOS 0.05, resolved; detection gap 0.04 → Phase 164.1). Evidence in `160-UAT.md`. ⚠️ NOT 32/32: the prescribed test names THREE converted surfaces; only `ApiKeyManager` was smoked. `StrategyForm` is un-smoked (own fetch at `StrategyForm.tsx:161`) and `AllocatorExchangeManager` is un-smoked. ⚠️ CORRECTED 2026-08-26: an earlier note here said it is UNREACHABLE and that no page mounts it. That is FALSE — `profile/page.tsx` populates `exchanges` for allocators, `ProfileTabs` renders `ExchangesTabContent`, and that renders `AllocatorExchangeManager`. The whole branch is `isAllocator`-gated and the 160 QA ran on a MANAGER account, which is almost certainly why it looked unmounted. It is a live surface and 160 can be closed by smoking it with an ALLOCATOR login — it does NOT need mounting, and the component must NOT be deleted. The shared arm is proven, which retires the large risk; per-surface payload risk remains unmeasured. NO LONGER SKIPPED on autonomous re-entry. | `/gsd-verify-work 160` for the remaining surfaces |
+| 252 | 🟡 **SHIPPED v0.133.80.0 (#1351), verification `human_needed`** — code verified 6/6 for the scope of this run (wave 1 named withhold, wave 2 read-only probe tooling); none of the open items is a gap | Four human items from `252-VERIFICATION.md`: (1) on the deployed build, the Quantum Drift owner factsheet, share card and OG image show the withheld headline with its named reason, never the cash-wallet cumulative, CAGR or Calmar (PROD); (2) the founder's copy and tone check on the factsheet, share card, Compare, Discovery, Holdings and the Compare overlay note (a draft owned by this check), plus whether the Monthly Returns heatmap (IN-06) needs a follow-up; (3) the founder-gated run of the wave-2 probe `scripts.deribit_options_smoothed_probe` in the worker against the evidence composite, whose pass is the only input to a later MTM promotion plan; (4) the ship-time PROD census re-take (marker first) pasted into the CHANGELOG. For (4), a PROD reading taken by the orchestrator on 2026-11-25 is recorded in `252-05-SUMMARY.md` (commit `ee599e6c3`, the commit the verifier ran at, which still listed this item open) and quoted in the v0.133.80.0 CHANGELOG entry; whether that counts as the ship-time re-take is left to the coordinator. | `/gsd-verify-work 252` |
+| 236 | 🟡 **SHIPPED v0.133.82.0 (#1354), verification `human_needed`** — 6/7 must-haves verified in code (conventions, pins, censuses, parity oracle, CVaR floor, span rule, quantstats 0.0.86 decision record, runbook, figures-moved list); no code gap | FIG-05 / SC-4: the coordinator's PROD fleet re-derive from `docs/runbooks/figuremath-fleet-rederive.md`, run after 233 DERIBITTRUTH merges and 236 is deployed (the runbook's precondition is 229, 233 and 234 merged), recorded with its section 5 closing read and a clean section 6 number-to-null report, and the 155.2 freeze side confirmed in writing. The second human item, the ship CHANGELOG naming the moved figures, is met by the v0.133.82.0 entry. | `/gsd-verify-work 236` |
 
 Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
 after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
@@ -176,17 +178,17 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 225 (ONEACCOUNTONCE) — EXECUTING
-Plan: 10 of 19
-Status: Executing Phase 225
-Last activity: 2026-11-25 — Phase 225 gap-closure plans 13-19 planned (CR-01)
-Progress: [█░░░░░░░░░] 10%
+Phase: 222 (ALERTTRUTH) — COMPLETE (shipped v0.133.81.0, #1352; migration 20261125212222 applied to TEST and PROD); v1.22 phases run in parallel
+Plan: 4 of 4
+Status: Phase complete; 252 (DERIBITOPTIONS, shipped v0.133.80.0, #1351) and 236 (FIGUREMATH, shipped v0.133.82.0, #1354) records landed in the same records PR, both with human verification pending (see Deferred Verification)
+Last activity: 2026-11-26 — Phase 222 closed; 252 records landed; the follow-up phase for [250-BINANCE-STOP-BELOW-CURSOR] booked by founder ruling 2026-11-26
+Progress: [█████░░░░░] 48%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
 ## Current Focus
 
-**Next: Phase 226 MT5SOAK, wave 0 (`/gsd-autonomous --only 226`), with the read-only Deribit diagnosis beside it as a `/gsd-debug` session.** v1.22 TRUTH — data you can trust was roadmapped on 2026-11-23: 21 phases, 81/81 requirements mapped. Goal: every number, label and alert we show is correct, or it fails loudly. Order (founder F-1): data integrity first, 227 JOBLEDGER → 225 ONEACCOUNTONCE → 228 KEYANSWERS → 229 MT5DERIVE2 → 230 MT5NIGHTLY → 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH → 236 FIGUREMATH. User-facing next: 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH. 241 DEMOCREDS is the founder's security exception. 155.2 and 157 run outside the order. Number-moving phases (225, 229, 234, 236, and 230 or 233 if their fix moves MT5 numbers) merge before 155.2 plan 12's recapture or after plan 14, never in between. No composite work (F-2). The order, seam owners and milestone-wide rules are in ROADMAP's v1.22 section. By founder ruling F-10 ("Yes, split into two milestones") the security, alerting and tooling work, Phases 221 and 224 included, is a later milestone and not tracked here.
+**Next: Phase 226 MT5SOAK, wave 0 (`/gsd-autonomous --only 226`), with the read-only Deribit diagnosis beside it as a `/gsd-debug` session.** v1.22 TRUTH — data you can trust was roadmapped on 2026-11-23: 21 phases, 81/81 requirements mapped. Goal: every number, label and alert we show is correct, or it fails loudly. Order (founder F-1): data integrity first, 227 JOBLEDGER → 225 ONEACCOUNTONCE → 228 KEYANSWERS → 229 MT5DERIVE2 → 230 MT5NIGHTLY → 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH → 236 FIGUREMATH. User-facing next: 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH. 241 DEMOCREDS is the founder's security exception. 155.2 and 157 run outside the order. Number-moving phases (225, 229, 234, 236, and 230 or 233 if their fix moves MT5 numbers) merge before 155.2 plan 12's recapture or after plan 14, never in between. No composite work (F-2). The order, seam owners and milestone-wide rules are in ROADMAP's v1.22 section. By founder ruling F-10 ("Yes, split into two milestones") the security, alerting and tooling work, Phases 221 and 224 included, is a later milestone and not tracked here. ⭐ 2026-11-25: 155.2 and 157 moved to v1.23 HARDEN as well (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The freeze rule above still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
 
 v1.18 MT5-VERIFY & founder confirmations closed 2026-11-23 (audit `passed`, 5/5 requirements, 16/16 phases); archive in `.planning/milestones/v1.18-*`. v1.22 holds the carried Phases 155.2, 157, 222, 223 and 225 (moved by founder rulings 2026-11-23; 221 and 224 moved on by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04 with D-A..D-E; their text is in `milestones/v1.18-REQUIREMENTS.md` under "Carried to the next milestone". ⛔ MT5 stays unadvertised until 155.2 passes. v1.21 closed 2026-11-13; archive in `.planning/milestones/v1.21-*`. The v1.17 sequencing below is lineage.
 
@@ -732,6 +734,11 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 155.2 LIVEPARITY's remaining work moved out of v1.18 into the next milestone (2026-11-23, hand-edit, founder "Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."): the broker statements, plans 11-14, the Gate B run, verification and phase complete move; its 13 shipped plans stay recorded as shipped. v1.18 keeps 155, 155.1 and 207-220, all complete
 - Phase 201.1 inserted after Phase 201: POLISHRESIDUALS — the residual UI defects found in the 200/201 UAT are fixed (founder 2026-11-12, "One polish phase now") (URGENT)
 - Phase 214 edited: edited fields: goal, success_criteria (D11-9 residual added by founder decision 2026-11-14)
+- Phase 250 added (2026-11-24, /gsd-phase add, founder ruling 2026-11-24, "R2-02: book a follow-up phase with /gsd-phase (plain add) for a windowed Binance fills read. It must land before USE_RAW_TRADE_INGESTION is turned on for Binance. Fold R2-01 and the BINANCE_PAGE_CAP no-flag item into the same phase's scope."): BINANCEFILLS, a Binance fills read walks every window and never stalls its cursor. Placed in v1.22 by hand: the handler appended it below the v1.22 Progress table with `Depends on: Phase 249` (a v1.23 phase); both were corrected. Number 250 because 242-249 are taken by v1.23.
+- Phase 251 added (2026-11-25, /gsd-phase add, founder ruling 2026-11-25): SYNCSTORE, the four 232 OKXTRADES leftovers in run_sync_trades_job; depends on 222
+- Phase 252 added (2026-11-25, /gsd-phase add, founder decision 2026-11-25, AskUserQuestion, "Book it in v1.22 (Recommended)"): DERIBITOPTIONS, a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. It books the fix the diagnosed debug session `deribit-implausible-returns` (mechanism B) named as its next action, now tracked so the phase can cite it. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a TBD stub; all three were corrected by hand. Number 252 because 251 (SYNCSTORE) was already booked in the 222 worktrees; 251 is carried onto main in the same records PR.
+- Phase 155.2 and Phase 157 moved out of v1.22 TRUTH into v1.23 HARDEN: 2026-11-25, hand-edit of ROADMAP.md because /gsd-phase --edit preserves a phase's milestone; founder ruling in chat, "We will Move 157 and 155.2 into the next milestone". Their sections, Progress rows and 10 requirements (MT5-07..10, MT5-15, MT5-GOAL-01, FCONF-01..04) move to v1.23; v1.22 holds 22 phases (10 complete) and 71 requirements, v1.23 12 phases and 45. The 155.2 freeze window still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
+- Phase 253 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "ship Phase 250 now ... The Binance switch stays off until that phase closes"): BINANCECURSOR, the [250-BINANCE-STOP-BELOW-CURSOR] re-read gap, its predicate and its short-lived signal; an RPC change, so a migration; depends on 250. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 252`, a placeholder goal and a TBD stub; all were corrected by hand, and `TODOS.md` `[250-BINANCE-STOP-BELOW-CURSOR]` now names Phase 253 as owner.
 
 ### Decisions
 
@@ -1835,7 +1842,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Phase 227 complete, shipped as #1325
+**Stopped At:** Phase 222 closed, 252 records landed (records PR)
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z

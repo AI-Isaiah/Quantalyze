@@ -506,6 +506,36 @@ describe("StrategyForm — 212-08 validate-and-encrypt renders from code", () =>
     ).toBeInTheDocument();
   });
 
+  // ⭐ Phase 225 (SIGNINREFUSED) — a login-stage MT5 -6 is the broker's own refusal. The
+  // 424 transients stay on the curated-cause path ((d) above), and this ONE named wire code
+  // is recognised: it renders its own copy, never the UNKNOWN shell whose copy is
+  // recoverable, and no Retry control. `SIGN_IN_FAILED` (the sibling, "did not complete")
+  // keeps the UNKNOWN shell with the curated cause, so the exception is not a status rule.
+  it("(k) a 424 MT5_SIGN_IN_REFUSED renders its own broker-refused copy, never UNKNOWN, and no Retry", async () => {
+    submitWith(
+      jsonResponse(424, {
+        error: "CURATED-DETAIL-THAT-IS-NOT-THE-COPY",
+        code: "MT5_SIGN_IN_REFUSED",
+      }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "KEY_MT5_SIGN_IN_REFUSED");
+    expect(screen.getByText("Your broker refused this sign-in.")).toBeInTheDocument();
+    expect(card.textContent).toContain("Your broker answered and refused the sign-in.");
+    expect(card.textContent).toContain("a wrong account number, a wrong investor password and a wrong server");
+    expect(screen.queryByText("Try the last action again.")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("(k) a 424 SIGN_IN_FAILED is still unrecognised here: UNKNOWN shell with the curated cause", async () => {
+    submitWith(
+      jsonResponse(424, { error: "CURATED-CAUSE-SENTENCE", code: "SIGN_IN_FAILED" }),
+    );
+    const card = await screen.findByTestId("error-envelope");
+    expect(card).toHaveAttribute("data-error-code", "UNKNOWN");
+    expect(screen.getByText(/CURATED-CAUSE-SENTENCE/)).toBeInTheDocument();
+  });
+
   // ⭐ 212 review WR-03 — the most common refusal on this form is a wrong key or
   // secret. It must render ITS entry (a remedy that can work: re-copy the
   // values), never the UNKNOWN shell's "Try the last action again.".
