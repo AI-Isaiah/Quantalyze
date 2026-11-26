@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.89.0] - 2026-11-26 — Phase 225 ONEACCOUNTONCE PR-2c: MT5 validation proves the broker server, not only the login
+
+This is a gap-closure PR for review finding CR-01 on PR-3 (migration B). It covers the founder's ruling of 2026-11-25 that a same-broker connect with the wrong server must be refused at validation. It has no migration and no UI change.
+
+### Changed
+- **The MT5 validation probe checks the session's broker server.** `services/mt5_probe.py` gains `assert_expected_server`. `run_probe` calls it after the pre-login check and at both post-login sites. Each site reads `account_info()` once and judges the login and the server on that one read. Both sides go through `normalise_mt5_server`, which trims and case-folds. A missing, blank or non-string reported server fails closed. A mismatch raises the new `Mt5ServerMismatchError` (`services/mt5_client.py`). It subclasses `Mt5AccountMismatchError`, so both callers, the validate-key router and the ingestion adapter, dispose of it through their existing arms. The user still gets the transient 424 answer, unchanged until the server-spelling measurement in plan 20 says otherwise. The error carries only the login number, never a server or a password.
+- **A server mismatch is told apart from a concurrency race (review WR-02).** On the wizard path it logs its own warning ("MT5 session not on the requested broker server"), with trace outcome `transient_server_mismatch`. Both paths use the new park cause `probe_server_mismatch` in the closed `_PARK_ALERT_CAUSES` set. So a user's wrong server neither hides nor is hidden by a real concurrent-validate page.
+- **One server predicate, shared with PR-2c0's log-only verdict.** PR-2c0 (v0.133.78.0) shipped `log_mt5_poll_server_verdict` in `services/mt5_read.py` with a copy of this PR's comparison. Both now call `mt5_session_server_verdict` in `services/mt5_probe.py`: True or False for a non-blank string server, None otherwise. `assert_expected_server` refuses anything but True. In `run_probe` the log-only verdict line is written first and the refusal runs right after it on the same snapshot, so a refused validation still leaves its one measurement line.
+
+### Tests
+- `test_mt5_validate.py`, `test_mt5_validate_parity.py`, `test_ingestion_mt5.py` and `test_mt5_client_contract.py` cover:
+  - a session on another server;
+  - each blank or missing server shape;
+  - a server change after the probe;
+  - case and whitespace spelling;
+  - the requested `server=` reaching `mt5.login`.
+- Each of those was seen RED against a neutered copy.
+- `test_mt5_validation_park.py` pins the distinct cause and log line, and pins the login-mismatch path as unchanged.
+- Three fake accounts gained a `server` field: `test_long_fetch.py`, `test_mt5_validation_park.py` and `test_validate_key_permanent_400.py`.
+- PR-2c0's `test_run_probe_writes_one_log_only_server_verdict_on_the_validation_terminal` now expects a False or not_captured session to raise `Mt5ServerMismatchError` after writing its single verdict line, with nothing past the PRE bracket run.
+- Both TypeScript connect-route tests pin that a refused validation stores nothing and that the stored server is the validated passphrase.
+
+### Notes
+- **Merge gate, unchanged by this rebase.** Plan 18's pre-merge measurement found 0 server verdicts in the analytics service's Railway logs. Plan 20 (PR-2c0) shipped the log-only verdict at the three MT5 poll reads and in `run_probe` as v0.133.78.0. PR-2c merges only once every captured verdict is True. A founder wrong-server connect attempt is also still owed.
+- Rebased onto PR-2c0 (v0.133.78.0) and PR-2b-2 (v0.133.79.0), on top of v0.133.87.0; it replaces the earlier draft entry numbered 0.133.78.0, a number `main` has since used.
+- **Held review findings:** the transient copy for a server that is permanently wrong, and tests that pin that copy. Both wait on the same measurement. LOW findings are recorded in the phase review only.
+
 ## [0.133.87.0] - 2026-11-26 — Phase 251 SYNCSTORE: run_sync_trades_job stores every run's daily P&L and records its refusal flags truthfully
 
 The queued trade sync (`run_sync_trades_job`) carried four leftovers that Phase 232 OKXTRADES routed out of its own scope, plus one review finding Phase 222 booked to this phase. A refused daily P&L read was stored anyway, the daily store waited behind the fills walk, refusal flags never reached `strategy_analytics.data_quality_flags` with raw ingestion off (the PROD default), and no run ever cleared them. All five are fixed in the one handler. No migration.
