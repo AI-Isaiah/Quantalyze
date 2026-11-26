@@ -79,6 +79,7 @@ from services.db import db_execute, db_read_with_retry_sync
 from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5ClientError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     Mt5Session,
 )
@@ -111,6 +112,7 @@ from services.mt5_concurrency import (
     mt5_terminal_lease,
 )
 from services.mt5_handover import SITE_HOLDINGS
+from services.mt5_probe import assert_expected_server
 from services.mt5_read import log_mt5_poll_server_verdict
 from services.positions import fetch_positions
 from services.sfox_client import (
@@ -977,14 +979,19 @@ async def _fetch_mt5_account_rows(
         )
         info = session.client.account_info()  # None → typed raise, never {}
         _assert_expected_login(info)
-        # 225-20 (PR-2c0) — LOG-ONLY server verdict, after the login bracket
-        # accepted the snapshot. It cannot raise and never changes the row built.
+        # 225-20 (PR-2c0) — the server verdict LINE, after the login bracket
+        # accepted the snapshot. The line itself cannot raise and never changes the row
+        # built. The server bracket after it (225-21, CONTEXT Q6 items 1 and 2, review
+        # WR-01 of PR-2c) refuses into the `except Mt5AccountMismatchError` arm below:
+        # no row, a terminal restart, the transient note. The line is already written,
+        # so the refused read is still attributed to its key.
         log_mt5_poll_server_verdict(
             info,
             requested_server=session.server,
             site=SITE_HOLDINGS,
             holder=api_key_id,
         )
+        assert_expected_server(info, login=session.login, server=session.server)
         return info
 
     # MT5CONC-02 / WEDGE-01: serialize the ENTIRE terminal-IPC region — the
@@ -1079,7 +1086,28 @@ async def _fetch_mt5_account_rows(
                 # nothing is returned, nothing is persisted, and the restart heals
                 # exactly the stale pipe that causes it. The mismatch detail (two
                 # int logins) reaches the log and the exception chain, never the
-                # user-visible copy.
+                # user-visible copy; the server subclass (225-21) carries a fixed
+                # message with no server value and no login instead.
+                if isinstance(exc, Mt5ServerMismatchError):
+                    # 225-21 review round 1 (MEDIUM-1/2): the server bracket refused.
+                    # ERROR, not warning — a persistent false refusal (a broker
+                    # spelling its server differently, or reporting none) would
+                    # otherwise stop this key's holdings with only a WARNING. The
+                    # bounded restart stays, since a real stale session on another
+                    # server is healed by it. Early exit (not an else) keeps the
+                    # `str(exc)` logger call below at the arm's top level, which the
+                    # AUM-02 AST gate in test_allocator_positions_non_ccxt.py requires.
+                    logger.error(
+                        "poll_allocator_positions: mt5 server bracket refused the "
+                        "terminal session (%s, key=%s) — classified transient, "
+                        "restarting the terminal; NO row emitted",
+                        type(exc).__name__,
+                        api_key_id,
+                    )
+                    await _mt5_bounded_restart(
+                        session.client, log_prefix="poll_allocator_positions"
+                    )
+                    raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
                 logger.warning(
                     "poll_allocator_positions: mt5 login bracket rejected a "
                     "mismatched terminal account (%s) — classified transient, "

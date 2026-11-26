@@ -566,11 +566,20 @@ class _RecordingMt5Transport:
     job's job, not this one) or to call fetch_balance would fail LOUD.
     """
 
-    def __init__(self, *, account: dict, on_account_info=None) -> None:
+    def __init__(
+        self, *, account: dict, on_account_info=None, report_server: bool = True
+    ) -> None:
         self._account = account
         self._on_account_info = on_account_info
         self.calls: list[str] = []
         self._MetaTrader5__conn = _FakeRpycConn(self.calls)
+        # 225-21: a correct session reports the broker server it was logged in to.
+        # `login` records the server it is given and `account_info` echoes it ONLY when
+        # the configured dict names none (a configured "server" of any value is returned
+        # verbatim); `report_server=False` turns the echo off. Subclasses that override
+        # `login` either call `super().login` or never reach `account_info`.
+        self._report_server = report_server
+        self._logged_in_server: object = None
 
     def initialize(self, **kwargs):
         # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
@@ -579,13 +588,17 @@ class _RecordingMt5Transport:
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
         self.calls.append("login")
+        self._logged_in_server = server
         return True
 
     def account_info(self):
         self.calls.append("account_info")
         if self._on_account_info is not None:
             self._on_account_info()
-        return _NT(self._account)
+        reported = dict(self._account)
+        if self._report_server and "server" not in reported:
+            reported["server"] = self._logged_in_server
+        return _NT(reported)
 
     def last_error(self):
         return (0, "unknown")

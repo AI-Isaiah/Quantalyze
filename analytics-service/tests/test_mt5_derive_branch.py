@@ -162,8 +162,18 @@ class _FakeMt5Transport:
         post_read_exc: Exception | None = None,
         deals_by_call: list[list[dict]] | None = None,
         tick_answer: object = None,
+        report_server: bool = True,
     ) -> None:
         self._account = account
+        # ⭐ 225-21 — a correct terminal session reports the broker server it was
+        # logged in to (PROD measured the reported server equal to the requested one
+        # on 28 of 28 polls, plan 20). `login` records the server it is given and
+        # `account_info` echoes it ONLY when the configured dict has no "server" key;
+        # a configured "server" of ANY value (another name, None, "", "   ", 123) is
+        # returned verbatim. `report_server=False` turns the echo off, so a test can
+        # present an `account_info` with no "server" key at all.
+        self._report_server = report_server
+        self._logged_in_server: object = None
         self._deals = deals
         # 164.6.6.3 / D-04 (Finding C): when set, the Nth `history_deals_get` call
         # returns the Nth list and the LAST list repeats — a history that arrives
@@ -209,7 +219,16 @@ class _FakeMt5Transport:
 
     def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
         self.calls.append("login")
+        self._logged_in_server = server
         return self._login_ok
+
+    def _snapshot(self, account: dict) -> _NT:
+        """The account the terminal reports: the configured dict, plus the server the
+        session logged in to unless the dict names one itself (never mutates ``account``)."""
+        reported = dict(account)
+        if self._report_server and "server" not in reported:
+            reported["server"] = self._logged_in_server
+        return _NT(reported)
 
     def account_info(self):
         self.calls.append("account_info")
@@ -218,8 +237,8 @@ class _FakeMt5Transport:
             if self._post_read_exc is not None:
                 raise self._post_read_exc
             if self._second_account is not None:
-                return _NT(self._second_account)
-        return _NT(self._account)
+                return self._snapshot(self._second_account)
+        return self._snapshot(self._account)
 
     def history_deals_get(self, from_ts, to_ts):  # noqa: ANN001
         self.calls.append("history_deals_get")
@@ -256,7 +275,10 @@ class _FakeMt5Transport:
 
 
 def _session(
-    transport: _FakeMt5Transport, *, connects: list | None = None
+    transport: _FakeMt5Transport,
+    *,
+    connects: list | None = None,
+    server: str = "Broker-Live",
 ) -> Mt5Session:
     """Build an Mt5Session over the offline transport double. When ``connects`` is
     provided, every connect() invocation appends to it so restart's re-connect is
@@ -271,7 +293,7 @@ def _session(
 
     client = Mt5Client("h", 1, _connect=_connect)
     return Mt5Session(
-        client=client, login=123456, investor_password="pw", server="Broker-Live",
+        client=client, login=123456, investor_password="pw", server=server,
         venue_account_id="123456",
     )
 
@@ -284,6 +306,7 @@ def _build_ctx(
     *,
     asset_class: str = "traditional",
     connects: list | None = None,
+    server: str = "Broker-Live",
 ) -> tuple[MagicMock, dict]:
     # `inserts` (155.1): `(table, payload)` per `tbl.insert`, and `order` is the
     # combined upsert/insert sequence by table name so "the reading is written
@@ -297,7 +320,7 @@ def _build_ctx(
         "order": [],
     }
     ctx = MagicMock()
-    ctx.exchange = _session(transport, connects=connects)
+    ctx.exchange = _session(transport, connects=connects, server=server)
     ctx.supabase = MagicMock()
     ctx.strategy_row = {"id": "strat-mt5", "user_id": "u1", "asset_class": asset_class}
     ctx.key_row = {"id": "key-mt5", "user_id": "u1", "exchange": "mt5"}
@@ -2896,6 +2919,8 @@ def _clock_transport(
         account=account,
         deals=_canonical_deals(),
         tick_answer=tick_answer,
+        # a session that names no server at all: the fake's echo must not supply one
+        report_server=server is not _NO_SERVER,
     )
 
 
@@ -2939,7 +2964,7 @@ async def test_a_server_mapped_to_utc_persists_a_fixed_zero_match_reading(monkey
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -2996,7 +3021,7 @@ async def test_a_server_clock_mismatch_refuses_the_derive_pages_once_and_keeps_i
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + tick_ahead_ms - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
         with _apply(_patches(ctx)):
             result = await run_derive_broker_dailies_job(_job())
@@ -3063,7 +3088,7 @@ async def test_an_unmapped_server_clock_mismatch_persists_and_pages_once(
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with caplog.at_level(logging.DEBUG, logger="quantalyze.analytics"):
         with _apply(_patches(ctx)):
             result = await run_derive_broker_dailies_job(_job())
@@ -3118,7 +3143,7 @@ async def test_a_map_entry_for_another_server_does_not_rescue_a_mismatch(
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 7_200_000 - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms))
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -3141,7 +3166,7 @@ async def test_an_unmeasured_server_clock_reading_is_kept_and_the_derive_proceed
     _clock_derive_env(monkeypatch, rule="us")
     page = _recording_page(monkeypatch)
     transport = _clock_transport()  # the default double answers "no ticks"
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -3169,7 +3194,7 @@ async def test_a_raising_tick_read_is_unmeasured_and_never_a_credential_verdict(
     _clock_derive_env(monkeypatch, rule="us")
     page = _recording_page(monkeypatch)
     transport = _clock_transport(RuntimeError(_AUTH_PHRASES[0]))
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -3227,7 +3252,7 @@ async def test_a_failing_server_clock_reading_insert_fails_the_derive_transient(
         else ("answered", 1416, 14, 14, int(_CLOCK_NOW.timestamp() * 1000) + tick_ahead_ms - 100)
     )
     transport = _clock_transport(tick)
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     real_table = ctx.supabase.table.side_effect
 
     def _table(name: str):
@@ -3331,7 +3356,7 @@ async def _derive_with_server_and_observe_apply_marks() -> tuple[object, MagicMo
         },
         deals=_wall_deposit_at_0130_deals(),
     )
-    ctx, _capture = _build_ctx(transport)
+    ctx, _capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)), patch(
         "services.job_worker.read_key_marks", new=MagicMock(return_value=[mark])
     ), patch("services.job_worker.apply_marks", wraps=real_apply_marks) as spy:
@@ -3391,7 +3416,7 @@ async def test_the_server_name_is_normalised_before_the_map_lookup(
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms), server=arriving)
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -3413,24 +3438,30 @@ async def test_the_server_name_is_normalised_before_the_map_lookup(
     [pytest.param(_NO_SERVER, id="missing-key"), pytest.param("   ", id="blank-string")],
 )
 async def test_a_blank_server_falls_back_to_the_default_rule(monkeypatch, server: object) -> None:
-    """J7: an account whose terminal names no server (missing or blank) has no hash, so it is
-    never looked up: it takes the DEFAULT rule, does not crash, and writes a reading whose hash
-    is NULL. The map holds a ``utc`` entry for some other server and the tick is +3h, which
-    MATCHES the ``us`` default on 2026-10-28 (and would mismatch the map's ``utc``), so a match
-    reading under rule ``us`` proves the default served this account."""
+    """J7, rewritten by Phase 225 plan 21. Until then an account whose terminal named no
+    server (missing or blank) had no hash, was never looked up, took the DEFAULT rule and
+    derived normally. That derive-level premise is now UNREACHABLE BY DESIGN: the PRE
+    bracket (``assert_expected_server``) refuses a session that cannot name its broker, and
+    it does so before the tick is read, so a blank server never gets as far as the clock.
+    The contract is therefore: the derive ends FAILED ``transient`` (the next attempt reads
+    again), no clock reading row is inserted, the derive upserts and updates nothing, and no
+    page is raised. The pure-seam default for a missing server hash stays covered by
+    ``test_a_missing_server_hash_is_never_looked_up`` in tests/test_mt5_server_clock.py;
+    ``services/mt5_server_clock.py`` is unchanged."""
     _clock_derive_env(monkeypatch, rule="us")
     monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{'c0' * 32}=utc")
     page = _recording_page(monkeypatch)
     newest_tick_ms = int(_CLOCK_NOW.timestamp() * 1000) + 10_800_000 - 100
     transport = _clock_transport(("answered", 1416, 14, 14, newest_tick_ms), server=server)
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
-    assert result.outcome == DispatchOutcome.DONE, result.error_message
-    (row,) = _clock_readings(capture)
-    assert row["server_label_hash"] is None
-    assert row["configured_rule"] == "us" and row["verdict"] == "match"
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert _clock_readings(capture) == []
+    assert capture["upserts"] == [] and capture["updates"] == [] and capture["inserts"] == []
+    assert "history_deals_get" not in transport.calls
     page.assert_not_awaited()
 
 
@@ -3465,7 +3496,7 @@ async def test_a_malformed_rules_map_fails_transient_and_makes_no_terminal_read(
         monkeypatch.delenv("MT5_SERVER_TIME_RULE", raising=False)
     monkeypatch.setenv("MT5_SERVER_TIME_RULES", rules_value)
     transport = _clock_transport()
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
         with _apply(_patches(ctx)):
             result = await run_derive_broker_dailies_job(_job())
@@ -3499,7 +3530,7 @@ async def test_a_mapped_server_with_no_tick_continues_without_a_page(monkeypatch
     monkeypatch.setenv("MT5_SERVER_TIME_RULES", f"{_planted_server_hash()}=utc")
     page = _recording_page(monkeypatch)
     transport = _clock_transport()  # the default double answers "no ticks"
-    ctx, capture = _build_ctx(transport)
+    ctx, capture = _build_ctx(transport, server=_PLANTED_SERVER)
     with _apply(_patches(ctx)):
         result = await run_derive_broker_dailies_job(_job())
 
@@ -3518,54 +3549,130 @@ async def test_a_mapped_server_with_no_tick_continues_without_a_page(monkeypatch
 _VERDICT_KEY_ID = "b2c3d4e5-0000-4000-8000-0000000000cd"
 
 
-async def _derive_reporting_server(
-    monkeypatch, caplog: pytest.LogCaptureFixture, reported_server: str
+_OTHER = object()  # the reported server is another server of the same broker
+_NOT_CAPTURED = object()  # the terminal reports no server (plan 20's not_captured)
+
+
+def _account_reporting(server: object) -> dict:
+    account: dict[str, object] = {
+        "equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456,
+    }
+    if server is _OTHER:
+        account["server"] = "Broker-Demo"
+    elif server is not _NOT_CAPTURED:
+        account["server"] = server
+    return account
+
+
+async def _derive_refused_by_a_bracket(
+    monkeypatch, caplog: pytest.LogCaptureFixture, *, pre: object, post: object
 ):
+    """Derive one MT5 key whose PRE snapshot reports ``pre`` and POST snapshot reports
+    ``post`` (a ``_NOT_CAPTURED`` PRE carries no "server" key at all; a ``_NOT_CAPTURED``
+    POST carries ``"server": None``). Wired so only the bracket under test can refuse."""
     monkeypatch.setenv("MT5_ENABLED", "true")
+    post_account = _account_reporting(post)
+    if post is _NOT_CAPTURED:
+        post_account["server"] = None  # the explicit not-captured shape of a re-read
+    # `report_server=False` turns the echo off for BOTH reads, which is why the second
+    # snapshot always names its server explicitly.
     transport = _FakeMt5Transport(
-        account={
-            "equity": 110_500.0, "balance": 110_500.0, "currency": "USD",
-            "login": 123456, "server": reported_server,
-        },
+        account=_account_reporting(pre),
+        second_account=post_account,
         deals=_canonical_deals(),
+        report_server=pre is not _NOT_CAPTURED,
     )
     ctx, capture = _build_ctx(transport, asset_class="traditional")
     ctx.key_row["id"] = _VERDICT_KEY_ID
     caplog.clear()
     with caplog.at_level(logging.INFO, logger="quantalyze.analytics.mt5_read"), _apply(
         _patches(ctx)
-    ):
+    ), caplog.at_level(logging.INFO, logger="quantalyze.analytics.job_worker"):
         result = await run_derive_broker_dailies_job(_job())
+    return result, capture, transport, caplog
+
+
+def _assert_refused_poll_stored_nothing(result, capture, transport, caplog, *, verdict: str) -> None:
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    # nothing stored: no upsert, insert, update or rpc (so no persist, no failed-analytics
+    # stamp, no server-clock reading row)
+    assert capture["upserts"] == [] and capture["inserts"] == []
+    assert capture["updates"] == [] and capture["rpc_calls"] == []
+    _persisted_nothing(capture)
+    assert not any(t == "mt5_server_clock_readings" for t, _p in capture["inserts"])
+    # the arm's bounded terminal restart ran
+    assert "shutdown" in transport.calls
     verdicts = [
         r.getMessage() for r in caplog.records if "mt5 poll server verdict" in r.getMessage()
     ]
-    return result, capture, verdicts
+    assert len(verdicts) == 1, verdicts
+    assert f"session_server_matches_requested={verdict}" in verdicts[0]
+    assert f"holder={_VERDICT_KEY_ID}" in verdicts[0]
+    # review round 1 (MEDIUM-1/2): the arm logs the server refusal at ERROR (so it reaches
+    # Sentry), naming the server bracket, the exception class and the key; never the
+    # login-bracket WARNING, which names the wrong cause.
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "server bracket refused" in errors[0]
+    assert "Mt5ServerMismatchError" in errors[0]
+    assert f"key={_VERDICT_KEY_ID}" in errors[0]
+    assert not any(
+        "login bracket rejected" in r.getMessage() for r in caplog.records
+    ), "the server refusal was logged as a login-bracket mismatch"
+    # the message classifies transient (code 0 so the IPC transport table cannot answer)
+    message = result.error_message or ""
+    assert message
+    assert classify_mt5_login_error(Mt5ClientError(0, message)) == "transient"
+    # no login digits and neither server name in any record or the message
+    for blob in [message, *[r.getMessage() for r in caplog.records]]:
+        for secret in ("123456", "broker-live", "broker-demo"):
+            assert secret not in blob.casefold(), (secret, blob)
 
 
 @pytest.mark.asyncio
-async def test_a_derive_poll_on_another_server_logs_false_and_stores_what_a_match_stores(
-    monkeypatch, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("pre", "verdict"),
+    [
+        pytest.param(_OTHER, "False", id="another-server-of-the-same-broker"),
+        pytest.param(_NOT_CAPTURED, "not_captured", id="not-captured"),
+    ],
+)
+async def test_the_pre_bracket_refuses_a_derive_poll_on_another_server_and_stores_nothing(
+    monkeypatch, caplog: pytest.LogCaptureFixture, pre: object, verdict: str
 ) -> None:
-    """THE tracer. A poll whose session the terminal reports on ANOTHER server of the
-    same broker is a measurement, not a refusal: the job's outcome and every row it
-    persists equal those of the same run on the matching server. Exactly one verdict
-    line per poll, naming the derive site and this key, and no server value."""
-    matching = await _derive_reporting_server(monkeypatch, caplog, "Broker-Live")
-    other = await _derive_reporting_server(monkeypatch, caplog, "Broker-Demo-7")
+    """PRE SITE TEST (225-21, review WR-01 of PR-2c, CONTEXT Q6). The terminal reports the
+    requested login on ANOTHER server (or no server): the login bracket passes, the
+    server bracket refuses BEFORE the deal read. The POST snapshot reports the right
+    server, so POST cannot be what caught it. Plan 20's verdict line stays beside the
+    bracket, written before it, so the refused poll is still attributed to its key."""
+    result, capture, transport, log = await _derive_refused_by_a_bracket(
+        monkeypatch, caplog, pre=pre, post="Broker-Live"
+    )
+    _assert_refused_poll_stored_nothing(result, capture, transport, log, verdict=verdict)
+    assert "history_deals_get" not in transport.calls
 
-    assert matching[0].outcome == DispatchOutcome.DONE
-    assert other[0].outcome == matching[0].outcome
-    assert _csv_rows(other[1]) == _csv_rows(matching[1]) != {}
-    assert other[1]["upserts"] == matching[1]["upserts"]
-    assert other[1]["updates"] == matching[1]["updates"]
-    assert other[1]["rpc_calls"] == matching[1]["rpc_calls"]
 
-    assert len(matching[2]) == 1, matching[2]
-    assert len(other[2]) == 1, other[2]
-    assert "session_server_matches_requested=True" in matching[2][0]
-    assert "session_server_matches_requested=False" in other[2][0]
-    for line in (matching[2][0], other[2][0]):
-        assert "site=derive_broker_dailies" in line
-        assert f"holder={_VERDICT_KEY_ID}" in line
-        for secret in ("broker-live", "broker-demo", "123456", "pw"):
-            assert secret not in line.casefold(), (secret, line)
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "post",
+    [
+        pytest.param(_OTHER, id="another-server-of-the-same-broker"),
+        pytest.param(_NOT_CAPTURED, id="not-captured"),
+    ],
+)
+async def test_the_post_bracket_refuses_a_derive_poll_that_moved_server_mid_read(
+    monkeypatch, caplog: pytest.LogCaptureFixture, post: object
+) -> None:
+    """POST SITE TEST (225-21). The PRE snapshot reports the requested server (verdict
+    True, one line), the deals are fetched, and the POST re-read reports another server
+    or none: the POST bracket refuses, so a mid-read re-login to another broker's session
+    on the same login stores nothing. The PRE snapshot matched, so only the POST bracket
+    can catch it."""
+    result, capture, transport, log = await _derive_refused_by_a_bracket(
+        monkeypatch, caplog, pre="Broker-Live", post=post
+    )
+    _assert_refused_poll_stored_nothing(result, capture, transport, log, verdict="True")
+    assert "history_deals_get" in transport.calls
