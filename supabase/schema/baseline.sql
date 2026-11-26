@@ -3472,16 +3472,16 @@ CREATE OR REPLACE FUNCTION "public"."computation_error_copy"("p_error_kind" "tex
     -- no automatic retry has happened and none is coming. Promising a retry
     -- here would be the thing that is false.
     WHEN 'permanent' THEN
-      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Contact support if you need this strategy computed.'
+      'Analytics could not complete for this strategy, and retrying alone will not resolve it. Use the contact form if you need this strategy computed.'
     -- 'transient' and 'unknown' SHARE an arm, and the sameness is the honest
     -- part. Neither reaches 'failed_final' except through
     -- `v_attempts >= v_max_attempts`, so the one true statement about both is
     -- that the automatic retries were used up. Splitting them would spend two
     -- sentences implying a difference the user cannot act on.
     WHEN 'transient' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     WHEN 'unknown' THEN
-      'Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.'
+      'Analytics could not complete after several automatic retries. Retry the sync, or use the contact form if it keeps failing.'
     -- 'orphaned' — the WORKER DIED holding the claim; the job itself never
     -- reached a verdict. Written ONLY by the hourly reaper
     -- (retention_compute_jobs_orphaned_running, re-registered by mig
@@ -3505,7 +3505,7 @@ CREATE OR REPLACE FUNCTION "public"."computation_error_copy"("p_error_kind" "tex
     -- Anything else: NULL, or a kind added after this migration. Says only what
     -- is true of every failure and claims nothing about retries.
     ELSE
-      'Analytics could not complete for this strategy. Retry the sync, or contact support if this persists.'
+      'Analytics could not complete for this strategy. Retry the sync, or use the contact form if this persists.'
   END
 $$;
 
@@ -3513,7 +3513,7 @@ $$;
 ALTER FUNCTION "public"."computation_error_copy"("p_error_kind" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."computation_error_copy"("p_error_kind" "text") IS 'User-facing copy for strategy_analytics.computation_error, derived from compute_jobs.error_kind. Phase 162 / HONEST-01. Takes a KIND, never an error string: the range is four fixed literals, so nothing that goes in can come out. permanent -> will not resolve by retrying; transient/unknown -> automatic retries exhausted (they reach failed_final only via v_attempts >= v_max_attempts, so they share the one statement that is true of both); orphaned -> the worker died holding the claim, so the job never reached a verdict and the failure IS retryable (retry-positive copy, added with mig 20260826140000 which widens compute_jobs_error_kind_check and re-registers the hourly reaper to write it; before that the reaper wrote permanent and told those users that retrying would not help, which was false); anything else, including NULL -> a cautious default that claims nothing about retries. The raw diagnosis stays on compute_jobs.last_error, which is operator-only and is NOT read by sync_strategy_analytics_status. Mirrors analytics-service/services/allocator_positions.py sync_error_copy.';
+COMMENT ON FUNCTION "public"."computation_error_copy"("p_error_kind" "text") IS 'User-facing copy for strategy_analytics.computation_error, derived from compute_jobs.error_kind. Phase 162 / HONEST-01. Takes a KIND, never an error string: the range is four fixed literals, so nothing that goes in can come out. permanent -> will not resolve by retrying; transient/unknown -> automatic retries exhausted (they reach failed_final only via v_attempts >= v_max_attempts, so they share the one statement that is true of both); orphaned -> the worker died holding the claim, so the job never reached a verdict and the failure IS retryable (retry-positive copy, added with mig 20260826140000 which widens compute_jobs_error_kind_check and re-registers the hourly reaper to write it; before that the reaper wrote permanent and told those users that retrying would not help, which was false); anything else, including NULL -> a cautious default that claims nothing about retries. The raw diagnosis stays on compute_jobs.last_error, which is operator-only and is NOT read by sync_strategy_analytics_status. Mirrors analytics-service/services/allocator_positions.py sync_error_copy. Since Phase 222 (mig 20261125212222) every channel-offering arm names the contact form.';
 
 
 
