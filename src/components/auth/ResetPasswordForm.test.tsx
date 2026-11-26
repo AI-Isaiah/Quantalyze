@@ -367,4 +367,108 @@ describe("ResetPasswordForm", () => {
     expect(container.textContent).not.toContain("not right or has expired");
     expect(reauthenticateMock).toHaveBeenCalledOnce();
   });
+  // PROD 2026-11-26 follow-up (F3): the no-session card used to be chosen by
+  // /session/i on the message, so any Auth error that merely mentioned
+  // "session" hid its real text behind "open the link from your email". The
+  // card is now chosen by AuthSessionMissingError's name or the
+  // session_not_found code only; every other error reaches the form.
+  it("F3: an error that only mentions 'session' in its message shows that message, not the no-session card", async () => {
+    updateUserMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Could not update the password for this session",
+        name: "AuthApiError",
+        code: "unexpected_failure",
+        status: 500,
+      },
+    });
+    const { container, getByText } = render(<ResetPasswordForm />);
+    fillPasswords(container);
+    fireEvent.click(getByText("Update password"));
+
+    await waitFor(() => {
+      expect(container.textContent).toContain(
+        "Could not update the password for this session",
+      );
+    });
+    expect(container.textContent).not.toContain(
+      "Open the password-reset link from your email to continue.",
+    );
+  });
+
+  it("F3: session_expired from the token refresh (a timed-out recovery session) shows the no-session card", async () => {
+    updateUserMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Invalid Refresh Token: Session Expired",
+        name: "AuthApiError",
+        code: "session_expired",
+        status: 400,
+      },
+    });
+    const { container, getByText } = render(<ResetPasswordForm />);
+    fillPasswords(container);
+    fireEvent.click(getByText("Update password"));
+
+    await waitFor(() => {
+      expect(container.textContent).toContain(
+        "Open the password-reset link from your email to continue.",
+      );
+    });
+    expect(container.textContent).not.toContain("Invalid Refresh Token");
+  });
+
+  it("F3: Auth's session_not_found code (a revoked session) shows the no-session card", async () => {
+    updateUserMock.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Session from session_id claim in JWT does not exist",
+        name: "AuthApiError",
+        code: "session_not_found",
+        status: 403,
+      },
+    });
+    const { container, getByText } = render(<ResetPasswordForm />);
+    fillPasswords(container);
+    fireEvent.click(getByText("Update password"));
+
+    await waitFor(() => {
+      expect(container.textContent).toContain(
+        "Open the password-reset link from your email to continue.",
+      );
+    });
+  });
+
+  // F1: /auth/callback sends a recovery link it could not verify to
+  // /reset-password?link=expired; the page passes linkExpired, and the form
+  // must open on a card that says why and offers a new link.
+  it("F1: linkExpired opens on the expired-link card with a new-link affordance", () => {
+    const { container, getByText } = render(<ResetPasswordForm linkExpired />);
+    expect(container.textContent).toContain(
+      "This password-reset link has expired, was already used, or was opened in a different browser.",
+    );
+    expect(getByText("Request a new link").getAttribute("href")).toBe("/forgot-password");
+    expect(container.querySelector('input[name="password"]')).toBeNull();
+  });
+  // SFH round 2: a transient callback failure gets its own card, and every
+  // updateUser failure is logged (code and status) before either branch.
+  it("linkError opens on the try-again card", () => {
+    const { container } = render(<ResetPasswordForm linkError />);
+    expect(container.textContent).toContain("We could not check your reset link just now.");
+  });
+
+  it.each([
+    [{ message: "Auth session missing!", name: "AuthSessionMissingError", status: 400 }, "unknown", 400],
+    [{ message: "boom", name: "AuthApiError", code: "unexpected_failure", status: 500 }, "unexpected_failure", 500],
+  ])("logs the updateUser failure before branching (%#)", async (error, code, status) => {
+    updateUserMock.mockResolvedValueOnce({ data: null, error });
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { container, getByText } = render(<ResetPasswordForm />);
+    fillPasswords(container);
+    fireEvent.click(getByText("Update password"));
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith("[reset-password] updateUser failed:", code, status),
+    );
+    spy.mockRestore();
+  });
 });

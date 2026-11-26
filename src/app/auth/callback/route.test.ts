@@ -172,7 +172,7 @@ describe("GET /auth/callback", () => {
     authState.verifyResult = { error: { message: "token expired" } };
 
     const res = await callGet(
-      "http://localhost:3000/auth/callback?token_hash=h&type=recovery",
+      "http://localhost:3000/auth/callback?token_hash=h&type=signup",
     );
 
     const loc = new URL(res.headers.get("location")!);
@@ -428,6 +428,121 @@ describe("GET /auth/callback — SFH-M1 marker-path exchange failure is logged",
       "unknown",
       "no-status",
     );
+    spy.mockRestore();
+  });
+});
+
+// PROD 2026-11-26 follow-up (F1): a failed password-recovery link used to land
+// on /login?error=..., and /login does not read `error`, so the user saw a bare
+// sign-in form and no word that the link had failed. A recovery link that
+// cannot be verified must land on /reset-password?link=expired, which says so
+// and offers a new link. Each failure branch also logs Auth's code and status.
+describe("GET /auth/callback — a failed recovery link says so", () => {
+  function expectExpiredLanding(res: Response) {
+    expect(res.status).toBe(307);
+    const loc = new URL(res.headers.get("location")!);
+    expect(loc.pathname).toBe("/reset-password");
+    expect(loc.searchParams.get("link")).toBe("expired");
+  }
+
+  it("K: a failed PKCE exchange with next=/reset-password lands on the expired-link card and logs code and status", async () => {
+    authState.exchangeResult = {
+      error: { message: "invalid flow state", code: "flow_state_not_found", status: 404 },
+    };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?code=spent-code&next=/reset-password",
+    );
+    expectExpiredLanding(res);
+    expect(spy).toHaveBeenCalledWith(
+      "[auth/callback] code exchange failed:",
+      "flow_state_not_found",
+      404,
+    );
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("spent-code");
+    spy.mockRestore();
+  });
+
+  it("L: a failed token_hash recovery lands on the expired-link card and logs code and status", async () => {
+    authState.verifyResult = {
+      error: { message: "token expired", code: "otp_expired", status: 403 },
+    };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?token_hash=old-hash&type=recovery&next=/reset-password",
+    );
+    expectExpiredLanding(res);
+    expect(spy).toHaveBeenCalledWith(
+      "[auth/callback] token_hash verification failed:",
+      "otp_expired",
+      403,
+    );
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("old-hash");
+    spy.mockRestore();
+  });
+
+  it("M: GoTrue's verify-error redirect for a recovery link lands on the expired-link card", async () => {
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?error=access_denied&error_code=otp_expired&next=/reset-password",
+    );
+    expectExpiredLanding(res);
+  });
+
+  it("N: a failed PKCE exchange for a signup link still lands on /login and is logged", async () => {
+    authState.exchangeResult = { error: { message: "invalid grant", status: 400 } };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await callGet(
+      "http://localhost:3000/auth/callback?code=bad&next=/pending-approval",
+    );
+    expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
+    expect(spy).toHaveBeenCalledWith(
+      "[auth/callback] code exchange failed:",
+      "unknown",
+      400,
+    );
+    spy.mockRestore();
+  });
+});
+
+// SFH round 2 (#1375): only a dead link (a 4xx) is "expired". Auth or the
+// network failing (5xx, 429, no status) lands on ?link=error, which says to
+// try again; and the error_code / error, invalid-type and missing-parameter
+// branches all log, never error_description or any code, hash or token.
+describe("GET /auth/callback — a transient recovery failure is not called expired", () => {
+  it.each([[500], [503], [429], [undefined]])(
+    "O: a PKCE recovery failure with status %s lands on ?link=error",
+    async (status) => {
+      authState.exchangeResult = { error: { message: "x", status } };
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const res = await callGet("http://localhost:3000/auth/callback?code=c&next=/reset-password");
+      expect(new URL(res.headers.get("location")!).searchParams.get("link")).toBe("error");
+      spy.mockRestore();
+    },
+  );
+
+  it("P: a token_hash recovery failure with a 5xx lands on ?link=error", async () => {
+    authState.verifyResult = { error: { message: "x", status: 502 } };
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await callGet("http://localhost:3000/auth/callback?token_hash=h&type=recovery&next=/reset-password");
+    expect(new URL(res.headers.get("location")!).searchParams.get("link")).toBe("error");
+    spy.mockRestore();
+  });
+
+  it("Q: the verify-error branch logs error_code and error, never error_description", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await callGet("http://localhost:3000/auth/callback?error=access_denied&error_code=otp_expired&error_description=secret-desc&next=/pending-approval");
+    expect(spy).toHaveBeenCalledWith("[auth/callback] verify redirected with an error:", "otp_expired", "access_denied");
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-desc");
+    spy.mockRestore();
+  });
+
+  it("R: an invalid verification type and a missing-parameter callback both log", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await callGet("http://localhost:3000/auth/callback?token_hash=secret-hash&type=bogus");
+    expect(spy).toHaveBeenCalledWith("[auth/callback] invalid verification type:", "bogus");
+    await callGet("http://localhost:3000/auth/callback");
+    expect(spy).toHaveBeenCalledWith("[auth/callback] no code, token_hash, message or error");
+    expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-hash");
     spy.mockRestore();
   });
 });

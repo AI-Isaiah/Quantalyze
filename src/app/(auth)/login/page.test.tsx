@@ -5,12 +5,11 @@
  *
  * CD-02: /login?redirect=/compare reaches the form as redirectTo "/compare";
  * ?next=... is honoured when redirect is absent.
- * CD-13: a hostile redirect/next gives redirectTo null; the code branch with a
- * successful exchange and https://evil.example falls back to /onboarding (the
- * open redirect this test exists to catch).
+ * CD-13: a hostile redirect/next gives redirectTo null. The page no longer
+ * exchanges ?code= at all (2026-11-26), so it never calls redirect().
  *
- * Fails when: the deep link is dropped, a hostile value reaches the form or
- * redirect(), or the code branch stops falling back to /onboarding.
+ * Fails when: the deep link is dropped, a hostile value reaches the form, or
+ * the page exchanges a ?code= again.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
@@ -85,34 +84,35 @@ describe("login page redirectTo (CD-02, CD-13)", () => {
   });
 });
 
-describe("login page code branch (CD-13: open redirect closed)", () => {
-  it("redirects to /onboarding when the redirect is off-origin", async () => {
-    await expect(
-      LoginPage({
-        searchParams: Promise.resolve({
-          code: "abc",
-          redirect: "https://evil.example",
-        }),
-      }),
-    ).rejects.toThrow("NEXT_REDIRECT:/onboarding");
-  });
-
-  it("redirects to a safe redirect after a successful exchange", async () => {
-    await expect(
-      LoginPage({
-        searchParams: Promise.resolve({ code: "abc", redirect: "/compare" }),
-      }),
-    ).rejects.toThrow("NEXT_REDIRECT:/compare");
-  });
-
-  it("falls through to the form when the exchange fails", async () => {
-    exchangeError = new Error("bad code");
-    render(
-      await LoginPage({
-        searchParams: Promise.resolve({ code: "abc", redirect: "/compare" }),
-      }),
-    );
+// 2026-11-26 (password reset fix): the code branch is gone. A Server Component
+// cannot set cookies, so its exchange spent the one-time code and dropped the
+// session. The CD-13 open redirect it carried went with it.
+describe("login page does not exchange ?code= (CD-13 branch removed)", () => {
+  it("renders the form with the sanitised deep link and never exchanges or redirects", async () => {
+    const to = await renderLogin({ code: "abc", redirect: "https://evil.example" });
+    expect(exchangeMock).not.toHaveBeenCalled();
     expect(redirectMock).not.toHaveBeenCalled();
-    expect(screen.getByTestId("login-form")).toBeInTheDocument();
+    expect(to).toBe("null");
+  });
+
+  it("keeps a safe deep link when a ?code= rides along", async () => {
+    expect(await renderLogin({ code: "abc", redirect: "/compare" })).toBe("/compare");
+    expect(exchangeMock).not.toHaveBeenCalled();
+  });
+});
+
+// SFH round 2: /auth/callback sends a failed email link (an expired signup
+// confirmation, say) to /login?error=...; the page shows fixed copy, never the
+// reflected text, so the user is told the link failed.
+describe("login page ?error= notice", () => {
+  it("shows the fixed notice and never the reflected error text", async () => {
+    render(await LoginPage({ searchParams: Promise.resolve({ error: "<b>injected</b>" }) }));
+    expect(screen.getByRole("alert").textContent).toContain("That email link could not be used.");
+    expect(document.body.textContent).not.toContain("injected");
+  });
+
+  it("shows no notice without ?error=", async () => {
+    render(await LoginPage({ searchParams: Promise.resolve({}) }));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
