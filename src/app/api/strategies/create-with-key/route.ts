@@ -58,6 +58,11 @@ import { venueLabel } from "@/lib/display-labels";
 // working-holder rule and the slot swap. See `resolveByVenueIdentity`.
 import { isWorkingHolder } from "@/lib/account-share-note";
 import {
+  holderField,
+  readOwnAccountHolder,
+  type AccountHolder,
+} from "@/lib/own-account-holder";
+import {
   normaliseConnectedVenueServer,
   pickSameAccountHolder,
   readLiveSameLoginKeys,
@@ -245,9 +250,14 @@ type VenueIdentityResolution =
       // another session's. Null when not a string. Read by that one site only.
       wizardSessionId: string | null;
     }
-  | { kind: "connected"; strategyName: string | null }
-  | { kind: "held" }
-  | { kind: "orphaned" }
+  // The three same-owner "this account is already yours" answers carry an
+  // optional `holder` (the caller's OWN strategy or key, named for the refusal
+  // body, `own-account-holder.ts`). It is added by `resolveByVenueIdentity` once
+  // the verdict is established and never decides it; absent means the read
+  // faulted or there was nothing to name.
+  | { kind: "connected"; strategyName: string | null; holder?: AccountHolder | null }
+  | { kind: "held"; holder?: AccountHolder | null }
+  | { kind: "orphaned"; holder?: AccountHolder | null }
   // 225-07 (Q1, D-18, D-25 / MT5D-08) — the picked live key on this account is
   // NOT working (`isWorkingHolder` false: inactive, or sync_status revoked,
   // sign_in_failed or error). A failing key never keeps the account slot, so the
@@ -267,6 +277,8 @@ type VenueIdentityResolution =
   | { kind: "read_failed" };
 
 const UNRESOLVED: VenueIdentityResolution = { kind: "unresolved" };
+
+const HOLDER_LOG_LABEL = "strategies/create-with-key";
 
 /** 161-05 / WIZERR-03 — the payload-free orphan answer, held once like UNRESOLVED. */
 const ORPHANED: VenueIdentityResolution = { kind: "orphaned" };
@@ -357,7 +369,12 @@ async function resolveByVenueIdentity(
         });
         return { kind: "read_failed" };
       }
-      if (dependent) return HELD;
+      if (dependent) {
+        return {
+          kind: "held",
+          holder: await readOwnAccountHolder(supabase, userId, picked.id, HOLDER_LOG_LABEL),
+        };
+      }
       return { kind: "failing_holder", holderId: picked.id };
     }
     liveKeyId = picked.id;
@@ -390,9 +407,22 @@ async function resolveByVenueIdentity(
   // ships, a tier-2 holder no longer refuses it. `read_failed` answers 503
   // before any write. The race arm treats it like `unresolved`, as before.
   if (byStrategy.kind === "unresolved") return { kind: "read_failed" };
+  if (byStrategy.kind === "connected") {
+    return {
+      ...byStrategy,
+      holder: await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL),
+    };
+  }
   if (byStrategy.kind !== "orphaned") return byStrategy;
   const otherUse = await resolveOtherKeyUse(supabase, userId, liveKeyId, secrets);
-  return otherUse.kind === "unresolved" ? { kind: "read_failed" } : otherUse;
+  if (otherUse.kind === "unresolved") return { kind: "read_failed" };
+  if (otherUse.kind === "held" || otherUse.kind === "orphaned") {
+    return {
+      ...otherUse,
+      holder: await readOwnAccountHolder(supabase, userId, liveKeyId, HOLDER_LOG_LABEL),
+    };
+  }
+  return otherUse;
 }
 
 /**
@@ -618,12 +648,23 @@ async function resolveStrategiesForKey(
  * ⛔ AND THE VENUE ACCOUNT ID NEVER APPEARS HERE. It is not a parameter of this
  * function, which is the structural reason rather than a promise (T-154-06-C).
  */
-function venueAlreadyConnectedResponse(strategyName: string | null): NextResponse {
+function venueAlreadyConnectedResponse(
+  strategyName: string | null,
+  holder?: AccountHolder | null,
+): NextResponse {
+  // Built above the literal so the emitter stays inside the invariant scanner's
+  // `error:` window (`wizardErrors.invariant.test.ts`, EMITTER_BODY_MAX_CHARS).
+  // `strategy_name` first, then the caller's OWN strategy named and linked
+  // (`own-account-holder.ts`).
+  const extra = {
+    ...(strategyName === null ? {} : { strategy_name: strategyName }),
+    ...holderField(holder),
+  };
   return NextResponse.json(
     {
       code: "VENUE_ALREADY_CONNECTED",
       error: "This account is already connected to an existing strategy.",
-      ...(strategyName === null ? {} : { strategy_name: strategyName }),
+      ...extra,
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -675,11 +716,17 @@ function venueDraftInProgressResponse(draftName: string | null): NextResponse {
  * LEAK INTO IT (T-154-06-C / T-212-04). `code` FIRST, as a literal: the order
  * the invariant scanner and the byte-pin in `route.test.ts` both read.
  */
-function keyOrphanedResponse(): NextResponse {
+function keyOrphanedResponse(holder?: AccountHolder | null): NextResponse {
+  // The caller's OWN stored key: nickname, date added, and the page where it is
+  // listed (`own-account-holder.ts`). Not an identity: no login, server or key id
+  // rides it. Built above the literal to keep the emitter inside the scanner's
+  // `error:` window.
+  const extra = holderField(holder);
   return NextResponse.json(
     {
       code: "KEY_ORPHANED",
       error: "This key is already stored, but no strategy uses it.",
+      ...extra,
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -703,12 +750,16 @@ function keyOrphanedResponse(): NextResponse {
  * invariant scanner and the byte-pin in `route.test.ts` both read; the sentence
  * is the pre-existing one, verbatim.
  */
-function keyVenueAlreadyConnectedResponse(): NextResponse {
+function keyVenueAlreadyConnectedResponse(holder?: AccountHolder | null): NextResponse {
+  // The caller's OWN existing strategy or key (`own-account-holder.ts`), built
+  // above the literal to keep the emitter inside the scanner's `error:` window.
+  const extra = holderField(holder);
   return NextResponse.json(
     {
       code: "KEY_VENUE_ALREADY_CONNECTED",
       error:
         "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+      ...extra,
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -957,7 +1008,10 @@ async function handleReuseExistingKey(
     // to an existing strategy" is true clause for clause here, and its remedy
     // (open the strategy that already uses it) is reachable — which is exactly
     // what `KEY_ORPHANED`'s docblock records as the test for reusing it.
-    return venueAlreadyConnectedResponse(held.strategyName);
+    return venueAlreadyConnectedResponse(
+      held.strategyName,
+      await readOwnAccountHolder(supabase, user.id, adminKey.id, HOLDER_LOG_LABEL),
+    );
   }
   if (held.kind === "unresolved") {
     // A read faulted, so we could not establish that nothing holds this key —
@@ -1565,14 +1619,14 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // ⭐ SHORT-CIRCUITS BEFORE THE CHARGED SEAM CALLS, exactly like the two
       // resolve arms above it: a refusal we can make from rows we already read
       // must not first burn a Railway probe and the venue's validate quota.
-      return venueAlreadyConnectedResponse(venueMatch.strategyName);
+      return venueAlreadyConnectedResponse(venueMatch.strategyName, venueMatch.holder);
     }
     if (venueMatch.kind === "orphaned") {
       // 212-03 / SC5 — REFUSE BEFORE THE UP-TO-120 s `validateKey`. The identity
       // is known here (MT5 only), and the refusal is a fact about the caller's
       // OWN stored key that no credential check can change. The comment block
       // below records the 161-05 order this reverses.
-      return keyOrphanedResponse();
+      return keyOrphanedResponse(venueMatch.holder);
     }
     // 225 PR-2 round-3 decision 2 (WR-06): `held` is answered here, before the
     // validation, for the same reason as the arms above: it is a fact about the
@@ -1581,7 +1635,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // refuse it every time); a working holder held only through a composite
     // resolves to it too.
     if (venueMatch.kind === "held") {
-      return keyVenueAlreadyConnectedResponse();
+      return keyVenueAlreadyConnectedResponse(venueMatch.holder);
     }
     // 167.1.2 REVIEW WR-04: `held` used to fall through here and be answered by
     // the race arm's own `held` branch.
@@ -1723,13 +1777,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         return venueDraftInProgressResponse(postMatch.strategyName);
       }
       if (postMatch.kind === "connected") {
-        return venueAlreadyConnectedResponse(postMatch.strategyName);
+        return venueAlreadyConnectedResponse(postMatch.strategyName, postMatch.holder);
       }
       if (postMatch.kind === "held") {
-        return keyVenueAlreadyConnectedResponse();
+        return keyVenueAlreadyConnectedResponse(postMatch.holder);
       }
       if (postMatch.kind === "orphaned") {
-        return keyOrphanedResponse();
+        return keyOrphanedResponse(postMatch.holder);
       }
       // `failing_holder` → the admission below; `unresolved` → the normal RPC.
     }
@@ -2009,7 +2063,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // rolled back by Postgres, so the "nothing new was created" clause
             // in this code's copy holds on this arm too — and on stronger ground
             // than on the pre-RPC one.
-            return venueAlreadyConnectedResponse(venueMatch.strategyName);
+            return venueAlreadyConnectedResponse(venueMatch.strategyName, venueMatch.holder);
           }
           if (venueMatch.kind === "held" || venueMatch.kind === "failing_holder") {
             // 225-07 — `failing_holder` can only reach this arm in a race (the
@@ -2029,7 +2083,16 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // key was not saved (the INSERT above was refused and rolled back).
             // Same body `keys/validate-and-encrypt` answers, through the one
             // builder (225-11) that the post-validation `held` arm also uses.
-            return keyVenueAlreadyConnectedResponse();
+            return keyVenueAlreadyConnectedResponse(
+              venueMatch.kind === "held"
+                ? venueMatch.holder
+                : await readOwnAccountHolder(
+                    supabase,
+                    user.id,
+                    venueMatch.holderId,
+                    HOLDER_LOG_LABEL,
+                  ),
+            );
           }
           if (venueMatch.kind === "orphaned") {
             // 161-05 / WIZERR-03 — THE ORPHAN, DISCRIMINATED BEFORE THE PINNED
@@ -2065,7 +2128,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
             // coverage law cannot see a 409, so `KNOWN_CREATE_WITH_KEY_CODES`
             // gaining `KEY_ORPHANED` in this commit is what stops ConnectKeyStep
             // rejecting it as unrecognised and rendering UNKNOWN.
-            return keyOrphanedResponse();
+            return keyOrphanedResponse(venueMatch.holder);
           }
           // Unresolvable: the resolver is dark — a read faulted, or the
           // service-role credential is missing — so we could not establish
@@ -2335,7 +2398,9 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
           const isSlotRefusal =
             typeof swapMessage === "string" && /ACCOUNT_SLOT_[A-Z_]+/.test(swapMessage);
           return isSlotRefusal
-            ? keyVenueAlreadyConnectedResponse()
+            ? keyVenueAlreadyConnectedResponse(
+                await readOwnAccountHolder(supabase, user.id, failingHolderId, HOLDER_LOG_LABEL),
+              )
             : holderReadFailedResponse();
         }
       }

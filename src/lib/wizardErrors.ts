@@ -6,6 +6,8 @@
  */
 
 import type { GateFailureCode } from "./strategyGate";
+import type { AccountHolder } from "./own-account-holder";
+import { formatDay } from "./utils";
 // ⚠️ LOAD-BEARING IMPORT PATH (Phase 140 / SEAM-04, blocker B-1). `seam-errors`
 // is the dependency-free LEAF: zero imports, zero env reads, zero module-load
 // side effects. This module is VALUE-imported by ten `"use client"` components
@@ -2833,9 +2835,19 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     title: "This key is already stored, but no strategy uses it.",
     cause:
       "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again is refused until the saved key is disconnected.",
+    // Founder 2026-11-25: entering a key you already stored usually means you
+    // want to FINISH that setup, so that remedy leads. ⚠️ The destination is
+    // verified: `/strategies` serves manager, allocator and `both`
+    // (`strategies/page.tsx`), and its "No strategy yet" rows are every live key
+    // with no live strategy, whatever the role (`getStrategylessActiveKeys`).
+    // They render below the strategies and only on the LAST page of a paged
+    // list (`StrategyTable.tsx`, `showPlaceholders`), so "at the end of the
+    // list" was only half the truth. The in-wizard "Finish setup" switch is not
+    // offered from this refusal: the saved-key step is chosen by the host that
+    // mounts the wizard (`preselectKey`), which the credential form cannot reach.
     fix: [
-      "Connect this strategy with a different account — one whose key is not already stored here.",
-      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "Or connect this strategy with a different account — one whose key is not already stored here.",
       "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.",
       "If the Strategies page does not list this key, send the correlation id below through the contact form.",
     ],
@@ -4780,6 +4792,15 @@ export interface WizardErrorContext {
    * `charCount` state for numbers).
    */
   strategyName?: string;
+  /**
+   * The caller's OWN strategy or key that already holds the account they just
+   * tried to add again (`own-account-holder.ts`), for `VENUE_ALREADY_CONNECTED`,
+   * `KEY_ORPHANED` and `KEY_VENUE_ALREADY_CONNECTED`. Shape-checked by
+   * `parseAccountHolder` before it gets here. ABSENT means "we were not told":
+   * every table `cause` is complete and true with no holder, and the naming
+   * sentence and the link are added only when this is present.
+   */
+  holder?: AccountHolder;
 }
 
 /**
@@ -4858,6 +4879,36 @@ function applyFixRequirements(
 }
 
 /**
+ * The text of the one link a holder-carrying refusal shows, or null when the
+ * code carries none. A strategy opens its factsheet; a stored key opens the
+ * Strategies page, where it is listed (and, for `KEY_ORPHANED`, where
+ * "Finish setup" is). The href is the holder's own, already shape-checked.
+ */
+export function holderLink(
+  code: WizardErrorCode,
+  holder: AccountHolder | undefined,
+): { label: string; href: string } | null {
+  if (holder === undefined) return null;
+  if (
+    code !== "VENUE_ALREADY_CONNECTED" &&
+    code !== "KEY_ORPHANED" &&
+    code !== "KEY_VENUE_ALREADY_CONNECTED"
+  ) {
+    return null;
+  }
+  if (holder.kind === "strategy") {
+    return { label: `Open “${holder.name}”`, href: holder.href };
+  }
+  return {
+    label:
+      code === "KEY_ORPHANED"
+        ? `Open Strategies to finish setup on “${holder.name}”`
+        : `Open Strategies to find “${holder.name}”`,
+    href: holder.href,
+  };
+}
+
+/**
  * Returns pure data (not JSX) so error copy can be tested, serialized
  * to PostHog, and rendered by multiple components with different markup.
  */
@@ -4916,16 +4967,45 @@ export function formatKeyError(
   // `undefined` or an empty pair of quotes. The blank check is deliberate —
   // `strategies.name` is NOT NULL at the database, but a whitespace-only value
   // would still produce a sentence pointing at nothing.
-  if (
-    code === "VENUE_ALREADY_CONNECTED" &&
-    context?.strategyName !== undefined &&
-    context.strategyName.trim().length > 0
-  ) {
+  const connectedName =
+    context?.strategyName !== undefined && context.strategyName.trim().length > 0
+      ? context.strategyName.trim()
+      : context?.holder?.kind === "strategy"
+        ? context.holder.name
+        : null;
+  if (code === "VENUE_ALREADY_CONNECTED" && connectedName !== null) {
     return {
       ...base,
-      cause:
-        `It is connected to "${context.strategyName.trim()}". ` + base.cause,
+      cause: `It is connected to "${connectedName}". ` + base.cause,
     };
+  }
+
+  // Founder 2026-11-25 — the same account on many accounts of the platform is
+  // fine; adding it twice from ONE account double-counts it. So the two key
+  // refusals name what the caller already has, from their OWN rows only
+  // (`own-account-holder.ts`), prepended like the arms around it so the table
+  // sentence stays intact and the copy degrades to it when there is no holder.
+  if (code === "KEY_ORPHANED" && context?.holder?.kind === "key") {
+    const added =
+      context.holder.added_at !== undefined && formatDay(context.holder.added_at) !== "—"
+        ? `, added ${formatDay(context.holder.added_at)}`
+        : "";
+    return {
+      ...base,
+      cause: `You already stored this account as your key "${context.holder.name}"${added}. ` + base.cause,
+    };
+  }
+  if (code === "KEY_VENUE_ALREADY_CONNECTED" && context?.holder !== undefined) {
+    const h = context.holder;
+    const lead =
+      h.kind === "strategy"
+        ? `Your strategy "${h.name}" already uses this account. `
+        : `Your key "${h.name}"${
+            h.added_at !== undefined && formatDay(h.added_at) !== "—"
+              ? `, added ${formatDay(h.added_at)},`
+              : ""
+          } already connects this account. `;
+    return { ...base, cause: lead + base.cause };
   }
 
   // 225-05 / CONN-01 — NAME THE DRAFT BY EXCHANGE AND NAME when we were given its

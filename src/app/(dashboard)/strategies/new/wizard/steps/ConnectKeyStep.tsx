@@ -11,6 +11,7 @@ import {
 } from "@/lib/wizardErrors";
 import { KNOWN_CREATE_WITH_KEY_CODES } from "@/lib/wizardKeyRosters";
 import { buildEnvelope } from "@/lib/envelope";
+import { parseAccountHolder, type AccountHolder } from "@/lib/own-account-holder";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
 import { ValidateWaitCard } from "../ValidateWaitCard";
 import {
@@ -703,6 +704,11 @@ export function ConnectKeyStep({
   const [existingStrategyName, setExistingStrategyName] = useState<
     string | null
   >(null);
+  // Founder 2026-11-25 — the caller's OWN strategy or stored key that already
+  // holds the account, from the refusal body. Per-failure on the same terms as
+  // the name above: set from the SAME response as `errorCode` and cleared with
+  // it, so a link from attempt 1 is never drawn under attempt 2's failure.
+  const [existingHolder, setExistingHolder] = useState<AccountHolder | null>(null);
   // UX-02: the wizard page-load correlation id — the fallback for the brief
   // window before any request has been made. See `requestCorrelationId`
   // below for the id an envelope actually prefers.
@@ -1109,6 +1115,7 @@ export function ConnectKeyStep({
     // docblock: a stale name is a specific lie about which strategy is in the
     // way.
     setExistingStrategyName(null);
+    setExistingHolder(null);
     // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
     // reason: a retry rendering the previous attempt's id is the defect D-14
     // closes.
@@ -1172,6 +1179,9 @@ export function ConnectKeyStep({
         // the name off the caller's own row. Typed as optional and read through
         // a `typeof` check below: absence is "we were not told", never a blank.
         strategy_name?: string;
+        // Founder 2026-11-25 — the caller's own strategy or key; shape-checked
+        // by `parseAccountHolder` below, never trusted as typed.
+        holder?: unknown;
         code?: string;
         error?: string;
       }>(res, "credential");
@@ -1197,6 +1207,7 @@ export function ConnectKeyStep({
             ? data.strategy_name
             : null,
         );
+        setExistingHolder(parseAccountHolder(data.holder));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -1364,6 +1375,7 @@ export function ConnectKeyStep({
     setErrorCode(null);
     setRetryAfterSeconds(null);
     setExistingStrategyName(null);
+    setExistingHolder(null);
     setReuseRequestShapeRefused(false);
     // 164.6.5-07 / D-14 — same reset rule as the credential arm above; both
     // arms share this one piece of state (see its docblock).
@@ -1398,6 +1410,9 @@ export function ConnectKeyStep({
         strategy_id?: string;
         api_key_id?: string;
         strategy_name?: string;
+        // Founder 2026-11-25 — the caller's own strategy or key; shape-checked
+        // by `parseAccountHolder` below, never trusted as typed.
+        holder?: unknown;
         code?: string;
         error?: string;
       }>(res, "reuse");
@@ -1417,6 +1432,7 @@ export function ConnectKeyStep({
             ? data.strategy_name
             : null,
         );
+        setExistingHolder(parseAccountHolder(data.holder));
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -1517,6 +1533,7 @@ export function ConnectKeyStep({
         // same reason the two lines above use it: absence must reach the copy as
         // "we were not told", never as an empty string it would print.
         strategyName: existingStrategyName ?? undefined,
+        holder: existingHolder ?? undefined,
       })
     : null;
 

@@ -60,6 +60,13 @@ import {
   afterSlotSwap,
 } from "@/lib/venue-identity";
 import { isWorkingHolder } from "@/lib/account-share-note";
+import {
+  holderField,
+  readOwnAccountHolder,
+  type AccountHolder,
+} from "@/lib/own-account-holder";
+
+const HOLDER_LOG_LABEL = "keys/validate-and-encrypt";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
@@ -541,12 +548,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
  * drift. The code stays a literal at the call site's grep distance; the
  * sentence names no account id and is venue-neutral.
  */
-function keyVenueAlreadyConnectedResponse(): NextResponse {
+function keyVenueAlreadyConnectedResponse(holder?: AccountHolder | null): NextResponse {
+  // The caller's OWN existing strategy or key, named and linked
+  // (`own-account-holder.ts`). Absent when it could not be read or when the
+  // holder is not known (the unique-index race arm). Built above the literal to
+  // keep the emitter inside the invariant scanner's `error:` window.
+  const extra = holderField(holder);
   return NextResponse.json(
     {
       code: "KEY_VENUE_ALREADY_CONNECTED",
       error:
         "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+      ...extra,
     },
     { status: 409, headers: NO_STORE_HEADERS },
   );
@@ -857,7 +870,9 @@ async function legacyValidateAndEncryptHandler(args: {
       } else {
         const holder = pickSameAccountHolder(rows, venueServer, "fence");
         if (holder !== null && isWorkingHolder(holder)) {
-          return keyVenueAlreadyConnectedResponse();
+          return keyVenueAlreadyConnectedResponse(
+            await readOwnAccountHolder(admin, userId, holder.id, HOLDER_LOG_LABEL),
+          );
         }
         // A holder that is not working (D-18) gives way to this key, which
         // `validateKey` just proved works: the key is inserted with no identity
@@ -896,7 +911,11 @@ async function legacyValidateAndEncryptHandler(args: {
             });
             return holderReadFailedResponse();
           }
-          if (dependent) return keyVenueAlreadyConnectedResponse();
+          if (dependent) {
+            return keyVenueAlreadyConnectedResponse(
+              await readOwnAccountHolder(admin, userId, holder.id, HOLDER_LOG_LABEL),
+            );
+          }
           failingHolderId = holder.id;
         }
       }
@@ -1124,7 +1143,9 @@ async function legacyValidateAndEncryptHandler(args: {
           const isSlotRefusal =
             typeof swapMessage === "string" && /ACCOUNT_SLOT_[A-Z_]+/.test(swapMessage);
           return isSlotRefusal
-            ? keyVenueAlreadyConnectedResponse()
+            ? keyVenueAlreadyConnectedResponse(
+                await readOwnAccountHolder(admin, userId, failingHolderId, HOLDER_LOG_LABEL),
+              )
             : holderReadFailedResponse();
         }
       }

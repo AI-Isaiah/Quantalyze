@@ -17,6 +17,7 @@
 // objective for full rationale.
 import {
   formatKeyError,
+  holderLink,
   type WizardErrorCode,
   type WizardErrorContext,
   type WizardErrorAction,
@@ -49,6 +50,14 @@ export interface ErrorEnvelope {
    * six siblings there.
    */
   retry_after_seconds?: number;
+  /**
+   * Founder 2026-11-25 — a link to the caller's OWN strategy or stored key that
+   * already holds the account they tried to add again. Same additive-optional
+   * contract as `cause`: absent when the refusal named nothing, and the
+   * renderer then draws no link. `href` is an in-app path, shape-checked on
+   * arrival (`parseAccountHolder`).
+   */
+  holder_link?: { label: string; href: string };
 }
 
 const RECOVERABLE_ACTIONS: ReadonlySet<WizardErrorAction> = new Set([
@@ -78,6 +87,7 @@ export function buildEnvelope(
   context?: WizardErrorContext,
 ): ErrorEnvelope {
   const copy = formatKeyError(code, context);
+  const link = holderLink(code, context?.holder);
   return {
     ok: false,
     code,
@@ -87,5 +97,6 @@ export function buildEnvelope(
     correlation_id,
     recoverable: copy.actions.some((a) => RECOVERABLE_ACTIONS.has(a)),
     retry_after_seconds: context?.retryAfterSeconds,
+    ...(link === null ? {} : { holder_link: link }),
   };
 }

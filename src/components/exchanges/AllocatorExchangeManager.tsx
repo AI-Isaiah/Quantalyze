@@ -80,6 +80,7 @@ import {
 import { KEY_STORAGE_LINK, KEY_STORAGE_SENTENCE } from "@/lib/status-surface-copy";
 import { AllocatorSyncStatus } from "./AllocatorSyncStatus";
 import { buildEnvelope, type ErrorEnvelope } from "@/lib/envelope";
+import { parseAccountHolder } from "@/lib/own-account-holder";
 import { recogniseValidateAndEncryptCode } from "@/lib/wizardErrors";
 import { newCorrelationId } from "@/lib/correlation-id-client";
 
@@ -1524,7 +1525,10 @@ export function AllocatorExchangeManager({
           response.status,
         );
         const curated = result.error;
-        const base = buildEnvelope(code, correlationId);
+        // Founder 2026-11-25 — name and link the caller's OWN key or strategy that
+        // already holds this account, when the refusal carries one.
+        const holder = parseAccountHolder(result.holder);
+        const base = buildEnvelope(code, correlationId, holder ? { holder } : undefined);
         // ⭐ 212 review WR-02 — the curated fallback is a 4xx rule (UI-SPEC SC3
         // rule 5). A 5xx carrying a FORWARDED service code (`KEK_UNAVAILABLE`,
         // ...) is an operator fault: the static "Key validation failed" sentence

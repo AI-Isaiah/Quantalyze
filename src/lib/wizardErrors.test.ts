@@ -7010,7 +7010,11 @@ describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path t
     // Finish setup contradicts.
     expect(entry.cause).not.toMatch(/cannot build a new strategy/);
     expect(entry.cause).toMatch(/credentials again is refused until the saved key is disconnected/);
-    expect(entry.fix[1]).toMatch(/Where that row offers “Finish setup”, it builds the strategy from the stored key/);
+    // ⛔ SUPERSEDED 2026-11-25 (founder: entering a stored key means "I want to
+    // finalize the setup"): the Finish setup remedy now LEADS, as fix[0], and the
+    // "different account" bullet follows it. The intent stands: the cause names
+    // the act that fails and the fix still offers Finish setup.
+    expect(entry.fix[0]).toMatch(/Where that row offers “Finish setup”, it builds the strategy from the stored key/);
   });
 
   it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
@@ -7153,8 +7157,12 @@ describe("201 D-07: the wizard names the Strategies page, never My Strategies", 
     // conditional "If your account includes the Strategies page, look for this
     // account there…" is gone, because every role that reaches this refusal now
     // has that page. The 201 D-07 intent stands: the sentence names "Strategies".
+    // ⛔ SUPERSEDED 2026-11-25: the sentence now leads the list and says where the
+    // row sits ("below your strategies, on the last page if the list is paged",
+    // `StrategyTable.tsx` renders placeholders only on the last page). It still
+    // names "Strategies".
     expect(WIZARD_ERROR_COPY.KEY_ORPHANED.fix).toContain(
-      "On the Strategies page, this account is listed at the end of the list, marked “No strategy yet”. Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
+      "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
     );
     expect(WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.fix).toContain(
       "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",

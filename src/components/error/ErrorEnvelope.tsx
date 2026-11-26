@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
 import { ContactPointerText } from "@/components/contact/ContactPointerText";
@@ -182,6 +183,23 @@ export function ErrorEnvelope({
         // on bg-negative/5.
         <p className="mt-1.5 text-sm text-text-secondary">
           {pointer(envelope.cause)}
+        </p>
+      )}
+      {envelope.holder_link && (
+        // Founder 2026-11-25 — the person's own strategy or stored key that
+        // already holds this account. New tab, like the contact pointers: the
+        // envelope sits over unsaved state.
+        <p className="mt-1.5 text-sm">
+          <Link
+            href={envelope.holder_link.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-accent underline underline-offset-4"
+            data-testid="error-envelope-holder-link"
+          >
+            {envelope.holder_link.label}
+            <span className="sr-only"> (opens in a new tab)</span>
+          </Link>
         </p>
       )}
       {envelope.debug_context.length > 0 && (

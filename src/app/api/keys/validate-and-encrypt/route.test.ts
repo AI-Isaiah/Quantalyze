@@ -118,6 +118,17 @@ const {
     dependentResult: null as { data: unknown; error: unknown } | null,
     /** The filters of every such read. */
     dependentReads: [] as Record<string, unknown>[],
+    /**
+     * Founder 2026-11-25 — the refusal's reads of the caller's OWN strategy or
+     * key (`own-account-holder.ts`): `strategies`, `strategy_keys`, or
+     * `api_keys` selecting `label, created_at`. `holderLookup` answers them from
+     * a fixture; null = nothing to name. `holderReads` records every one with
+     * its filters, so a test can prove each carried the caller's id.
+     */
+    holderLookup: null as
+      | null
+      | ((table: string, filters: Record<string, unknown>) => { data: unknown; error: unknown }),
+    holderReads: [] as Record<string, unknown>[],
   },
 }));
 
@@ -166,6 +177,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               filters[`${col}:is`] = val;
               return builder;
             },
+            // 225 review M-1 — the own-account holder read's status filters.
+            neq: (col: string, val: unknown) => {
+              filters[`${col}:neq`] = val;
+              return builder;
+            },
+            not: (col: string, op: string, val: unknown) => {
+              filters[`${col}:not.${op}`] = val;
+              return builder;
+            },
             order: (_col: string) => builder,
             limit: (_n: number) => builder,
             maybeSingle: async () => {
@@ -175,6 +195,16 @@ vi.mock("@/lib/supabase/admin", () => ({
               if ("account_share_kind" in filters) {
                 PERSIST_STATE.dependentReads.push({ __table: table, ...filters });
                 return PERSIST_STATE.dependentResult ?? { data: null, error: null };
+              }
+              if (
+                table === "strategies" ||
+                table === "strategy_keys" ||
+                (table === "api_keys" && _cols === "label, created_at")
+              ) {
+                PERSIST_STATE.holderReads.push({ __table: table, __cols: _cols, ...filters });
+                return PERSIST_STATE.holderLookup
+                  ? PERSIST_STATE.holderLookup(table, filters)
+                  : { data: null, error: null };
               }
               PERSIST_STATE.stampReads.push({ __table: table, __cols: _cols, ...filters });
               return PERSIST_STATE.stampResult ?? { data: { venue_account_id: null }, error: null };
@@ -3072,6 +3102,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     PERSIST_STATE.stampReads.length = 0;
     PERSIST_STATE.dependentResult = null;
     PERSIST_STATE.dependentReads.length = 0;
+    PERSIST_STATE.holderLookup = null;
+    PERSIST_STATE.holderReads.length = 0;
     process.env.MT5_ENABLED = "true";
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -3158,6 +3190,106 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(await res.json()).toEqual(REFUSAL);
     expect(PERSIST_STATE.inserts).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
+  });
+
+  // ── Founder 2026-11-25: the refusal names the caller's OWN strategy or key ──
+  // The same account on many accounts of the platform is fine; one person adding
+  // it twice double-counts it. So the 409 says WHAT they already hold and links
+  // to it, from their own rows only. The fixture below is a tiny owner-aware
+  // table: it filters on whichever of `user_id` / `owner_id` the route sent, and
+  // the FOREIGN rows come first and share the holder's key id, so a route that
+  // dropped its owner filter would name the foreign row and these cases go red.
+  describe("own-account holder on the refusal", () => {
+    const FOREIGN = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+    function fixtureDb(rows: {
+      strategies?: Record<string, unknown>[];
+      strategy_keys?: Record<string, unknown>[];
+      api_keys?: Record<string, unknown>[];
+    }) {
+      PERSIST_STATE.holderLookup = (table, filters) => {
+        const pool = (rows as Record<string, Record<string, unknown>[]>)[table] ?? [];
+        const hit = pool.find((r) =>
+          Object.entries(filters).every(([k, v]) => !(k in r) || r[k] === v),
+        );
+        return { data: hit ?? null, error: null };
+      };
+    }
+
+    it("a holder key with NO strategy is named by nickname and date and linked to /strategies; a foreign key on the same id is never named", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        api_keys: [
+          { user_id: FOREIGN, id: HOLDER_ID, label: "Foreign Desk Key", created_at: "2020-01-01T00:00:00Z" },
+          { user_id: TEST_USER.id, id: HOLDER_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" },
+        ],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text)).toEqual({
+        ...REFUSAL,
+        holder: { kind: "key", name: "Test", added_at: "2026-11-19T10:00:00Z", href: "/strategies" },
+      });
+      expect(text).not.toContain("Foreign Desk Key");
+      expect(text).not.toContain(FOREIGN);
+      expect(text).not.toContain(LOGIN);
+      expect(text).not.toContain(HOLDER_ID);
+    });
+
+    it("a holder key WITH a strategy names the strategy and links to its factsheet; a foreign strategy is never named", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        strategies: [
+          { user_id: FOREIGN, api_key_id: HOLDER_ID, id: "ffffffff-ffff-4fff-8fff-ffffffffffff", name: "Foreign Fund", status: "published" },
+          { user_id: TEST_USER.id, api_key_id: HOLDER_ID, id: "11111111-1111-4111-8111-111111111111", name: "My Fund", status: "published" },
+        ],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+      const text = await res.text();
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(text).holder).toEqual({
+        kind: "strategy",
+        name: "My Fund",
+        href: "/factsheet/11111111-1111-4111-8111-111111111111?from=strategies",
+      });
+      expect(text).not.toContain("Foreign Fund");
+      expect(text).not.toContain("ffffffff");
+    });
+
+    it("every holder read carries the CALLER's id, and the refusal rule itself is unchanged (409, zero inserts, zero rpc)", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      fixtureDb({
+        api_keys: [{ user_id: TEST_USER.id, id: HOLDER_ID, label: "Test", created_at: "2026-11-19T10:00:00Z" }],
+      });
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(409);
+      expect(PERSIST_STATE.holderReads.length).toBeGreaterThan(0);
+      for (const read of PERSIST_STATE.holderReads) {
+        expect(read.user_id ?? read.owner_id, `${String(read.__table)} read was not owner-scoped`).toBe(TEST_USER.id);
+      }
+      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    });
+
+    it("a faulted holder read leaves the refusal byte-identical to before (no holder, same 409)", async () => {
+      PERSIST_STATE.sameLoginRows = [holderRow()];
+      PERSIST_STATE.holderLookup = () => ({ data: null, error: { code: "XX000", message: "boom" } });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { POST } = await import("./route");
+      const res = await POST(mt5Add());
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"KEY_VENUE_ALREADY_CONNECTED","error":"This exchange account is already connected on your account. Use the key you already have, or disconnect it first."}',
+      );
+      consoleErr.mockRestore();
+    });
   });
 
   it("an MT5 add beside a same-login owner key with a NULL server is refused (null is the wildcard, Q2)", async () => {
