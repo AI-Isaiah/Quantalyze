@@ -7258,7 +7258,10 @@ describe("[212-04] recogniseValidateAndEncryptCode — status decides who thrott
     expect(text).toContain("investor");
     expect(text).toContain("server");
     expect(env.cause).not.toMatch(/did not (get far enough|complete)/i);
-    expect(env.cause).toContain("we cannot tell which one it is");
+    expect(env.cause).toContain("we cannot tell you which to check first");
+    // -6 also covers a refusal none of the three explains (a disabled account), so
+    // the card keeps the contact-form route its KEY_SIGN_IN_FAILED predecessor had.
+    expect(text).toContain("through the contact form");
   });
 
   it("a verdict outside the caller-fault set, or at a 5xx, is UNKNOWN and NOT recognised", () => {

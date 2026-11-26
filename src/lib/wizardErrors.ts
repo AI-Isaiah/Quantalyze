@@ -3057,15 +3057,16 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   KEY_MT5_SIGN_IN_REFUSED: {
     title: "Your broker refused this sign-in.",
     cause:
-      "Your broker answered and refused the sign-in. MT5 gives the same answer for a wrong account number, a wrong investor password and a wrong server, so we cannot tell which one it is.",
+      "Your broker answered and refused the sign-in. MT5 gives the same answer for a wrong account number, a wrong investor password and a wrong server, so we cannot tell you which to check first.",
     fix: [
       "Check the account number (login) is the account you want to connect.",
       "Check the investor (read-only) password. Your broker can reset it, and changing the master password changes it too.",
       "Check the server: copy it exactly from your MT5 terminal's login window. Another server of the same broker refuses the sign-in.",
       "Then submit again with the corrected details. The same details unchanged get the same answer.",
+      "If all three are right and this keeps happening, send the correlation id below through the contact form.",
     ],
     // Index-aligned to `fix`.
-    fixRequires: [null, null, null, NOT_ON_PRESELECT_SURFACE],
+    fixRequires: [null, null, null, NOT_ON_PRESELECT_SURFACE, null],
     docsHref: "/security#readonly-key",
     actions: ["request_call", "expand_log"],
   },
