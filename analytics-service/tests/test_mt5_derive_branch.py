@@ -3611,9 +3611,17 @@ def _assert_refused_poll_stored_nothing(result, capture, transport, caplog, *, v
     assert len(verdicts) == 1, verdicts
     assert f"session_server_matches_requested={verdict}" in verdicts[0]
     assert f"holder={_VERDICT_KEY_ID}" in verdicts[0]
-    # the arm's WARNING names the server mismatch
-    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("on another broker server" in w for w in warnings), warnings
+    # review round 1 (MEDIUM-1/2): the arm logs the server refusal at ERROR (so it reaches
+    # Sentry), naming the server bracket, the exception class and the key; never the
+    # login-bracket WARNING, which names the wrong cause.
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "server bracket refused" in errors[0]
+    assert "Mt5ServerMismatchError" in errors[0]
+    assert f"key={_VERDICT_KEY_ID}" in errors[0]
+    assert not any(
+        "login bracket rejected" in r.getMessage() for r in caplog.records
+    ), "the server refusal was logged as a login-bracket mismatch"
     # the message classifies transient (code 0 so the IPC transport table cannot answer)
     message = result.error_message or ""
     assert message

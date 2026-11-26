@@ -942,8 +942,8 @@ async def _fetch_mt5_account_balance(
     except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 — best-effort read
         logger.warning(
             "sync_trades: mt5 balance read failed — continuing without a "
-            "balance snapshot (exc_class=%s scrubbed=%s)",
-            type(exc).__name__, scrub_freeform_string(str(exc)),
+            "balance snapshot (key=%s exc_class=%s scrubbed=%s)",
+            api_key_id, type(exc).__name__, scrub_freeform_string(str(exc)),
         )
         return None
 
@@ -8361,6 +8361,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             from services.mt5_client import (
                 Mt5AccountMismatchError,
                 Mt5ClientError,
+                Mt5ServerMismatchError,
                 Mt5SessionAbandoned,
                 mt5_history_wait_due,
             )
@@ -8711,12 +8712,27 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     #     numbers. Because Mt5AccountMismatchError is NOT an
                     #     Mt5ClientError, the classify/stamp arm below cannot absorb
                     #     it. The message carries ONLY the two int logins.
-                    logger.warning(
-                        "derive_broker_dailies: mt5 login bracket rejected a "
-                        "mismatched terminal account (%s) — classified transient, "
-                        "restarting the terminal; NOTHING persisted (MT5CONC-02)",
-                        str(exc),
-                    )
+                    if isinstance(exc, Mt5ServerMismatchError):
+                        # 225-21 review round 1 (MEDIUM-1/2): the server bracket
+                        # refused. ERROR, not warning — a persistent false refusal (a
+                        # broker spelling its server differently, or reporting none)
+                        # would otherwise stop this key's data with only a WARNING.
+                        # Same disposition as below: the bounded restart stays, since
+                        # a real stale session on another server is healed by it.
+                        logger.error(
+                            "derive_broker_dailies: mt5 server bracket refused the "
+                            "terminal session (%s, key=%s) — classified transient, "
+                            "restarting the terminal; NOTHING persisted",
+                            type(exc).__name__,
+                            ctx.key_row.get("id"),
+                        )
+                    else:
+                        logger.warning(
+                            "derive_broker_dailies: mt5 login bracket rejected a "
+                            "mismatched terminal account (%s) — classified transient, "
+                            "restarting the terminal; NOTHING persisted (MT5CONC-02)",
+                            str(exc),
+                        )
                     await _mt5_bounded_restart(_mt5_session.client)
                     return DispatchResult(
                         outcome=DispatchOutcome.FAILED,

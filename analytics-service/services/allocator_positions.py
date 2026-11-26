@@ -79,6 +79,7 @@ from services.db import db_execute, db_read_with_retry_sync
 from services.mt5_client import (
     Mt5AccountMismatchError,
     Mt5ClientError,
+    Mt5ServerMismatchError,
     Mt5SessionAbandoned,
     Mt5Session,
 )
@@ -1087,6 +1088,26 @@ async def _fetch_mt5_account_rows(
                 # int logins) reaches the log and the exception chain, never the
                 # user-visible copy; the server subclass (225-21) carries a fixed
                 # message with no server value and no login instead.
+                if isinstance(exc, Mt5ServerMismatchError):
+                    # 225-21 review round 1 (MEDIUM-1/2): the server bracket refused.
+                    # ERROR, not warning — a persistent false refusal (a broker
+                    # spelling its server differently, or reporting none) would
+                    # otherwise stop this key's holdings with only a WARNING. The
+                    # bounded restart stays, since a real stale session on another
+                    # server is healed by it. Early exit (not an else) keeps the
+                    # `str(exc)` logger call below at the arm's top level, which the
+                    # AUM-02 AST gate in test_allocator_positions_non_ccxt.py requires.
+                    logger.error(
+                        "poll_allocator_positions: mt5 server bracket refused the "
+                        "terminal session (%s, key=%s) — classified transient, "
+                        "restarting the terminal; NO row emitted",
+                        type(exc).__name__,
+                        api_key_id,
+                    )
+                    await _mt5_bounded_restart(
+                        session.client, log_prefix="poll_allocator_positions"
+                    )
+                    raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE) from exc
                 logger.warning(
                     "poll_allocator_positions: mt5 login bracket rejected a "
                     "mismatched terminal account (%s) — classified transient, "
