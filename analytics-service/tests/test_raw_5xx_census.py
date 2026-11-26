@@ -298,7 +298,13 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: in ``routers/internal.py::rotate_key_secret`` raises the same flat ``VENUE_DISABLED``
 #: 400 (a live probe against a dark venue is refused before the KEK load, the decrypt and
 #: the probe). 4xx again, status set unchanged.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 27
+#: 27 -> 28 (2026-11-25, Phase 225 SIGNINREFUSED): the MT5 validate probe's login-stage
+#: refusal arm splits on ``last_error`` -6 (``RES_E_AUTH_FAILED``). A -6 now answers a
+#: second ``VenueTransientHTTPException(424, recoverable=False)`` with the new wire code
+#: ``MT5_SIGN_IN_REFUSED`` (the wizard maps it to ``KEY_MT5_SIGN_IN_REFUSED`` in
+#: ``VENUE_WIRE_CODE_TO_VERDICT``); every other login-stage code keeps ``SIGN_IN_FAILED``.
+#: A 4xx, so blind spot (b) stays LATENT, and the status set stays {400, 424}.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 28
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

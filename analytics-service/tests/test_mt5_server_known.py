@@ -294,6 +294,19 @@ def test_server_unknown_detail_collides_with_no_cascade_needle():
     assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
 
 
+def test_sign_in_refused_detail_collides_with_no_cascade_needle():
+    """Phase 225 (SIGNINREFUSED). The -6 refusal's detail is forwarded by the dashboard
+    key forms, where a 4xx `detail` meets the SAME substring cascade, so the wire code
+    must be the only way it is recognised. `broker server` in particular would turn it
+    into KEY_MT5_WRONG_SERVER, and `master password` into KEY_MT5_MASTER_PASSWORD."""
+    from services.closed_sets import MT5_SIGN_IN_REFUSED_DETAIL
+
+    lower = MT5_SIGN_IN_REFUSED_DETAIL.lower()
+    hits = [n for n in _CASCADE_NEEDLES if n in lower]
+    assert hits == [], f"MT5_SIGN_IN_REFUSED_DETAIL collides with cascade needle(s) {hits}"
+    assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
+
+
 def test_terminal_busy_detail_collides_with_no_cascade_needle():
     """Phase 164.6.6.3.2 D-02. The busy refusal's detail is forwarded VERBATIM by the
     dashboard key forms (`src/app/api/keys/validate-and-encrypt/route.ts`), where a 4xx

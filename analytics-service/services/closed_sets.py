@@ -117,6 +117,22 @@ MT5_SERVER_UNKNOWN_DETAIL = (
     "spelling of the name; if it is right, we have been notified and will add it."
 )
 
+# Phase 225 (SIGNINREFUSED) - the refusal for a login-stage `last_error` of exactly -6
+# (`RES_E_AUTH_FAILED`, "authorization failed" in the MT5 Python docs' `mt5lasterror_py`
+# table). The broker ANSWERED and refused, so unlike `SIGN_IN_FAILED_DETAIL`
+# (`services/exchange.py`, "did not complete") this may say so. Emitted ONLY by the
+# validate surface (`routers/exchange.py::_validate_mt5_key_probe`); the poll paths never
+# read it. -6 is the same answer for a wrong login, a wrong investor password and a wrong
+# server, so the detail names all three and never claims one.
+# ⛔ It is forwarded by the dashboard key forms, where a 4xx `detail` meets the TypeScript
+# classifier's substring cascade, so it must hit no needle (`"broker server"` in
+# particular, which would make it KEY_MT5_WRONG_SERVER); `tests/test_mt5_server_known.py::
+# test_sign_in_refused_detail_collides_with_no_cascade_needle` sweeps it.
+MT5_SIGN_IN_REFUSED_DETAIL = (
+    "Your broker answered and refused this sign-in. Check the account number, the "
+    "investor password and the server name."
+)
+
 # Phase 164.6.6.3.2 D-02 - the refusal when the validation terminal cannot take this
 # check right now: it owes a scrub or a relaunch from an earlier check
 # (`routers/exchange.py`, the owed-scrub gate), or it is still held when the interactive

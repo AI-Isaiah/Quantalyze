@@ -1271,14 +1271,21 @@ async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
     client.release.assert_called_once()
 
 
-@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [p for p in _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL if p.values[0] != -6],
+)
 async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
     exchange_router, code, detail
 ):
     """167 CR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
-    login-stage -10005, 0 or -6 is a refused sign-in: `424 SIGN_IN_FAILED`,
-    `recoverable=False`. The -10005 case is the one D-08 is written about (the
-    modal login dialog a wrong password raises), and the classifier's own
+    login-stage -10005 or 0 is a refused sign-in: `424 SIGN_IN_FAILED`,
+    `recoverable=False`. (⭐ Phase 225: a login-stage -6 is the one refusal code
+    that answers `MT5_SIGN_IN_REFUSED` instead, pinned below; the -6 case is
+    filtered out of this parametrization, and `is_mt5_login_refusal` still holds
+    for it, `test_login_stage_sign_in_answer_is_a_refusal`.) The -10005 case is
+    the one D-08 is written about (the modal login dialog a wrong password
+    raises), and the classifier's own
     -10005 code-gate must not pre-empt it into `NETWORK_UNAVAILABLE`: it answers
     `transient`, which is the tail the predicate splits."""
     router = exchange_router
@@ -1293,6 +1300,39 @@ async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
         f"a login-stage refusal with code {code} was not answered SIGN_IN_FAILED"
     )
     assert getattr(ei.value, "code", None) == "SIGN_IN_FAILED"
+    assert getattr(ei.value, "recoverable", None) is False, (
+        "a refused sign-in must not offer a Retry: it re-sends the same "
+        "credential to the one shared terminal (D-08)"
+    )
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_stage_minus_6_answers_sign_in_refused(exchange_router):
+    """Phase 225 (SIGNINREFUSED), end to end through `_validate_mt5_key_probe` — a
+    login-stage `last_error` of exactly -6 (`RES_E_AUTH_FAILED`, "authorization
+    failed") answers `424 MT5_SIGN_IN_REFUSED`, `recoverable=False`, with the honest
+    detail, and never the `SIGN_IN_FAILED` answer whose detail says the attempt "did
+    not complete". The broker answered and refused; MEASURED on PROD 2026-11-25 with a
+    wrong server and a real investor password (~0.5 s). The sibling test above
+    (-10005 and 0 still answer `SIGN_IN_FAILED`) is what fails if this branch is
+    widened past exactly -6."""
+    from services.closed_sets import MT5_SIGN_IN_REFUSED_DETAIL
+
+    router = exchange_router
+    client = _make_client(
+        login_raises=Mt5LoginRefusedError(-6, "Authorization failed")
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert getattr(ei.value, "code", None) == "MT5_SIGN_IN_REFUSED"
+    assert ei.value.detail == MT5_SIGN_IN_REFUSED_DETAIL
+    assert ei.value.detail != SIGN_IN_FAILED_DETAIL
     assert getattr(ei.value, "recoverable", None) is False, (
         "a refused sign-in must not offer a Retry: it re-sends the same "
         "credential to the one shared terminal (D-08)"
