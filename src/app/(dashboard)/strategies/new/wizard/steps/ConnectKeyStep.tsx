@@ -1463,6 +1463,8 @@ export function ConnectKeyStep({
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
         const code = recogniseCreateWithKeyCode(data);
         setErrorCode(code);
+        // 2026-11-26: the stored key is gone, so "Finish setup" on it cannot work.
+        if (code === "KEY_REUSE_UNAVAILABLE") setOrphanTarget(null);
         // 162-06 review / B-1 — see the state's docblock. A 400 on THIS arm is a
         // refusal of the body we built out of a prop and wizard state, neither
         // of which this screen can edit, so "send it again" is not a remedy and

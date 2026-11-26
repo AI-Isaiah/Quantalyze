@@ -2631,6 +2631,9 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Press “Continue with this key” once more. If the clash was a race with your own first press, we hand that draft back and carry on from where it stopped — nothing is created twice.",
       "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Send the correlation id below through the contact form. Nothing was created by this attempt.",
     ],
+    // 2026-11-26 (finish setup in place): the credential form's reuse button is
+    // not “Continue with this key”, so that bullet is the saved-key summary's only.
+    fixRequires: [REQUIRES_PRESELECT_SURFACE, null],
     docsHref: "/security#draft-resume",
     // ⛔ NEITHER MEMBER OF `RECOVERABLE_ACTIONS`, for the reason the entry above
     // states in full: the action the first bullet names IS the step's painted
@@ -2965,6 +2968,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If you arrived from Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
       "If neither clears it, send the correlation id below through the contact form.",
     ],
+    // 2026-11-26 (finish setup in place): the credential form now sends the reuse
+    // POST too, and it has no “Use a different key” control, so that bullet is
+    // the saved-key summary's only.
+    fixRequires: [REQUIRES_PRESELECT_SURFACE, null, null],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry` — see the union member's
     // docblock. ⛔ AND NEITHER `resume_draft` NOR `start_fresh`: no draft was

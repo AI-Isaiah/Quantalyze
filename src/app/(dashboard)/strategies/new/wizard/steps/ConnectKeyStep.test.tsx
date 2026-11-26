@@ -2422,6 +2422,40 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
     errSpy.mockRestore();
   });
 
+  // Review round 1: the reuse refusal on the credential form names no control
+  // that is not there, and a key that is gone takes its button with it.
+  it("a stored key gone before the in-place Finish setup: no preselect-only bullet, and the button is withdrawn", async () => {
+    const STORED = "55555555-5555-4555-8555-555555555555";
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            code: "KEY_ORPHANED",
+            error: "This key is already stored, but no strategy uses it.",
+            holder: { kind: "key", name: "Test", href: "/strategies", api_key_id: STORED },
+          },
+          409,
+        ),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ code: "KEY_REUSE_UNAVAILABLE", error: "x" }, 409),
+      );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const finish = await screen.findByTestId("wizard-orphan-finish-setup");
+    await act(async () => {
+      fireEvent.click(finish);
+    });
+
+    const envelope = await screen.findByTestId("error-envelope");
+    await vi.waitFor(() => expect(envelope).toHaveAttribute("data-error-code", "KEY_REUSE_UNAVAILABLE"));
+    expect(envelope).not.toHaveTextContent("Use a different key");
+    expect(envelope).toHaveTextContent("reload that page first");
+    expect(screen.queryByTestId("wizard-orphan-finish-setup")).toBeNull();
+  });
+
   it("[228-02 / CONN-04] KEY_ORPHANED's Disconnect bullet names the key when the holder is a key", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
