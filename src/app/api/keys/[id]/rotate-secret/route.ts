@@ -5,14 +5,12 @@ import { assertSameOrigin } from "@/lib/csrf";
 import * as approvalGate from "@/lib/api/approval-gate";
 import { isUuid } from "@/lib/utils";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
-import { resilientFetch } from "@/lib/resilient-fetch";
-import { SeamBodyReadError } from "@/lib/seam-errors";
-import { seamHumanMessage, seamErrorCode } from "@/lib/seam-discriminator";
 import {
   classifyKeyValidationError,
   OUR_DEFECT_KEY_ERROR_CODES,
 } from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
+import { rotateKeySecret } from "@/lib/analytics-client";
 import { RotateSecretResponseSchema } from "@/lib/analytics-schemas";
 import { pgConstraintName, VENUE_IDENTITY_CONSTRAINT } from "@/lib/api/pgConstraintName";
 import { getCorrelationId } from "@/lib/correlation-id";
@@ -85,7 +83,9 @@ import type { z } from "zod";
  *      keyed `keys-rotate-secret:<uid>`, the same bucket family and ordering
  *      every `keys/**` mutation route already uses (a rejected request never
  *      burns a token; the caller's own request shape is what dictated it).
- *   8. The Python seam call (`resilientFetch("keys-rotate-secret", ...)`) —
+ *   8. The Python seam call (`resilientFetch("keys-rotate-secret", ...)`,
+ *      which lives in `rotateKeySecret` in src/lib/analytics-client.ts since
+ *      Phase 228, shared with create-with-key's MT5 same-account arm) —
  *      decrypts the stored row, re-validates the NEW password against the
  *      live broker, re-encrypts on success. NEVER retried
  *      (`retriesOverride: 0`): this is the identical non-idempotent
@@ -294,120 +294,11 @@ export async function PATCH(
 
   let parsed: z.infer<typeof RotateSecretResponseSchema>;
   try {
-    const res = await resilientFetch(
-      "keys-rotate-secret",
-      `/internal/keys/${encodeURIComponent(id)}/rotate-secret`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Internal-Token": process.env.INTERNAL_API_TOKEN!,
-          "X-Correlation-Id": correlationId,
-        },
-        // 164.5.3 review follow-up — `user_id` is the OWNER-SCOPING half of
-        // the seam's defense-in-depth. The Python endpoint
-        // (`rotate_key_secret`) accepts it as an OPTIONAL field and, when
-        // present, filters its row load by it so a mismatched owner 404s
-        // BEFORE any decrypt. Without this line that hardening is inert:
-        // the field only helps once a caller sends it, and this route is
-        // its only caller. ⛔ It is NOT the primary control — ownership is
-        // already proven above by the user-scoped pre-read and re-asserted
-        // by the admin UPDATE's own `.eq("user_id", ...)`. It exists so a
-        // holder of INTERNAL_API_TOKEN cannot use the seam as a
-        // rate-limited password oracle against an arbitrary key id.
-        body: JSON.stringify({ new_secret: newSecret, user_id: user.id }),
-        // Non-idempotent live-credential probe, same reasoning as
-        // validate-key-serialized (D-07 in resilient-fetch.ts): a retry would
-        // double the wall-clock SC-4b charge against this route's ceiling for
-        // a call that re-probes the venue.
-        retriesOverride: 0,
-      },
-    );
-
-    if (!res.ok) {
-      const errBody = await res.json().catch((readErr: unknown) => {
-        if (readErr instanceof SeamBodyReadError) throw readErr;
-        return {};
-      });
-      // WR-01 (164.5.3 review) — carry the seam's own machine code forward.
-      // Before this, the thrown Error carried ONLY the human sentence, so
-      // `classifyKeyValidationError`'s machine-code branch (`seamCode`, read
-      // BEFORE the substring cascade) always saw `undefined` and every
-      // non-MT5-specific Python failure — RATE_LIMITED, KEK_UNAVAILABLE,
-      // MT5_GATEWAY_UNCONFIGURED — fell through to the terminal UNKNOWN/500.
-      // (CORRECTED 2026-10-07, Phase 164.6.6.3.2 D-01: the env-gap arms of that last
-      // code now arrive as MT5_VALIDATION_UNCONFIGURED, carried the same way; the
-      // sentence above describes the state before WR-01 and is kept as lineage.)
-      // `seamCode` is read as a plain, typeof-guarded OWN property (never
-      // `instanceof`) — the same shape `AnalyticsUpstreamError` sets — so this
-      // survives every wholesale seam mock in the suite identically.
-      //
-      // ✅ 164.5.4-02 / D-03 — THE `KEY_UNDECRYPTABLE` RESIDUAL THIS BLOCK USED
-      // TO FLAG IS CLOSED, and what shipped is recorded here rather than only
-      // in the table, because the next reader arriving from that phase's
-      // CONTEXT.md will find a superseded bullet forbidding half of it.
-      //
-      // WHAT THE FOUNDER USED TO GET. `rotate_key_secret` raises wire
-      // `KEY_UNDECRYPTABLE` — 500, `retryable=False`, "This stored key could
-      // not be decrypted. It must be reconnected." — when `decrypt_credentials`
-      // fails on the row it was asked to re-secret. The code had no verdict row
-      // and the cascade has no decrypt branch, so it fell to the terminal
-      // UNKNOWN: "we could not classify this failure", beside a Retry control
-      // that could never work.
-      //
-      // WHAT SHIPPED, and it is BOTH halves together:
-      //   · a new `WizardErrorCode` member, `KEY_MUST_BE_RECONNECTED`, whose
-      //     `actions` carry neither member of `RECOVERABLE_ACTIONS`, so
-      //     `buildEnvelope` derives `recoverable: false` and no Retry renders;
-      //   · a `VENUE_WIRE_CODE_TO_VERDICT` row mapping the wire code onto it.
-      //
-      // ⭐ THE MINT ALONE WOULD NOT HAVE CLOSED THIS ROUTE, which is the part
-      // worth writing down: `classifyKeyValidationError` resolves that table
-      // BEFORE its substring cascade, and the cascade has no decrypt/reconnect
-      // branch at all, so a member with no row is unreachable and this route
-      // still lands on UNKNOWN. The row is the ROUTING MECHANISM. What the
-      // phase's own decision text rejected was a row pointing at an EXISTING
-      // DISHONEST member — `KEY_PROBE_FAILED` (recoverable, same useless Retry)
-      // or `SEAM_MISCONFIGURED` (an operator cannot fix one row's ciphertext) —
-      // never a row pointing at the newly minted honest one. ⛔ Do not re-open
-      // this from that superseded bullet; its A-05 amendment is the record.
-      //
-      // ⛔ AND DELIBERATELY NOT A PRE-CLASSIFIER ARM HERE, mirroring
-      // `keys/[id]/permissions/route.ts`'s own. That was the rejected option:
-      // it duplicates the fix once per route, and adding it on TOP of the row
-      // would give this route two answers for one fault.
-      const seamCode = seamErrorCode(errBody);
-      const upstreamFailure = new Error(
-        seamHumanMessage(errBody) ?? `Upstream ${res.status}`,
-      );
-      if (seamCode !== null) {
-        (upstreamFailure as Error & { seamCode?: string }).seamCode = seamCode;
-      }
-      // ⭐ 212-04 / SC3 — carry the upstream STATUS as an own data property too,
-      // exactly as `AnalyticsUpstreamError` does for the other two classifier
-      // callers. This route never constructs that class, so without it a bare
-      // 401/403 (our own service key refused, no seam code) reached
-      // `classifyKeyValidationError` with nothing but the message and fell to
-      // the terminal UNKNOWN, while `create-with-key` and `composite/add-key`
-      // answered SEAM_MISCONFIGURED. The classifier reads it with `typeof`, and
-      // only for a null `seamCode` at 401/403; no other verdict moves.
-      (upstreamFailure as Error & { status?: number }).status = res.status;
-      // ⭐ 212 review WR-04 — the classifier's bare-401/403 branch is restricted
-      // to the upstream-hop error type by `name`; this plain `Error` IS that hop.
-      upstreamFailure.name = "AnalyticsUpstreamError";
-      throw upstreamFailure;
-    }
-
-    const result = RotateSecretResponseSchema.safeParse(await res.json());
-    if (!result.success) {
-      throw new Error(
-        `rotate-secret payload failed schema validation (fields: ` +
-          `${result.error.issues
-            .map((issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`)
-            .join(", ")})`,
-      );
-    }
-    parsed = result.data;
+    // Phase 228: the seam call, its non-ok arm (seamCode, status and name
+    // carried as own properties) and the schema parse moved VERBATIM into
+    // `rotateKeySecret` (src/lib/analytics-client.ts), shared with the MT5
+    // same-account arm of create-with-key. The catch below is unchanged.
+    parsed = await rotateKeySecret({ keyId: id, userId: user.id, newSecret, correlationId });
   } catch (err) {
     // D-04: NOTHING is persisted on this branch — the classifier below only
     // ever produces a response, never a write.

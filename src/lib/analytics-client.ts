@@ -2,6 +2,7 @@ import type { z } from "zod";
 import {
   ValidateKeyResponseSchema,
   EncryptKeyResponseSchema,
+  RotateSecretResponseSchema,
   PortfolioAnalyticsResponseSchema,
   PortfolioOptimizerResponseSchema,
   RecomputeMatchResponseSchema,
@@ -891,6 +892,98 @@ export async function encryptKey(
     { budgetKey: "encrypt-key", tenantId: tenant.userId },
   );
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
+}
+
+/**
+ * Phase 228 (CONN-02) — the ONE `keys-rotate-secret` seam call, shared by
+ * `PATCH /api/keys/[id]/rotate-secret` and the MT5 same-account arm of
+ * `POST /api/strategies/create-with-key` (TWIN-8 one-builder rule). Moved
+ * verbatim from the rotate-secret route, whose header docblock (steps 8 and 9)
+ * explains the ordering around it.
+ *
+ * It calls the seam DIRECTLY, never through `analyticsRequest`: the internal
+ * endpoint authenticates with `X-Internal-Token`, not the service key, and
+ * takes no tenant claim.
+ *
+ * `userId` MUST be the authenticated session's user id. It is the
+ * owner-scoping half of the seam's defense-in-depth: `rotate_key_secret`
+ * filters its row load by it, so a mismatched owner 404s BEFORE any decrypt and
+ * a holder of INTERNAL_API_TOKEN cannot use the seam as a rate-limited password
+ * oracle against an arbitrary key id. It is not the primary control: each
+ * caller proves ownership with its own owner-scoped read first, and the admin
+ * UPDATE (`persistRotatedMt5Secret`) filters on `user_id` again.
+ *
+ * Never retried (its retry override is zero): a non-idempotent live-credential probe,
+ * the same reasoning as validate-key-serialized (D-07 in resilient-fetch.ts).
+ *
+ * Throws on every non-ok seam answer. The thrown `Error` carries the seam's
+ * human sentence as its message plus two own data properties, `seamCode` and
+ * `status`, with `name = "AnalyticsUpstreamError"`, so each caller's catch can
+ * run `classifyKeyValidationError` on it unchanged:
+ *   · `seamCode` (164.5.3 review WR-01): without it the classifier's
+ *     machine-code branch saw `undefined`, and every service-error-shaped
+ *     failure (RATE_LIMITED, KEK_UNAVAILABLE, the MT5 validation-unconfigured
+ *     arms, KEY_UNDECRYPTABLE since 164.5.4-02) fell to the terminal UNKNOWN.
+ *     It is read as a typeof-guarded own property, never via `instanceof`, so
+ *     it survives every wholesale seam mock.
+ *   · `status` (212-04 / SC3): a bare 401/403 with no seam code (our own
+ *     service key refused) classifies as SEAM_MISCONFIGURED, as the other two
+ *     classifier callers already answer.
+ *   · `name` (212 review WR-04): the classifier's bare-401/403 branch is
+ *     restricted to the upstream-hop error type by `name`.
+ * The MT5 refusals (auth failed, master password, wrong server) propagate from
+ * the Python probe unchanged, so the classifier's existing substring cascade
+ * recognises them with no new vocabulary.
+ */
+export async function rotateKeySecret(args: {
+  keyId: string;
+  userId: string;
+  newSecret: string;
+  correlationId: string;
+}): Promise<z.infer<typeof RotateSecretResponseSchema>> {
+  const { keyId, userId, newSecret, correlationId } = args;
+  const res = await resilientFetch(
+    "keys-rotate-secret",
+    `/internal/keys/${encodeURIComponent(keyId)}/rotate-secret`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Token": process.env.INTERNAL_API_TOKEN!,
+        "X-Correlation-Id": correlationId,
+      },
+      body: JSON.stringify({ new_secret: newSecret, user_id: userId }),
+      retriesOverride: 0,
+    },
+  );
+
+  if (!res.ok) {
+    const errBody = await res.json().catch((readErr: unknown) => {
+      if (readErr instanceof SeamBodyReadError) throw readErr;
+      return {};
+    });
+    const seamCode = seamErrorCode(errBody);
+    const upstreamFailure = new Error(
+      seamHumanMessage(errBody) ?? `Upstream ${res.status}`,
+    );
+    if (seamCode !== null) {
+      (upstreamFailure as Error & { seamCode?: string }).seamCode = seamCode;
+    }
+    (upstreamFailure as Error & { status?: number }).status = res.status;
+    upstreamFailure.name = "AnalyticsUpstreamError";
+    throw upstreamFailure;
+  }
+
+  const result = RotateSecretResponseSchema.safeParse(await res.json());
+  if (!result.success) {
+    throw new Error(
+      `rotate-secret payload failed schema validation (fields: ` +
+        `${result.error.issues
+          .map((issue) => `${issue.path.join(".") || "<root>"}:${issue.code}`)
+          .join(", ")})`,
+    );
+  }
+  return result.data;
 }
 
 /**
