@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.100.0] - 2026-11-26 — POLLVENUES: the daily positions poll enqueues only strategies on a venue it can serve end to end
+
+### Fixed
+- **The daily `poll_positions` fan-out no longer enqueues MT5, sFOX or Deribit strategies.** Migration `20261126180000_poll_positions_cohort_ccxt_venues.sql` re-issues `enqueue_poll_positions_for_all_strategies()` from the `20261124120500` body with one top-level cohort conjunct, `ak.exchange IN ('binance', 'bybit', 'okx')`, a COMMENT naming the gate, and a catalogue-only verify block that checks the gate is in the executable text. The ACL is unchanged: the REVOKE from `PUBLIC`, `anon` and `authenticated` is restated and nothing is granted.
+- PROD, read 2026-11-26 with the marker query first: six MT5 `poll_positions` jobs ended `failed_final` on 2026-11-25 and 2026-11-26 with `'Mt5Session' object has no attribute 'fetch_positions'`. The failed jobs are left in place as the record of the defect.
+
+### Root cause
+- No version of this cohort has ever filtered by venue. Before Phase 227 the cohort polled only published and pending_review strategies, and every MT5 strategy on PROD is private, so the gap never showed. `20261124120500` (Phase 227 JOBLEDGER) added `private`, which let MT5 strategies in through the done-`sync_trades` side.
+- `run_poll_positions_job` calls the ccxt `fetch_positions` on the client `_make_exchange_client` builds. That client is a ccxt exchange only for `EXCHANGE_CLASSES`; mt5 gets an `Mt5Session` and sfox an `SfoxClient`. The handler then upserts into `position_snapshots`, whose `position_snapshots_exchange_check` admits only binance, okx and bybit, so a Deribit account holding a position would fail the upsert (23514) the same way. The venues the poll serves end to end are `EXCHANGE_CLASSES` intersected with that CHECK. PROD has no Deribit strategy and has never run a Deribit poll job, so leaving Deribit out drops nothing that works today.
+
+### Tests
+- `supabase/tests/test_enqueue_poll_positions_cohort.sql` gains arms P8 (mt5, plus P8/sfox and P8/deribit: not polled) and P9 (P9/binance and P9/bybit: still polled; okx is covered by P1). The sentinel moves from 7 to 9 arms, and the eleven older mutation twins point at the new migration. P7 now edits the REVOKE in both migrations. The `--file` mutation run printed `arms: 16/16/0`, `biting: 16`, `lane-invocations: 16`, `No defects in the narrowed scope`. Every new arm goes RED when its mutation restores the old behaviour.
+- New `analytics-service/tests/test_poll_positions_cohort_venues.py` pins the gate to `EXCHANGE_CLASSES` intersected with `position_snapshots_exchange_check`, read from the regenerated function snapshot and `supabase/schema/baseline.sql`. A venue that becomes servable and is not added to the gate is otherwise skipped with no job, error or log line. It was shown able to fail: with Deribit added to the snapshot, or a venue removed, it went RED, and the snapshot was restored from a byte backup.
+- Census moves: `ARMS_FLOOR` 1074 -> 1079 in `scripts/mutation-floors.mjs` (`--parse-only` prints `arms: 0/1079/0`, `coverage: files 96/123`); the `sql-tests` anti-skip table 587 -> 589 with `SENTINEL_FLOOR` staying 38; `armsSeen` 1074 -> 1079 and `stepsSeen`/`needles.length` 1220 -> 1232 in `mutation-annotation-parser.test.ts`; the synthetic FULL log in `mutation-runner-floors.test.ts`; `gate-family-meta.test.ts`, `drift-check-scripts.test.ts`; and `ci-anti-skip-gate.contract.test.ts`, where only one file still prints `ALL 7 ARMS EXECUTED`.
+
+### Notes
+- Manual rollback: `supabase/migrations/down/20261126180000-rollback.sql` restores the `20261124120500` body and COMMENT, with catalogue-only pre- and postconditions. It reopens the defect and leaves the ledger row in place.
+- The VAC-04 `prod-body-ack` acknowledges PROD's current body, unchanged since `20261124120500`.
+- No `TODOS.md` entry is closed. Admitting Deribit later needs one forward migration that widens `position_snapshots_exchange_check` and this gate together, and a baseline re-dump so the new pytest pin reads it.
+
 ## [0.133.99.1] - 2026-11-26 — records: Phase 235 HOLDINGSTRUTH Nyquist validation is recorded; the phase is Nyquist-compliant
 
 ### Changed
