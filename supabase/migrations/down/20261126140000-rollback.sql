@@ -1,5 +1,5 @@
 -- ============================================================================
--- ROLLBACK for 20261126120000_mt5_terminal_lease.sql
+-- ROLLBACK for 20261126140000_mt5_terminal_lease.sql
 -- Phase 230 MT5NIGHTLY, plan 01 (MT5D-02).
 -- ============================================================================
 -- Manual, off the auto-apply path. Run it as ONE transaction, so it either happens
@@ -31,10 +31,10 @@
 --
 -- ⚠️ THE MIGRATION LEDGER ROW IS LEFT IN PLACE. This file does not touch
 -- supabase_migrations.schema_migrations, so after it runs the ledger still records
--- version 20261126120000 as applied while the schema no longer carries the objects, and
+-- version 20261126140000 as applied while the schema no longer carries the objects, and
 -- `supabase db push` will not re-apply the migration. To re-apply it, delete that ledger
 -- row in the same change (or mark it reverted with
--- `supabase migration repair --status reverted 20261126120000` against the intended
+-- `supabase migration repair --status reverted 20261126140000` against the intended
 -- database, after the marker query above names that database).
 -- ============================================================================
 
@@ -46,7 +46,7 @@ BEGIN
   IF to_regprocedure('public.acquire_mt5_terminal_lease(text,uuid,text,text,integer)') IS NULL
      OR to_regprocedure('public.renew_mt5_terminal_lease(text,uuid,integer)') IS NULL
      OR to_regprocedure('public.release_mt5_terminal_lease(text,uuid)') IS NULL THEN
-    RAISE EXCEPTION 'Rollback 20261126120000 refused: one of the three MT5 terminal lease functions is not present, so this database does not carry 20261126120000 whole. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
+    RAISE EXCEPTION 'Rollback 20261126140000 refused: one of the three MT5 terminal lease functions is not present, so this database does not carry 20261126140000 whole. Nothing was changed. Run the marker query in CLAUDE.md to see which database this is.';
   END IF;
 END
 $precondition$;
@@ -62,12 +62,12 @@ BEGIN
   IF to_regprocedure('public.acquire_mt5_terminal_lease(text,uuid,text,text,integer)') IS NOT NULL
      OR to_regprocedure('public.renew_mt5_terminal_lease(text,uuid,integer)') IS NOT NULL
      OR to_regprocedure('public.release_mt5_terminal_lease(text,uuid)') IS NOT NULL THEN
-    RAISE EXCEPTION 'Rollback 20261126120000 failed: a lease function still resolves';
+    RAISE EXCEPTION 'Rollback 20261126140000 failed: a lease function still resolves';
   END IF;
   IF to_regclass('public.mt5_terminal_leases') IS NOT NULL THEN
-    RAISE EXCEPTION 'Rollback 20261126120000 failed: public.mt5_terminal_leases still resolves';
+    RAISE EXCEPTION 'Rollback 20261126140000 failed: public.mt5_terminal_leases still resolves';
   END IF;
 
-  RAISE NOTICE 'Rollback 20261126120000: the three lease functions and public.mt5_terminal_leases dropped. The migration ledger row is left in place (see the header).';
+  RAISE NOTICE 'Rollback 20261126140000: the three lease functions and public.mt5_terminal_leases dropped. The migration ledger row is left in place (see the header).';
 END
 $verify$;

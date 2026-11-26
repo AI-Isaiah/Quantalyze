@@ -5126,7 +5126,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // sentinel grew: test_first_hop_enqueue_sweep.sql 22 -> 23 (H10d). 578 + 1 = 579 is the table's own sum.
     // RAISED 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06), 37/579 -> 38/587. ONE file JOINED (an ordinary
     // sql-tests gate: it runs on a database private to its runner): test_mt5_terminal_lease.sql, read off its own first
-    // `ALL N ARMS EXECUTED` sentinel (`ALL 8 ARMS EXECUTED`, arms L1 to L8, migration 20261126120000). MEASURED:
+    // `ALL N ARMS EXECUTED` sentinel (`ALL 8 ARMS EXECUTED`, arms L1 to L8, migration 20261126140000). MEASURED:
     // ci-anti-skip-gate.contract.test.ts read `expected 38 to be 37` against the floor and 38 sentinel-bearing files
     // against the table's 37. 579 + 8 = 587 is the table's own sum, which that test re-derives from the corpus.
     const res = spawnSync(

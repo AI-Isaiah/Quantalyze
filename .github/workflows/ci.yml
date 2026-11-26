@@ -5340,7 +5340,7 @@ jobs:
           #   so SENTINEL_FLOOR stays 37 and ARMS_FLOOR 578 -> 579 (+1).
           # Re-measured 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06), ONE file joined:
           #   test_mt5_terminal_lease.sql, NEW, 8 arms (L1 to L8): the MT5 terminal lease table and its
-          #   acquire, renew and release RPCs (migration 20261126120000). Read off the file's own
+          #   acquire, renew and release RPCs (migration 20261126140000). Read off the file's own
           #   first `ALL N ARMS EXECUTED` sentinel with `grep -a -o -m1 'ALL [0-9]* ARMS EXECUTED'`
           #   (`ALL 8 ARMS EXECUTED`). A new sentinel-bearing file changes the FILE SET, so
           #   SENTINEL_FLOOR 37 -> 38 and ARMS_FLOOR 579 -> 587 (+8). The mutation runner's floors

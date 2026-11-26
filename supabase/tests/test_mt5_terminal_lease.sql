@@ -44,15 +44,15 @@
 --
 -- PG-LANE SUBSTRATE (the apply list below): the core fixture, Supabase's default
 -- privileges (so the migration's REVOKEs are falsifiable), then this migration.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","supabase/migrations/20261126120000_mt5_terminal_lease.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","supabase/migrations/20261126140000_mt5_terminal_lease.sql"]}
 -- ==========================================================================
 
 -- --------------------------------------------------------------------------
 -- L1 - one owner token at a time.
 -- RED-UNDER: turn the WHERE condition of the DO UPDATE in acquire_mt5_terminal_lease
---            in 20261126120000_mt5_terminal_lease.sql into TRUE. A second token now
+--            in 20261126140000_mt5_terminal_lease.sql into TRUE. A second token now
 --            overwrites the held row and is granted: this arm's first raise.
--- RED-UNDER-M: {"arm":"L1","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"   WHERE l.owner_token IS NULL\n      OR l.expires_at <= now()\n      OR l.owner_token = EXCLUDED.owner_token;","replace":"   WHERE TRUE;","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L1","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"   WHERE l.owner_token IS NULL\n      OR l.expires_at <= now()\n      OR l.owner_token = EXCLUDED.owner_token;","replace":"   WHERE TRUE;","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -99,10 +99,10 @@ ROLLBACK;
 -- L2 - an expired lease is taken over, and the old token is then dead for renew.
 -- RED-UNDER: drop the expiry disjunct (`OR l.expires_at <= now()`) from the DO UPDATE
 --            WHERE condition of acquire_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql. A lease whose holder crashed is
+--            20261126140000_mt5_terminal_lease.sql. A lease whose holder crashed is
 --            never free again: the second token's takeover is refused, which is this
 --            arm's first raise.
--- RED-UNDER-M: {"arm":"L2","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"      OR l.expires_at <= now()\n","replace":"","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L2","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"      OR l.expires_at <= now()\n","replace":"","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -154,12 +154,12 @@ ROLLBACK;
 --      after a takeover the old token's release is refused.
 -- RED-UNDER: drop the token predicate (`AND owner_token = p_owner_token`) from the
 --            UPDATE of release_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql. Any token can now free any
+--            20261126140000_mt5_terminal_lease.sql. Any token can now free any
 --            lease: the foreign release reports true and frees the row, which is
 --            this arm's first raise. (L1 and L2 never call release, so they stay
 --            green; the stale-token release is asserted HERE and not in L2 for that
 --            reason, so this twin, and not an earlier arm, is the first failure.)
--- RED-UNDER-M: {"arm":"L3","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest;","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L3","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest;","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -227,13 +227,13 @@ ROLLBACK;
 -- --------------------------------------------------------------------------
 -- L4 - renew is fenced by the token, and never resurrects a released lease.
 -- RED-UNDER: let the renew UPDATE of renew_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql also match a row whose owner
+--            20261126140000_mt5_terminal_lease.sql also match a row whose owner
 --            token is NULL (`AND (owner_token = p_owner_token OR owner_token IS NULL)`).
 --            A renew landing after the release now re-leases the freed row for a
 --            whole TTL with nobody holding it: this arm's first raise. (The release
 --            that keeps the owner token is the same hazard from the other side; it
 --            is caught earlier, by L3's owner-NULL check, so L3 owns it.)
--- RED-UNDER-M: {"arm":"L4","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"     SET expires_at = now() + make_interval(secs => p_ttl_s)\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"     SET expires_at = now() + make_interval(secs => p_ttl_s)\n   WHERE terminal_digest = p_terminal_digest\n     AND (owner_token = p_owner_token OR owner_token IS NULL);","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L4","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"     SET expires_at = now() + make_interval(secs => p_ttl_s)\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"     SET expires_at = now() + make_interval(secs => p_ttl_s)\n   WHERE terminal_digest = p_terminal_digest\n     AND (owner_token = p_owner_token OR owner_token IS NULL);","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -292,12 +292,12 @@ ROLLBACK;
 -- --------------------------------------------------------------------------
 -- L5 - bad input raises invalid_parameter_value (22023) and writes no row.
 -- RED-UNDER: stand down the digest-shape validation of acquire_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql (`IF FALSE THEN`). A host:port-shaped
+--            20261126140000_mt5_terminal_lease.sql (`IF FALSE THEN`). A host:port-shaped
 --            digest then reaches the table and is refused there by the CHECK with
 --            23514 instead of by the RPC with 22023: this arm's first raise. ttl, token
 --            and digest are each refused by the RPC itself, so a bad call never
 --            depends on the table to be turned away.
--- RED-UNDER-M: {"arm":"L5","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L5","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -356,11 +356,11 @@ ROLLBACK;
 -- --------------------------------------------------------------------------
 -- L6 - no browser role reaches the lease; service_role reaches only the RPCs.
 -- RED-UNDER: add authenticated to the GRANT EXECUTE on acquire_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql. A signed-in browser role can then
+--            20261126140000_mt5_terminal_lease.sql. A signed-in browser role can then
 --            take any terminal's lease: this arm's first raise. LAYERED: the
 --            migration's self-verify clause on anon/authenticated EXECUTE would abort
 --            the apply, so it is stood down in the same mutation.
--- RED-UNDER-M: {"arm":"L6","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role;","replace":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role, authenticated;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"IF v_open_exec THEN","replace":"IF FALSE AND v_open_exec THEN","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L6","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role;","replace":"GRANT EXECUTE ON FUNCTION public.acquire_mt5_terminal_lease(text, uuid, text, text, integer)\n  TO service_role, authenticated;","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"IF v_open_exec THEN","replace":"IF FALSE AND v_open_exec THEN","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -437,10 +437,10 @@ ROLLBACK;
 -- --------------------------------------------------------------------------
 -- L7 - distinct terminals are independent: releasing one never frees another.
 -- RED-UNDER: replace the digest predicate of the UPDATE in
---            release_mt5_terminal_lease in 20261126120000_mt5_terminal_lease.sql with
+--            release_mt5_terminal_lease in 20261126140000_mt5_terminal_lease.sql with
 --            `WHERE owner_token = p_owner_token`. A holder of two terminals under
 --            one token releasing one now frees both: this arm's first raise.
--- RED-UNDER-M: {"arm":"L7","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"         expires_at  = now()\n   WHERE owner_token = p_owner_token;","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L7","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"         expires_at  = now()\n   WHERE terminal_digest = p_terminal_digest\n     AND owner_token = p_owner_token;","replace":"         expires_at  = now()\n   WHERE owner_token = p_owner_token;","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$
@@ -489,10 +489,10 @@ ROLLBACK;
 -- --------------------------------------------------------------------------
 -- L8 - the holder is a closed literal or a canonical UUID, never an account-number-shaped string.
 -- RED-UNDER: stand down the holder validation of acquire_mt5_terminal_lease in
---            20261126120000_mt5_terminal_lease.sql (`IF FALSE THEN`). A digit-only holder
+--            20261126140000_mt5_terminal_lease.sql (`IF FALSE THEN`). A digit-only holder
 --            then reaches the table and is refused there by the CHECK with 23514
 --            instead of by the RPC with 22023: this arm's first raise.
--- RED-UNDER-M: {"arm":"L8","apply":[{"kind":"edit","file":"supabase/migrations/20261126120000_mt5_terminal_lease.sql","find":"  IF p_holder IS NULL\n     OR NOT (\n       p_holder IN ('house', 'validation', 'unknown', 'unattributed')\n       OR p_holder ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n     ) THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","occurrences":1}]}
+-- RED-UNDER-M: {"arm":"L8","apply":[{"kind":"edit","file":"supabase/migrations/20261126140000_mt5_terminal_lease.sql","find":"  IF p_holder IS NULL\n     OR NOT (\n       p_holder IN ('house', 'validation', 'unknown', 'unattributed')\n       OR p_holder ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'\n     ) THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","replace":"  IF FALSE THEN\n    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder","occurrences":1}]}
 -- --------------------------------------------------------------------------
 BEGIN;
 DO $$

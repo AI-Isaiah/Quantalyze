@@ -114,7 +114,7 @@ message can echo a URL); where an exception matters only its class name is logge
 
 ## 4. Rollback
 
-The down file is `supabase/migrations/down/20261126120000-rollback.sql`. It is manual and sits off the
+The down file is `supabase/migrations/down/20261126140000-rollback.sql`. It is manual and sits off the
 auto-apply path.
 
 1. Run the marker query alone, FIRST, and read which database it names. `current_database()` is

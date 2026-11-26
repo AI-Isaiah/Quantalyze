@@ -1812,7 +1812,7 @@ export type Database = {
       }
       // 2026-11-25 (Phase 230 MT5NIGHTLY plan 06): mt5_terminal_leases and the
       // acquire/renew/release_mt5_terminal_lease signatures below are hand-added from
-      // migration 20261126120000, which has NOT applied to PROD yet. A regen against
+      // migration 20261126140000, which has NOT applied to PROD yet. A regen against
       // the linked PROD project drops them until it does; re-apply them then.
       mt5_terminal_leases: {
         Row: {

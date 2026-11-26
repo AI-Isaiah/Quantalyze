@@ -12,7 +12,7 @@ every MT5 terminal user: derive, holdings poll, balance sync, key validation".
 This module is the client of that row. ``mt5_terminal_lease`` takes it AFTER its
 in-process lock and BEFORE its body runs, so every production site already holds it
 and no second lock registry or second lease helper exists. The row is the SQL half,
-``supabase/migrations/20261126120000_mt5_terminal_lease.sql`` (plan 01): three
+``supabase/migrations/20261126140000_mt5_terminal_lease.sql`` (plan 01): three
 ``SECURITY DEFINER`` RPCs, ``acquire_mt5_terminal_lease``,
 ``renew_mt5_terminal_lease`` and ``release_mt5_terminal_lease``, each returning
 ``boolean``. Free means the owner token is NULL or expired on the DATABASE clock; a

@@ -378,7 +378,7 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * MOVED 2026-11-25 (Phase 230 MT5NIGHTLY plan 06), 144 -> 147: three ADDITIONS, not a parser gain.
  * `public.acquire_mt5_terminal_lease(...)`, `public.renew_mt5_terminal_lease(...)` and
  * `public.release_mt5_terminal_lease(...)` enter the chain via forward migration
- * 20261126120000_mt5_terminal_lease.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
+ * 20261126140000_mt5_terminal_lease.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
  * on this tree: `functions compared 147 - MATCH 140, DRIFT 4, SNAPSHOT_MISSING 3, SNAPSHOT_ONLY 0,
  * UNCOMPARABLE 0`, `findings 4`. The three SNAPSHOT_MISSING findings are the three new functions,
  * whose migration is not on PROD yet (each recorded as a dated `snapshot-only` row in

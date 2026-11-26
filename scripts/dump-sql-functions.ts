@@ -393,7 +393,7 @@ export interface NameSetRatchetRow {
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
   // ⭐ 2026-11-25 (Phase 230 MT5NIGHTLY plan 06): three `snapshot-only` rows, one per function
-  // the phase's migration (20261126120000_mt5_terminal_lease.sql) adds before
+  // the phase's migration (20261126140000_mt5_terminal_lease.sql) adds before
   // supabase/schema/baseline.sql knows them. Same clearing condition as every row deleted
   // below: the re-dump taken after the migration has applied to PROD turns each row into
   // `ratchet-stale` and it is DELETED. No allowlist row was added.
@@ -402,27 +402,27 @@ export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
     side: "snapshot-only",
     capturedAt: "2026-11-25",
     clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261126120000_mt5_terminal_lease.sql applied to PROD",
+      "a re-dump of supabase/schema/baseline.sql taken after 20261126140000_mt5_terminal_lease.sql applied to PROD",
     reason:
-      "Phase 230 MT5NIGHTLY defines it in 20261126120000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+      "Phase 230 MT5NIGHTLY defines it in 20261126140000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
   },
   {
     name: "renew_mt5_terminal_lease",
     side: "snapshot-only",
     capturedAt: "2026-11-25",
     clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261126120000_mt5_terminal_lease.sql applied to PROD",
+      "a re-dump of supabase/schema/baseline.sql taken after 20261126140000_mt5_terminal_lease.sql applied to PROD",
     reason:
-      "Phase 230 MT5NIGHTLY defines it in 20261126120000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+      "Phase 230 MT5NIGHTLY defines it in 20261126140000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
   },
   {
     name: "release_mt5_terminal_lease",
     side: "snapshot-only",
     capturedAt: "2026-11-25",
     clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261126120000_mt5_terminal_lease.sql applied to PROD",
+      "a re-dump of supabase/schema/baseline.sql taken after 20261126140000_mt5_terminal_lease.sql applied to PROD",
     reason:
-      "Phase 230 MT5NIGHTLY defines it in 20261126120000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+      "Phase 230 MT5NIGHTLY defines it in 20261126140000_mt5_terminal_lease.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
   },
   // ⭐ 2026-11-24: the Phase 225 ONEACCOUNTONCE plan 04 row
   // (`swap_account_slot`, `snapshot-only`, captured 2026-11-23) is DELETED: its clearing

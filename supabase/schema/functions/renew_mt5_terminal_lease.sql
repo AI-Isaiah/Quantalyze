@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261126120000_mt5_terminal_lease.sql
+-- source migration: 20261126140000_mt5_terminal_lease.sql
 -- ==========================================================================
 -- STEP 4: renew_mt5_terminal_lease
 -- ==========================================================================
