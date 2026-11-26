@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.133.93.4] - 2026-11-26 — records: Phase 238 NEVERCOMPUTED complete; all five human verification items resolved
+
+### Changed
+- **Phase 238 is complete.** `238-VERIFICATION.md` moves from `human_needed` to `passed`, `verified_at_sha` names the merge `f34c9cacd` of #1363, and `drift_subjects` is kept (no `covered_files` or `covered_digest`). `phase complete 238` ran. The five items are listed in a resolved block with their evidence:
+  - Item 1: `supabase-migrate.yml` run `45800983848` printed the migration's closing NOTICE in both `apply-test` and `apply`, and the PROD apply succeeded, so the migration role may disable the hold trigger.
+  - Items 2 to 4: #1363's head `32c4549bd` had 31 of 31 check-runs success, including `sql-tests` (the lane replay named `20261126130000_strategy_analytics_computed_at_nullable.sql`), `e2e-seeded`, `frontend-typecheck` and the `frontend` aggregator.
+  - Item 5: a read-only PROD count on 2026-11-26 (marker query named PRODUCTION) found failed with no figures 11 rows, none dated; failed with figures 7, all dated; complete 16 and complete_with_warnings 8, all dated. Never-completed, figure-less rows carrying a date: 0.
+- ROADMAP: 238's overview bullet is `[x]`, and its Progress row is restored to prose after `phase complete` overwrote it with `Complete`. STATE: Current Position is corrected by hand, because `phase complete` had moved it to Phase 225 while phases run in parallel. The `progress:` block re-derived by the handler is kept. The 238 Deferred Verification row is removed.
+- `.planning/state.json`: the handler had reset phases 230, 236 and 252 from `in_progress` to `pending`. Those are restored, and only 238 moves to `complete`.
+
+### Notes
+- No `TODOS.md` entry is closed here: PR-2 (#1363) already deleted `166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT`.
+- No code or migration changes.
+
 ## [0.133.93.3] - 2026-11-26 — records: Phase 253 BINANCECURSOR complete; the raw-ingestion switch is on in PROD and stays on; Phase 255 NULLANCHOR booked for v1.23
 
 ### Added
