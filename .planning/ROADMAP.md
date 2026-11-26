@@ -7,7 +7,7 @@
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -100,7 +100,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"). Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -253,7 +253,7 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 12 plans
+**Plans:** 20 plans
 
 Plans:
 **Wave 1**
@@ -265,20 +265,48 @@ Plans:
 - [x] 225-04-PLAN.md — migration A2: `swap_account_slot`, the one place a holder slot moves; the orchestrator ships PR-1 and confirms both migrations on PROD before wave 3 (PR-1)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 225-05-PLAN.md — an own-draft match is refused by name, `VENUE_DRAFT_IN_PROGRESS` (PR-2)
-- [ ] 225-06-PLAN.md — the shared server rule, holder pick and swap helper, TS and Python held equal by one fixture (PR-2)
+- [x] 225-05-PLAN.md — an own-draft match is refused by name, `VENUE_DRAFT_IN_PROGRESS` (PR-2)
+- [x] 225-06-PLAN.md — the shared server rule, holder pick and swap helper, TS and Python held equal by one fixture (PR-2)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 225-07-PLAN.md — the wizard connect, MT5 path: server-aware resolver, server write, failing-holder swap (PR-2)
-- [ ] 225-08-PLAN.md — the Exchanges-page connect gets the same rule, and the demoted key's card names its holder (PR-2)
-- [ ] 225-09-PLAN.md — the poll stamper: a working key takes a failing holder's slot through the swap (PR-2)
+- [x] 225-07-PLAN.md — the wizard connect, MT5 path: server-aware resolver, server write, failing-holder swap (PR-2)
+- [x] 225-08-PLAN.md — the Exchanges-page connect gets the same rule, and the demoted key's card names its holder (PR-2)
+- [x] 225-09-PLAN.md — the poll stamper: a working key takes a failing holder's slot through the swap (PR-2)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 225-11-PLAN.md — the wizard connect, every venue: post-validation refusal, interim race arm, per-owner pins (PR-2)
-- [ ] 225-12-PLAN.md — the poll stamper: MT5 server capture and backfill, cross-owner stamping, the backfill census (PR-2)
+- [x] 225-11-PLAN.md — the wizard connect, every venue: post-validation refusal, interim race arm, per-owner pins (PR-2)
+- [x] 225-12-PLAN.md — the poll stamper: MT5 server capture and backfill, cross-owner stamping, the backfill census (PR-2)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
+- [x] 225-10-PLAN.md — migration B: the index gains the server member and reconnect agrees, after the backfill census passes (PR-3)
+
+**No MT5 key without a server, founder ruling 2026-11-25:** "Delete keys without Server, dont accept keys without Server". This replaces the CONTEXT Q6 agent decision for keys with no server. It applies to MT5 only: connect refuses an MT5 key with an empty server, and existing MT5 keys without a server are deleted through the product path, with the coordinator confirming the scope first. Recorded in `225-CONTEXT.md` Q6.
+
+**Plan 13 founder ruling, 2026-11-25:** "Owner-only read (Recommended)": SELECT on `api_keys.venue_server` is granted to `authenticated`, owner-only through the existing RLS, like `venue_account_id`. Recorded in `225-CONTEXT.md` Q6.
+
+**Gap closure for CR-01 (founder ruling 2026-11-25, `225-CONTEXT.md` Q6): plans 13-18 and 20 ship as PR-2b-1, PR-2b-2, PR-2c0 and PR-2c from origin/main before PR-3; plan 19 re-bases plan 10. Gap waves below are numbered within the gap set.**
+**Plan 20 added 2026-11-25:** plan 18's merge gate step 1 found 0 relogin server verdicts on PROD, and PR-2c review WR-01 found that the three MT5 poll reads prove only the login. Plan 20 (PR-2c0) logs a server verdict at those reads and measures it on PROD before PR-2c merges. Plan 18 now waits on that measurement. Plan 19 waits on the poll-path refusal being shipped, or booked with an owner by plan 20 Task 3.
+**Gap wave 1**
+- [x] 225-13-PLAN.md — owners can read `venue_server` (column GRANT), after a founder decision checkpoint (PR-2b-1)
+- [x] 225-14-PLAN.md — the Python twin: a server-aware `account_identity_tokens`, the derive reads `venue_server`, and the named `account_server_ambiguous` refusal (PR-2b-2)
+
+**Gap wave 2** *(blocked on gap wave 1 completion)*
+- [x] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
+- [x] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
+
+**Gap wave 3** *(blocked on gap wave 2 completion)*
+- [x] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
+- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
+
+**Gap wave 4** *(blocked on gap wave 3 completion)*
+- [x] 225-17-PLAN.md — re-point the existing fingerprint twins, record the drift row, and a read-only PROD check before PR-2b-2 merges (PR-2b-2)
+
+**Gap wave 5** *(blocked on gap wave 4 completion)*
+- [x] 225-19-PLAN.md — re-base plan 10: rename migration B to a current timestamp, re-measure the census, last read-only PROD check (PR-3)
+
+**Poll-path server refusal booked 2026-11-26 (plan 20 Task 3 PASS):** the enforcing server bracket at the three MT5 poll reads (review WR-01 of PR-2c) is owned by follow-up gap plan 225-21, not yet written. Record: `225-20-SUMMARY.md`, section `Poll-path server enforcement: owner`.
+
+**PR-3 merged 2026-11-26** (#1368, v0.133.92.0): migration B `20261126140500` applied to TEST and PROD, and the PROD index and `reconnect_allocator_api_key` body read back equal to the migration (`225-19-SUMMARY.md`). Phase 225 stays open: plan 18's post-deploy positive control is a founder item, and plan 225-21 (the poll-path refusal) is not written yet.
 
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
@@ -899,7 +927,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 222. ALERTTRUTH | 4/4 | Complete (shipped v0.133.81.0, #1352; migration `20261125212222` applied to TEST and PROD) | 2026-11-25 |
 | 223. FLOWKINDS | 5/5 | Complete (shipped v0.133.68.0, #1327) | 2026-11-24 |
-| 225. ONEACCOUNTONCE | 4/12 | In progress (PR-1 shipped as #1315) | - |
+| 225. ONEACCOUNTONCE | 19/20 | In progress (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344 and PR-3 #1368 shipped; plan 18 open on its founder control; 225-21 booked, not written) | - |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |
@@ -946,6 +974,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 247: SENTRYHELD — a failing anonymous read reports exactly once, and the landing page at most once per window** - Caller-only; ordered after SENTRYSCRUB2
 - [ ] **Phase 248: SQLGATES2 — SQL gate censuses fail when an axis drifts, and apply-test tells a seeded ledger row from an applied migration** - Derived census axes, enforced exemptions, provenance gate twins, the apply-test fix before the forward comment correction
 - [ ] **Phase 249: TESTLANES — every live-DB lane test executes, a fence timeout fails, lint agrees cold and warm, and the PROD image crash risk is measured** - Ledger to zero with no assertion weakened, no green skips, cache-proof lint, supautils measured locally on the PROD image version
+- [ ] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1207,6 +1236,23 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue
+
+**Goal:** A deposit dated exactly the day before a key's first return counts as that key's opening deposit on every venue, not only on Deribit and MT5. Today `replay_key_equity` in `analytics-service/services/allocator_equity_derive.py` treats such a deposit as an opening deposit only for `FULL_HISTORY_VENUES` (Deribit, MT5). On any other venue it lands outside the key's window and is reported as `out_of_window_flow`, which degrades a book whose history is in fact complete. Source: an allocator book on PROD carries `out_of_window_flow` from one Bybit key, and that flow is the key's opening deposit, dated one day before its first return. The founder ruled on 2026-11-26: "Exempt it, book for v1.23".
+- **The fix is narrow.** An opening-run exemption in `replay_key_equity`: a flow dated exactly one day before the key's first return is its opening deposit, whatever the venue.
+- **Not the fix.** Widening `FULL_HISTORY_VENUES`. That set is shared with the D-13 zero-start checks, which must keep their meaning.
+**Requirements**: TBD
+**Depends on:** nothing hard.
+**Success Criteria** (what must be TRUE):
+1. On a non-Deribit, non-MT5 venue, a deposit dated exactly the day before a key's first return is that key's opening deposit, and it is not counted in `out_of_window_flows`. A test drives this on a Bybit-shaped fixture.
+2. A deposit two or more days before the first return, and a flow on any later day outside the window, are still reported as `out_of_window_flow`.
+3. `FULL_HISTORY_VENUES` and the D-13 zero-start checks are unchanged, and a test pins that.
+4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1223,6 +1269,7 @@ Plans:
 | 247. SENTRYHELD | 0/? | Planned for v1.23 | - |
 | 248. SQLGATES2 | 0/? | Planned for v1.23 | - |
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
+| 254. OPENINGDEPOSIT | 0/? | Planned for v1.23 | - |
 
 ---
 
