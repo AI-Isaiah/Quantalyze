@@ -1,0 +1,21 @@
+{
+  "_comment": "RED held-back series end. One key, one cause: its newest stored return (2026-11-10) trails its newest flow and terminal day (2026-11-23) by 13 days, with no anchor reason and no stated left-out days. Expect exactly one freshness-stale. Every value here is synthetic.",
+  "scope": {
+    "derived": 1,
+    "withInputs": 1,
+    "withTerminal": 1
+  },
+  "rows": [
+    {
+      "venue": "binance",
+      "tag": "bbbb0001",
+      "newestReturn": "2026-11-10",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-23",
+      "terminalDay": "2026-11-23",
+      "markDay": "",
+      "tinyDays": [],
+      "hasInputs": true
+    }
+  ]
+}

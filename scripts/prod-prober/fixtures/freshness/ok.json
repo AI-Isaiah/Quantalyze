@@ -1,0 +1,103 @@
+{
+  "_comment": "GREEN control. Holds every accepted shape side by side: a healthy key (gap 1); a key whose gap equals the bound (2) with no reason; a key shaped like the diagnosed account (newest return 2026-10-26, flow 2026-11-09, terminal and mark 2026-11-23, every day 2026-10-27..2026-11-23 stated in tinyDays); a key whose anchor reason alone keeps it fresh (old newest return, reference day far past the bound); a key whose stated left-out days cover everything except the last bound-many days before its reference day (those trailing days are the healthy derive lag the bound absorbs, so the key reads covered). A key with no inputs row is NOT an accepted shape (a measure-fail), and a venue none of whose keys is judged is a measure-fail on its own subject; a lone key with no stored return day beside a fresh key of its venue is not judged and is not paged. The freshness scenarios in run.mjs carry each. The scope counts agree with the rows. Every value here is synthetic.",
+  "scope": {
+    "derived": 5,
+    "withInputs": 5,
+    "withTerminal": 5
+  },
+  "rows": [
+    {
+      "venue": "deribit",
+      "tag": "aaaa0001",
+      "newestReturn": "2026-11-23",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-24",
+      "terminalDay": "2026-11-24",
+      "markDay": "2026-11-24",
+      "tinyDays": [],
+      "hasInputs": true
+    },
+    {
+      "venue": "binance",
+      "tag": "aaaa0002",
+      "newestReturn": "2026-11-21",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-22",
+      "terminalDay": "2026-11-23",
+      "markDay": "2026-11-23",
+      "tinyDays": [],
+      "hasInputs": true
+    },
+    {
+      "venue": "deribit",
+      "tag": "aaaa0003",
+      "newestReturn": "2026-10-26",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-09",
+      "terminalDay": "2026-11-23",
+      "markDay": "2026-11-23",
+      "tinyDays": [
+        "2026-10-27",
+        "2026-10-28",
+        "2026-10-29",
+        "2026-10-30",
+        "2026-10-31",
+        "2026-11-01",
+        "2026-11-02",
+        "2026-11-03",
+        "2026-11-04",
+        "2026-11-05",
+        "2026-11-06",
+        "2026-11-07",
+        "2026-11-08",
+        "2026-11-09",
+        "2026-11-10",
+        "2026-11-11",
+        "2026-11-12",
+        "2026-11-13",
+        "2026-11-14",
+        "2026-11-15",
+        "2026-11-16",
+        "2026-11-17",
+        "2026-11-18",
+        "2026-11-19",
+        "2026-11-20",
+        "2026-11-21",
+        "2026-11-22",
+        "2026-11-23"
+      ],
+      "hasInputs": true
+    },
+    {
+      "venue": "okx",
+      "tag": "aaaa0004",
+      "newestReturn": "2026-10-01",
+      "anchorNullReason": "nonpositive",
+      "newestFlow": "2026-11-20",
+      "terminalDay": "2026-11-23",
+      "markDay": "",
+      "tinyDays": [],
+      "hasInputs": true
+    },
+    {
+      "venue": "deribit",
+      "tag": "aaaa0007",
+      "newestReturn": "2026-11-10",
+      "anchorNullReason": "",
+      "newestFlow": "2026-11-20",
+      "terminalDay": "2026-11-20",
+      "markDay": "",
+      "tinyDays": [
+        "2026-11-11",
+        "2026-11-12",
+        "2026-11-13",
+        "2026-11-14",
+        "2026-11-15",
+        "2026-11-16",
+        "2026-11-17",
+        "2026-11-18"
+      ],
+      "hasInputs": true
+    }
+  ]
+}

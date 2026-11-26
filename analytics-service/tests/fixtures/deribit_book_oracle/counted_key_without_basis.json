@@ -1,0 +1,63 @@
+{
+  "_comment": "Every value here is synthetic. Book A, counted keys k1 and k2, five union days 2025-01-01 .. 2025-01-05 (d1..d5). HAND DERIVATION. k1 is explained_two_keys.json's k1: terminal 1160 on d5, a flow of 100 on d4, P by day 0, 10, -20, 30, 40, levels L1 = 1000, L2 = 1010, L3 = 990, L4 = 1120 (L(prev) = L(day) - F - P: L4 = 1160 - 40 = 1120, L3 = 1120 - 100 - 30 = 990, L2 = 990 + 20 = 1010, L1 = 1000). k2 is a counted key whose key_inputs row carries NONE of composed_day_pnl, composed_flows, dropped_day_pnl and returns_stamp (a key that exited read_incomplete: the compose replays it on the legacy roll from its csv_daily_returns), so it has no writer basis and no realized terminal; its anchor_usd is 525 and its stored return days are d4 and d5 (stored_return_days). Its level days are therefore d4 and d5: it has no previous level on d4 (it joins), so it participates on d5 only. PUBLISHED by the compose: d2 10/1000 = 0.01 (k1 alone); d3 -20/1010 (k1 alone); d4 30/990 (k1 alone, k2 joins that day); d5 (40 + 25)/(1120 + 500) = 65/1620, the value the compose published with k2 in it. The oracle cannot check k2's part of d5. d1 has no previous union day: omitted no_stored_base_level. d2, d3 and d4 are single-key days on k1's plain levels: explained. d5 has a participant with no stored basis: withheld no_stored_base_level (the closed name for a row without a writer basis). Published 4, explained 3, withheld 1 (d5), omitted 1 (d1), annotated 1 (k1's flow day d4). Verdict STOP, exit 1.",
+  "book": {
+    "label": "A",
+    "n_returns": 4,
+    "returns": [
+      {"date": "2025-01-02", "r": 0.01},
+      {"date": "2025-01-03", "r": -0.019801980198019802},
+      {"date": "2025-01-04", "r": 0.030303030303030304},
+      {"date": "2025-01-05", "r": 0.040123456790123455}
+    ],
+    "flags": {},
+    "degrade_reasons": [],
+    "inputs": {
+      "n_keys": 2
+    }
+  },
+  "keys": {
+    "k1": {
+      "composed_day_pnl": [
+        {"utc_day_iso": "2025-01-01", "pnl_usd": 0},
+        {"utc_day_iso": "2025-01-02", "pnl_usd": 10},
+        {"utc_day_iso": "2025-01-03", "pnl_usd": -20},
+        {"utc_day_iso": "2025-01-04", "pnl_usd": 30},
+        {"utc_day_iso": "2025-01-05", "pnl_usd": 40}
+      ],
+      "composed_flows": [
+        {"utc_day_iso": "2025-01-04", "flow_usd": 100}
+      ],
+      "dropped_day_pnl": [],
+      "returns_stamp": [
+        {"utc_day_iso": "2025-01-02", "return": 0.01},
+        {"utc_day_iso": "2025-01-03", "return": -0.019801980198019802},
+        {"utc_day_iso": "2025-01-04", "return": 0.030303030303030304},
+        {"utc_day_iso": "2025-01-05", "return": 0.03571428571428571}
+      ],
+      "realized_terminal_day": "2025-01-05",
+      "realized_terminal_usd": 1160,
+      "anchor_usd": 1170,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": []
+    },
+    "k2": {
+      "composed_day_pnl": null,
+      "composed_flows": null,
+      "dropped_day_pnl": null,
+      "returns_stamp": null,
+      "realized_terminal_day": null,
+      "realized_terminal_usd": null,
+      "anchor_usd": 525,
+      "anchor_null_reason": null,
+      "options_cash_basis": null,
+      "writer_basis_withheld": null,
+      "tiny_base_days": [],
+      "stored_return_days": ["2025-01-04", "2025-01-05"]
+    }
+  },
+  "declared": {
+    "counted": ["k1", "k2"]
+  }
+}
