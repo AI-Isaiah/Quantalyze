@@ -12,6 +12,7 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45824919779` succeeded, and this entry was composed by the `redump-pr` job. Run `45824919779` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+- **`NAME_SET_RATCHET`: the Phase 253 row is deleted** (hand commit on the bot branch, as on #1365). The `snapshot-only` row for `set_strategy_fills_reread_bound` had one clearing condition: a re-dump taken after `20261126150000_strategy_fills_reread_bound.sql` applied to PROD. This re-dump meets it, so `npm run schema:functions:check` reported the row `ratchet-stale` and failed until the row was deleted. A dated comment in `scripts/dump-sql-functions.ts` records the deletion.
 
 ## [0.133.93.0] - 2026-11-26 — Phase 253 BINANCECURSOR: a stopped Binance fills read below a cursor that another strategy moved is re-read
 
