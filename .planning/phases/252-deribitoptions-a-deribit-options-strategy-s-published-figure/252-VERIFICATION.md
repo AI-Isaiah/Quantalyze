@@ -1,7 +1,7 @@
 ---
 phase: 252-deribitoptions
 verified: 2026-11-25T20:50:00Z
-status: human_needed
+status: gaps_found
 score: 6/6 criteria verified for the scope of this run (wave 1 withhold + wave 2 measurement tooling); the PROD and founder-gated halves of SC-3, SC-4 and SC-5 are human_needed items, none is a gap
 verified_at_sha: ee599e6c35e68271c9508eeabec8af5ad9a5a568
 behavior_unverified: 0
@@ -33,6 +33,19 @@ drift_subjects:
   - src/__tests__/options-cash-wallet-withhold.census.test.ts
   - analytics-service/scripts/deribit_options_smoothed_probe.py
   - analytics-service/tests/test_deribit_options_smoothed_probe.py
+gaps:
+  - id: G252-PROBE-M3
+    truth: "Wave 2: the smoothed mark-to-market reconstruction computes for every Deribit member of the evidence composite, so the read-only probe reads verdict pass (founder decision 2026-11-26: fix inside 252, keep 252 open until the probe passes)."
+    status: failed
+    reason: "PROD probe 2026-11-26 21:32Z: verdict fail, members 3, failed_members 1. m3 smoothed build-error:LedgerValuationError, detail LedgerValuationError:position, series_days 0. That detail is produced by three smoothed-only raises in services/deribit_txn.py (D-07 daily-mark hole in option_mtm_daily, D-09 exercise refusal in replay_option_positions, D-09 expiry nonzero position in _expiry_close). The probe's closed vocabulary cannot tell them apart, so the root cause is not yet measured. Leading hypothesis, unmeasured: a retention straddler, because m3's 1232-day history is the only one older than the 913-day mark-retention default."
+    artifacts:
+      - analytics-service/services/deribit_txn.py (option_mtm_daily, replay_option_positions, _expiry_close)
+      - analytics-service/services/deribit_ingest.py (_build_smoothed_option_mtm)
+      - analytics-service/scripts/deribit_options_smoothed_probe.py
+      - analytics-service/scripts/navbreach_anchor_probe.py (LEDGER_ERROR_CLASSES, classify_ledger_error)
+    missing:
+      - "Each of the three refusals raises its own LedgerValuationError subclass (so every existing except still catches it), and the probe emits which one fired in closed vocabulary: for a hole, where it falls relative to the instrument's marks (no marks, before the first bar, between bars, after the last bar) and whether the day is older than the retention cutoff; for an exercise or expiry refusal, a closed shape census. No dates, instrument names, amounts or ids reach stdout."
+      - "A probe re-run on PROD after deploy names the cause; then either a code fix (if the cause is a defect) or a founder question (if the cause is a straddler, whose remedy narrows the MTM span; or an unmeasured row shape)."
 human_verification:
   - test: "Open the owner factsheet of the Quantum Drift evidence composite on the deployed build (PROD), after the ship deploys. Also open its share card and OG image."
     expected: "The headline strip, Main Metrics and rail show the em dash with the muted sentence 'Headline figures withheld: this strategy trades options, and its returns are measured on the cash wallet, ...'. No cumulative +1636172.7%, no CAGR, no Calmar. The card prints three dashes and the card sentence. No re-derive and no backfill UPDATE is needed: the trigger is already stored on both flagged rows (read-only PROD census 2026-11-25)."

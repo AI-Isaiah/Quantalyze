@@ -903,6 +903,7 @@ Plans:
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
 
 - ⭐ **FOUNDER DECISION 2026-11-26 (recorded in `252-CONTEXT.md` and `252-VERIFICATION.md`):** the OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld; both stay as they are. This narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Phase 252 stays `human_needed` (the founder still runs the PROD probe).
+- ⭐ **FOUNDER DECISION 2026-11-26 (AskUserQuestion via the coordinator), verbatim answer "Fix it inside 252" (recorded in `252-CONTEXT.md`):** the wave-2 probe read `fail` on PROD (member m3: smoothed build `LedgerValuationError:position`). The cause is fixed inside Phase 252, and 252 stays open until the probe passes. The fix invents no data and does not narrow the MTM span without a separate founder ruling.
 **Plans:** 6/6 plans executed
 
 Plans:
