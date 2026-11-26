@@ -27,7 +27,10 @@ import {
 // this file already computes. The import direction is the safe one: this is a
 // test file reading a client-safe pure module, and `validate-budget.ts` still
 // carries no edge back to the seam core (its own T-153.4-10 source scan).
-import { connectAbortDeadlineMsFor } from "./wizard/validate-budget";
+import {
+  connectAbortDeadlineMsFor,
+  WAIT_ABORT_GRACE_MS,
+} from "./wizard/validate-budget";
 
 /**
  * SC-4 (SEAM-02) — the seam budget invariant.
@@ -454,11 +457,15 @@ const EXPECTED_ROUTE_BUDGETS: Record<
       { key: "process-key-unified-dormant", calls: 1 },
     ],
   },
+  // Phase 228 CONN-02 — the create-with-key row also declares the MT5
+  // same-account rotate leg as its own EXCLUSIVE `mt5-rotate` branch (never
+  // summed with validate). Declaration order is part of the twin.
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
       { key: "validate-key", calls: 1, branch: "default-venue" },
       { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
+      { key: "keys-rotate-secret", calls: 1, branch: "mt5-rotate" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
@@ -1022,6 +1029,63 @@ describe("SEAM-02 — seam budget invariant (SC-4)", () => {
           `An \`undefined\` here means the branch LABEL is gone, which turns ` +
           `SC-4b's MAX back into a SUM silently.`,
       ).toBe(248_250);
+    });
+
+    it("228 / O2: the mt5-rotate leg fits inside the browser deadline — failing, hand-typed", () => {
+      // Phase 228 / CONN-02, UI-SPEC O2. On an MT5 same-account reconnect the
+      // create-with-key route spends ONE `keys-rotate-secret` leg at the
+      // pre-validation fence INSTEAD of validate + encrypt (a post-validation
+      // rotate would spend validate PLUS rotate, past the browser deadline).
+      // "Nothing was saved" stays true only while the browser is the last
+      // party to give up, so this branch must end before it.
+      //
+      // ⭐ HAND-DERIVED, NOT READ BACK from the formula. The declared branch is
+      // the rotate leg plus the SHARED, unlabelled `encrypt-key` leg (charged
+      // to every branch, so this over-states the real arm, which never
+      // encrypts, at 132 750):
+      //
+      //   request: 120 000 (keys-rotate-secret) + 30 000 (encrypt-key)
+      //            = 150 000 — both legs retries: 0, no backoff term
+      //   store:   2 legs x 3 commands x 4 250ms = 25 500
+      //   total:   175 500 (equal to `serialized-venue`)
+      //
+      // `expect.soft` so a budget move reports EVERY broken clause by name
+      // instead of the first one masking the rest.
+      const worst = branchWorstCases(
+        SEAM_ROUTE_BUDGETS["src/app/api/strategies/create-with-key/route.ts"],
+        "failing",
+      ).find((b) => b.label === "mt5-rotate");
+      expect.soft(
+        worst?.worstCaseMs,
+        `create-with-key's MT5-ROTATE branch now costs ${worst?.worstCaseMs}ms ` +
+          `in the failing state; the hand-computed figure is 175 500ms ` +
+          `(150 000 request + 25 500 store). An \`undefined\` means the ` +
+          `\`mt5-rotate\` label is gone and the leg is summed with validate. ` +
+          `Recompute by hand; change the literal only because the inputs ` +
+          `changed, never to make a diff pass.`,
+      ).toBe(175_500);
+      expect.soft(
+        175_500 <=
+          connectAbortDeadlineMsFor("mt5") - WAIT_ABORT_GRACE_MS,
+        `the mt5-rotate worst case (175 500ms) must be at most ` +
+          `connectAbortDeadlineMsFor("mt5") - WAIT_ABORT_GRACE_MS ` +
+          `(${connectAbortDeadlineMsFor("mt5") - WAIT_ABORT_GRACE_MS}ms), or the ` +
+          `browser gives up and says "Nothing was saved" while the rotate leg ` +
+          `can still write.`,
+      ).toBe(true);
+      expect.soft(
+        SEAM_BUDGETS["keys-rotate-secret"].timeoutMs <=
+          SEAM_BUDGETS["validate-key-serialized"].timeoutMs,
+        `keys-rotate-secret's timeout (${SEAM_BUDGETS["keys-rotate-secret"].timeoutMs}ms) ` +
+          `must be at most validate-key-serialized's ` +
+          `(${SEAM_BUDGETS["validate-key-serialized"].timeoutMs}ms): the browser ` +
+          `deadline was derived from the serialized validate budget.`,
+      ).toBe(true);
+      expect.soft(
+        SEAM_BUDGETS["keys-rotate-secret"].retries,
+        `keys-rotate-secret's retries must equal validate-key-serialized's: ` +
+          `a retry re-spends the whole deadline and breaks the O2 bound.`,
+      ).toBe(SEAM_BUDGETS["validate-key-serialized"].retries);
     });
 
     /**

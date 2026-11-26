@@ -114,8 +114,15 @@ export const EncryptKeyResponseSchema = z.object({
 // field the caller needs to backfill `api_keys.venue_account_id` when it was
 // previously NULL — the login the seam just re-confirmed. Never a secret:
 // `venue_account_id` is the broker LOGIN, not the password.
+//
+// Phase 228 (CONN-02): `secret_changed` says whether the typed password
+// differs from the stored one, compared only after the broker accepted it.
+// OPTIONAL because Vercel deploys before Railway: a required field would fail
+// rotate-secret's own parse against the old Python service. Absent means the
+// old seam, which always meant "write"; it is never coerced to false.
 export const RotateSecretResponseSchema = EncryptKeyResponseSchema.extend({
   venue_account_id: z.string(),
+  secret_changed: z.boolean().optional(),
 });
 
 // --- /api/portfolio-analytics ---

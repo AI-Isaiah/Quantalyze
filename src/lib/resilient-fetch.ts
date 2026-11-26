@@ -965,6 +965,13 @@ export const SEAM_ROUTE_BUDGETS: Record<
     budgets: [
       { key: "validate-key", calls: 1, branch: "default-venue" },
       { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
+      // Phase 228 CONN-02. On an MT5 same-account reconnect the pre-validation
+      // fence rotates the working holder through this seam INSTEAD of
+      // `validateKey` + `encryptKey`. The branch is EXCLUSIVE: it must never be
+      // summed with validate (RESEARCH Pitfall 1), so it carries its own label.
+      // The unlabelled `encrypt-key` leg is charged here too and over-states
+      // the real arm (the rotate arm does not encrypt); that is the safe side.
+      { key: "keys-rotate-secret", calls: 1, branch: "mt5-rotate" },
       { key: "encrypt-key", calls: 1 },
     ],
   },

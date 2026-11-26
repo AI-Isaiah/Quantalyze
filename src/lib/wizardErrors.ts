@@ -1404,6 +1404,23 @@ export type WizardErrorAction =
 const SIZE_MB_PLACEHOLDER = "{sizeMb}";
 
 /**
+ * Phase 228 / CONN-04 — `KEY_ORPHANED`'s Disconnect bullet, held ONCE.
+ *
+ * It is the table's third `fix` sentence, byte for byte as it was. It is a
+ * constant because `formatKeyError` recognises the bullet BY CONTENT (never by
+ * index) when the holder is a named key and swaps in the sentence that names the
+ * key to Disconnect. With no holder, a strategy holder or a blank name the table
+ * sentence renders unchanged, so the unnamed case cannot drift from this one.
+ */
+const KEY_ORPHANED_DISCONNECT_FIX =
+  "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.";
+
+/** The same bullet, naming the key to Disconnect (curly quotes like “Disconnect”). */
+function keyOrphanedDisconnectFixNamed(nickname: string): string {
+  return `To connect this account with new credentials instead, choose “Disconnect” on the row for your key “${nickname}”. The stored key is kept on record but no longer used, and connecting the account again then works.`;
+}
+
+/**
  * 153.1-04 — the count-free HEAD of each description-bound title, held once so
  * the table's sentence and the interpolated sentence cannot drift apart.
  *
@@ -2848,7 +2865,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "To finish setting up with the account you already stored, open the Strategies page and find its row marked “No strategy yet” (below your strategies, on the last page if the list is paged). Where that row offers “Finish setup”, it builds the strategy from the stored key, with no credentials to enter again.",
       "Or connect this strategy with a different account — one whose key is not already stored here.",
-      "To connect this account with new credentials instead, choose “Disconnect” on that row. The stored key is kept on record but no longer used, and connecting the account again then works.",
+      KEY_ORPHANED_DISCONNECT_FIX,
       "If the Strategies page does not list this key, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
@@ -4990,9 +5007,20 @@ export function formatKeyError(
       context.holder.added_at !== undefined && formatDay(context.holder.added_at) !== "—"
         ? `, added ${formatDay(context.holder.added_at)}`
         : "";
+    // Phase 228 / CONN-04 — the Disconnect bullet names the key too, so an owner
+    // with several keys reads WHICH row to act on. Found by content, and only
+    // for a non-blank name: otherwise the table's bullet stands unchanged.
+    const nickname = context.holder.name.trim();
     return {
       ...base,
       cause: `You already stored this account as your key "${context.holder.name}"${added}. ` + base.cause,
+      ...(nickname.length > 0
+        ? {
+            fix: base.fix.map((f) =>
+              f === KEY_ORPHANED_DISCONNECT_FIX ? keyOrphanedDisconnectFixNamed(nickname) : f,
+            ),
+          }
+        : {}),
     };
   }
   if (code === "KEY_VENUE_ALREADY_CONNECTED" && context?.holder !== undefined) {

@@ -2620,8 +2620,7 @@ EXECUTED, §str/None follow-through, §Discovery observation).
 
 ## Phase 167.1.2 (ACCOUNTTRUTH) — founder close-out decisions (logged 2026-10-11)
 
-- **[167.1.2-ORPHAN-COPY-FIX]** (owner: the next key-connect phase; D-24). KEY_ORPHANED sends an allocator-role owner to email security instead of naming the key to Disconnect, and an owner whose only holder is an archived composite gets KEY_VENUE_ALREADY_CONNECTED while My Strategies offers "Finish setup". Done when every role is told which key to Disconnect and the archived case names the archived strategy.
-      ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-04; tagged 2026-11-23.**
+- **[167.1.2-ORPHAN-COPY-FIX]** (owner: the next key-connect phase; D-24). An owner whose only holder is an archived composite gets KEY_VENUE_ALREADY_CONNECTED while My Strategies offers "Finish setup". Done when the archived case names the archived strategy. (The other half, every role told by name which key to Disconnect on KEY_ORPHANED, was closed by Phase 228 KEYANSWERS CONN-04 on 2026-11-26; Phase 228 ruled the archived case out of scope, F-2.)
 
 ## Phase 164.6.6.2.3 (FLOWTIMING) — routed items (logged 2026-10-11)
 
@@ -3419,15 +3418,6 @@ bargain has two halves; this section is the second one. Source: `153.4-REVIEW.md
 Raised by the `/ship` pre-landing + adversarial reviews. The four that met the blast-radius bar
 (user-facing or data-integrity) were FIXED in v0.59.0.0 and are not listed here. These did not.
 
-- [ ] **C-2 / A-4 — a rotated venue password re-connect reports success and stores nothing.**
-  `create-with-key/route.ts` — the dedup arm returns BEFORE `validateKey`, and keys on the MT5
-  login alone; `api_secret`/`passphrase` are never consulted. A user re-running the wizard to
-  update a rotated investor password is told the account is already connected, while the stored
-  ciphertext still holds the OLD password and the key keeps failing to sync with no signal. Same
-  shape for a typo'd password. ⭐ Highest-value of this batch: silent, and it is the ordinary
-  "I rotated my credentials" path. Needs a product call — update-in-place, or refuse with copy
-  that names the remedy (there is no credential-update UI today; the client UPDATE is revoked).
-      ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-02; tagged 2026-11-23.**
 - [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
   `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
   keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;
