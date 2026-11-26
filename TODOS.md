@@ -1243,11 +1243,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   The ROADMAP `### Phase 189` section stays as the spec, including the three row shapes the code narrows it to and the read-only worker count that comes first.
   **Owner / Trigger:** the next milestone's planning. The first step needs the founder's approval for each worker run.
 
-- [ ] **[185-BOOK-CUMULATIVE-UNEXPLAINED] — the founder's Deribit book compounds to about x3836 over its history, and valuing options at market did not bring it down (logged 2026-11-03).**
-  185 plan 10 (PROD, 2026-11-03, after the 185 deploy): valuing options at market cut the book's days above +50% from 6 to 2. The cumulative did not come down: whole history x3516 to x3836, 2025 x1008 to x999, 2026 x2.07 to x2.09. So cash-basis options are not what drives the multi-year compounding, as the 185-01 debug session already suspected.
-  The founder chose a TODOS entry, not a phase (185 D-14, 2026-11-03), under the same day's rule that purely Deribit work leaves v1.20.
-  **Owner / Trigger:** the next milestone's planning. Start from the 185-01 debug session and the plan 10 `sc4-book:` and `sc4-report:` lines.
-      ⭐ **Owned by Phase 233 DERIBITTRUTH, v1.22; REQUIREMENTS.md DBOOK-01; tagged 2026-11-23.**
+- [ ] **[233-STRATEGY-FRESHNESS-UNWATCHED] — strategy-mode return series have no freshness check, because they store no flow, anchor or terminal day to compare with (logged 2026-11-24, Phase 233).**
+  Phase 233's `freshness` prober arm judges key-mode series only. Its comparison side (`key_inputs` flows, `realized_terminal_day`, `nav_mark`) is written only by the key-mode derive epilogue. Strategy mode stores `data_quality_flags.tiny_base_days` but no flow, anchor or terminal day, so a strategy series that stops while its inputs move is not paged. A data-integrity monitoring gap.
+  **Owner / Trigger:** unrouted; the next milestone's planning, or sooner if a strategy series is found stale. **Closed when:** a strategy-mode comparison with a founder-ruled rule exists, or the founder rules the gap accepted.
 
 - [ ] **[187-BINANCEINCOME-NEXT-MILESTONE] — Binance futures realized P&L and funding never reach the derive, because the income call uses a method name the pinned ccxt does not have (retired from v1.20 2026-11-03).**
   The founder moved Phase 187 BINANCEINCOME out of v1.20 on 2026-11-03: "put binance into todos". Not planned, nothing shipped.
@@ -1852,9 +1850,6 @@ mismatch today, so this is hygiene rather than breakage; left untouched here to 
 surgical.
 
 ### Money-path correctness (latent / flag-gated / edge cases)
-- **Deribit `correction` residual** — a capital-reason row carrying a trading token and no
-  capital word still classifies as trading P&L. Tighten the word-boundary classifier.
-      ⭐ **Owned by Phase 233 DERIBITTRUTH, v1.22; REQUIREMENTS.md DBOOK-02; tagged 2026-11-23.**
 ### Reliability / observability
 - **No cron migration in the repo has EVER asserted `cron.job.username`/`database`** (found
   2026-08-19 by the RLS audit of Phase 146.2's R3 migration; INHERITED gap, not introduced —

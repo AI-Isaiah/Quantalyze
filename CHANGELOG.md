@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.133.83.0] - 2026-11-26 — Phase 233 DERIBITTRUTH: a stale Deribit series is paged unless the derive named why, a correction is trading only when it names an instrument, and the book's cumulative is read day by day
+
+The Deribit account whose stored returns stopped on 2026-10-26 was not broken. After a withdrawal of nearly the whole account that day, the Phase 188 tiny-base rule left every later day out, and the derive stated each of those days in `key_inputs.tiny_base_days`. What was missing was a reader. This phase adds that reader as a new production prober arm, tightens the Deribit correction classifier, and adds an offline oracle that reads the founder's Deribit book day by day. Requirements FRESH-01, FRESH-02, DBOOK-01 and DBOOK-02 are met. No writer changed and no day was backfilled.
+
+### Added
+- **The `freshness` prod-prober arm (FRESH-02)** in `scripts/prod-prober/arms/freshness.mjs`, the prober's fifth arm. For every key the daily derive touched in the last 3 days, it compares the newest stored return day with the newest flow, realized terminal or NAV-mark day in `key_inputs`.
+  - A gap over the bound pages as `freshness-stale`. The bound absorbs the trailing derive-lag days.
+  - The gap is accepted only when every gap day is a day the derive itself stated it left out (`tiny_base_days`), or when the key carries an `anchor_null_reason`.
+  - Both statements are SELECT/WITH only, and a self-test scenario pins that.
+  - A failed, empty, truncated or malformed read is a `measure-fail`, never green. So is a scope where no key carries `realized_terminal_day`.
+  - A venue with no judged key is a `measure-fail` on its own subject.
+  - The defect table carries `<venue>#<tag>` subjects only (the tag is a short md5 prefix): no key id, allocator id or amount.
+  - The workflow header and the dispatch input name the arm, and `arm=freshness` runs it alone as a narrowed diagnostic.
+- **The Deribit book attribution oracle (DBOOK-01)** in `analytics-service/scripts/deribit_book_oracle.py`. It is an offline, read-only reproduction of a book's published daily returns from its keys' stored inputs, and it imports no production arithmetic.
+  - Every published day is either explained, or withheld under a named reason: `no_stored_base_level`, `key_basis_not_reproducible`, `key_set_not_reproducible`, `attribution_mismatch` or `emptied_stretch`.
+  - It also names omitted, annotated, carried and rotated days.
+  - An emptied (dust) level counts as zero capital in both sums, the way the compose counts it.
+  - It reads PROD's payload shapes and prints its own read-only SQL. Its output cannot leak an id.
+
+### Fixed
+- **A Deribit `correction` is trading P&L only when it names an instrument (DBOOK-02).** A trading word is no longer enough. The row also needs a structured `instrument_name`, or an anchored upper-case instrument token in its reason (perpetual, linear perpetual, dated future or option). A capital adjustment that carries a trading word and no instrument, such as "funding account correction", now fails loud through `assert_correction_classifiable` instead of counting as trading. The gate is narrower than before, so every shape that was non-trading stays non-trading.
+
+### Notes
+- **FRESH-01, the 2026-11-26 PROD reading (read-only, marker first).** The three logins each store a return for 2026-11-25 and none for 2026-10-27 to 2026-11-24. Their 2026-11-26 derives are `done` at attempts 1. Their `key_inputs` still state every gap day as left out. A narrowed dispatch of the new arm against PROD read `scope derived=25 with_inputs=25 with_terminal=24`, `stale=0`, and no defects. That also proves the prober role can read `allocator_equity_derived` and `compute_jobs` (A5).
+- **Handed to Phase 234:** after the 01:37Z compose, two of the three books that hold these logins no longer carry `out_of_window_flow`. One book still does and reads untrustworthy. The CONTEXT Q2 ruling assumed it would clear.
+- **DBOOK-01 closes as a reading.** On PROD the oracle explained 806 of 920 published book days, with 114 withheld, every one of them structural, and the key set reproduced. The founder answered Accept on 2026-11-25: those days stay published and are named withheld in the reading.
+- **The 155.2 freeze does not apply.** No MT5 number and no shared key-mode exit moves.
+- **Known limits:**
+  - O2: `anchor_null_reason = balance_error` covers a gap for as long as the read keeps failing. That is the rule as ruled.
+  - O3: a key with no stored return, or with no `key_inputs` row, is counted and logged and is not paged, unless it is the only key of its venue.
+  - A1: raw Deribit ledgers are not stored, so whether any PROD key holds a correction with a trading word and no instrument was not measured. If one does, that key's nightly derive fails loud after deploy and surfaces as a failed derive.
+  - The oracle's counted key set is a declared input. It checks the declared set against `inputs.n_keys` and cannot prove that the compose picked the same set.
+  - Strategy-mode series are not watched by the arm (new `TODOS.md` entry `[233-STRATEGY-FRESHNESS-UNWATCHED]`).
+
+### Tests
+- Prober self-test scenarios go from 91 to 109. They cover every freshness kind on its own fixtures, the day-by-day and boundary rules, the bound plus one, a tail edge left uncovered, the per-venue guard in both its no-reference and no-return halves, and a read-only pin over both statements. `src/__tests__/prod-prober-wiring.test.ts` binds each SQL field name the arm reads to the writer line that stores it.
+- One fixture per Deribit correction shape runs through the classifier and both aggregators, plus pins rejecting non-instrument strings in `instrument_name`.
+- The oracle has 15 hand-derived fixtures in `analytics-service/tests/fixtures/deribit_book_oracle/`. Data-integrity gates were neutered to RED and restored from byte backups.
+
+### Removed
+- `TODOS.md` entries closed and deleted: `[185-BOOK-CUMULATIVE-UNEXPLAINED]` (DBOOK-01) and the "Deribit `correction` residual" bullet (DBOOK-02).
+
 ## [0.133.82.1] - 2026-11-26 — records: Phase 222 ALERTTRUTH closed, Phases 252 DERIBITOPTIONS and 236 FIGUREMATH records (human verification pending), Phase 253 BINANCECURSOR booked
 
 Records only: no source, test, workflow or migration change.
