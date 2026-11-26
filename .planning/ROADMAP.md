@@ -304,6 +304,8 @@ Plans:
 **Gap wave 5** *(blocked on gap wave 4 completion)*
 - [ ] 225-19-PLAN.md — re-base plan 10: rename migration B to a current timestamp, re-measure the census, last read-only PROD check (PR-3)
 
+**Poll-path server refusal booked 2026-11-26 (plan 20 Task 3 PASS):** the enforcing server bracket at the three MT5 poll reads (review WR-01 of PR-2c) is owned by follow-up gap plan 225-21, not yet written. Record: `225-20-SUMMARY.md`, section `Poll-path server enforcement: owner`.
+
 ### Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks
 
 **Goal:** The MT5 derive soak (`analytics-service/scripts/mt5_soak.py`) becomes an oracle that cannot agree with the derive by construction (PITFALLS Pitfall 12). It judges a BTC-unit account on floors in its own unit. It rejects NaN and implausible timed-day returns, not only infinity. It checks each deal's day against its own per-day walk that imports no production helper. It is wave 0, so 229's `nav_twr.py` edits are judged by a soak built independently of them. One file; no migration; no published number moves.

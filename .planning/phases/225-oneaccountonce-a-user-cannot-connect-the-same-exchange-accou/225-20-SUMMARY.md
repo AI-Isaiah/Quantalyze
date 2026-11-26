@@ -25,8 +25,8 @@ key-files:
 decisions:
   - "The helper lives in services/mt5_read.py, not mt5_probe.py, so PR-2c0 and PR-2c share no file."
   - "The derive read logs on the PRE snapshot only (one line is one poll); the POST bracket is unchanged."
-status: partial
-tasks_complete: "2 of 3 (Task 3 is the orchestrator's post-deploy checkpoint and is pending)"
+status: complete
+tasks_complete: "3 of 3 (Task 3 read by the phase orchestrator on 2026-11-26: PASS, owner 225-21 booked)"
 commits: 2
 plan_head_before: c7aec050588f7725c7df1c1fb67529d309ea2ad9
 plan_head_after: d306c214e5b90781395c864d39b7ca8d462f9f14
@@ -151,3 +151,24 @@ The other half of PR-2c's merge gate, the founder's wrong-server connect attempt
 - Files modified exist: `analytics-service/services/mt5_read.py`, `job_worker.py`, `allocator_positions.py`, and the three test files (FOUND).
 - Commits `5bb23d2c2` and `d306c214e` are ancestors of HEAD (FOUND).
 - No stubs; no login, server, password or key id of a real account in this file (the UUIDs in tests are synthetic).
+
+## Task 3 reading, 2026-11-26 ~10:30Z (full read by the phase orchestrator; supersedes the partial reading above as the verdict)
+
+Railway logs, both services, filter `session_server_matches_requested`, from 2026-11-25T12:00Z (after PR-2c0's deploy, #1346 `a4979ed94`). Each line counted once by timestamp, site and holder. Holder ids were mapped to stored servers by one PROD read (marker query first, it named PRODUCTION) and are kept out of this file.
+
+| site | True | False | not_captured |
+|---|---|---|---|
+| `allocator_holdings` (analytics service, 01:00-01:08Z daily poll) | 11 | 0 | 0 |
+| `derive_broker_dailies` (worker service, 00:56-01:50Z) | 17 | 0 | 0 |
+| `sync_trades_balance` | 0 | 0 | 0 |
+| `validate_wizard` / `validate_worker` | 0 | 0 | 0 |
+
+Coverage, per key: PROD has 11 live active MT5 keys on 4 distinct stored servers. The 11 holders in the `allocator_holdings` lines are exactly those 11 keys (11/11), and they span 4/4 servers. The derive lines cover the same 11 holders (17 lines; 6 keys were derived twice in the window).
+
+Not seen, and why it does not block: `sync_trades_balance` wrote no line in the window (no MT5 balance read ran through that site), and the validation sites wrote none because the 2026-11-26 founder attempts were refused at the broker's sign-in, before the verdict line (225-18-SUMMARY.md). Neither site produced a False or not_captured.
+
+**Verdict under step 5: PASS.** Lines > 0, 0 False, 0 not_captured, every determinable live server (4/4) covered by at least one True.
+
+## Poll-path server enforcement: owner
+
+Owner: **follow-up gap plan 225-21** (booked 2026-11-26 on the PASS above, per step 6). Scope: the enforcing server bracket at the three MT5 poll reads (`read_mt5_deal_ledger` PRE and POST in `services/mt5_read.py`, the balance read in `services/job_worker.py`, the holdings read in `services/allocator_positions.py`), using PR-2c's `assert_expected_server` and `Mt5ServerMismatchError` (both on main since #1344, `2aa1a0cbb`). Review WR-01 of PR-2c, CONTEXT Q6 item 1. It is not shipped on origin/main at this date: `git grep -c "assert_expected_server(" origin/main` over the three files prints nothing. Plan 225-21 is not yet written, so it is not a ROADMAP plan row; the ROADMAP carries one prose line naming it.
