@@ -101,6 +101,20 @@ No ORPHANED requirement: SECR-01 and SECR-02 are the only IDs mapped to Phase 24
 - `241-PROD-MEASUREMENT.md` mislabelled one strategies foreign key as no action; `241-04-SUMMARY.md` corrects it (it is set-null) and notes it did not apply to Pair B.
 - The ROADMAP progress row reads "Executed; review and ship pending". The code PR and the records PR still have to ship; ship must keep `.planning` out of the code PR.
 
+## Item 2 re-measurement, 2026-11-26 (read-only, marker query run first on each database)
+
+Human item 2 (spot-confirm the Pair B deletion) was re-measured live rather than read from `241-04-SUMMARY.md`:
+
+| Check | TEST | PROD |
+|---|---|---|
+| Pair B present | 0 | 0 |
+| Pair A present | 0 (never seeded there; `241-04-SUMMARY.md` is silent on it) | 1 |
+| OKX keys sharing Pair A's venue account | n/a | 4, equal to the SUMMARY's `expect_sibling_keys` |
+
+Limit: Pair B's key is deleted, so the sibling count is a stand-in query keyed on Pair A's OKX venue account. It matches the expected number and does NOT prove they are the same 4 rows the delete left behind. Counts and dates only; no literal is recorded.
+
+**Status stays `human_needed`.** Item 1 (the founder resets Pair A's password) is still open and nothing here changes it.
+
 ## Gaps Summary
 
 No gaps. Every roadmap success criterion is met in the repository, and the guard's ability to fail was reproduced independently here. The phase cannot be `passed` yet only because Pair A's password reset is a founder-only step that nothing in the repo can show.

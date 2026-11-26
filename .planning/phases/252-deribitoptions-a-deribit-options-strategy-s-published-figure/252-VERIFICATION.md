@@ -136,6 +136,12 @@ None blocking. No `TBD`, `FIXME` or `XXX` in files changed by the phase, and no 
 3. **Probe run** in the worker (founder-gated); a pass is the only input to a later MTM promotion, a fail keeps the withhold.
 4. **Ship-time PROD census** re-take, and the CHANGELOG entry naming the moved-figure reading (none expected), the deleted `DEF-142.2-07` and the new `[252-SINGLEKEY-OPTIONS-CASH]`.
 
+### Founder decision 2026-11-26 against human item 2 (copy and tone check)
+
+The founder decided that the OG card does NOT get the withheld sentence and that the return and drawdown charts are NOT withheld; both stay as they are. So the share-card and OG-image expectations in human item 1 and the monthly-returns follow-up in item 2 are settled by this decision, not left open. Recorded in `252-CONTEXT.md` and the ROADMAP 252 section.
+
+**Status stays `human_needed`:** the founder still runs the PROD probe (item 3), and the post-deploy factsheet and ship-time census items remain.
+
 ### Gaps Summary
 
 No gaps in the scope of this run. Wave 1 is implemented, wired across every surface the ruling names, covered by a census, and green. Wave 2's measurement tooling exists, is read-only and redacted, and is tested against a stub. What remains is founder-gated: the post-deploy confirmation, the copy check, the probe run, the ship-time census and CHANGELOG, and, only if the probe passes, a promotion plan (`/gsd-plan-phase 252 --gaps`).

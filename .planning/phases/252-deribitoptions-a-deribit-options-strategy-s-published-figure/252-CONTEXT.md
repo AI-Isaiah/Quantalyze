@@ -47,6 +47,9 @@ Out of scope: Deribit allocator books in key mode (Phase 233 DERIBITTRUTH owns b
 - [Wave 1] Q: "How is SC-2's RED fixture built?" → Selected: "A fixture with the debug session's wallet shape 0.311 → 0.1605 → 0.165 → 0.528 on an options member goes RED on today's code (its headline reaches a surface) and GREEN after (withheld with the named reason)" — test-only.
 - [Ship] Q: "One PR or two?" → Selected: "Wave 1 ships in the phase PR. Wave 2's measurement tooling ships with it if it is ready; the founder-gated measurement run and any promotion follow the measurement" — release sequencing, cheap to change.
 
+### Founder decision 2026-11-26 (OG card and returns charts stay as they are)
+- The OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld. Both stay as they are. This closes the open question the founder-visual-check item carried (the Monthly Returns heatmap, IN-06, and the card wording); it narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Recorded here and in the ROADMAP 252 section per the deviation policy.
+
 ### Claude's Discretion
 - The public wording of the withheld reason follows the existing withheld-headline sentences and DESIGN.md, with no flag names or job vocabulary. It is user-facing copy, so the founder sees it at the visual check.
 
