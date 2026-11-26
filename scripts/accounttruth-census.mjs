@@ -138,6 +138,13 @@ const KEYS_CTE = String.raw`keys AS (
 // the duplicate check until then. So it counts here as unresolved. `eligible`
 // is deliberately NOT the holder test: a revoked holder that is still
 // connected keeps its index slot, and its marked sibling is resolved.
+//
+// 2026-11-25 (Phase 225 plan 10, CONN-03): the index gained a fourth key member,
+// COALESCE(venue_server, ''), so the same login on two different servers no longer
+// collides. This census's holder test stays at login level (same owner, same exchange,
+// holder live with a known venue_account_id), by decision of that plan. A marker whose holder
+// sits on ANOTHER server therefore still reads as marked against a live holder, although that
+// holder no longer blocks the stamp; the key is stamped by its own next successful poll.
 export const FIXED_EXCHANGES = Object.freeze(["binance", "okx", "bybit", "deribit", "sfox", "mt5"]);
 const SQL_A = String.raw`WITH ${KEYS_CTE},
 exchanges AS (

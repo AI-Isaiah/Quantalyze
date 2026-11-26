@@ -261,6 +261,10 @@ founder can take.
   - **Fix direction:** log at ERROR (or `logger.exception`), say "data_quality_flags", and name `phase1_read_refused`, `phase1_failed` and the owned keys written or cleared (key names only, no venue text). The outcome stays as it is.
   - **Gate:** a handler test that makes the upsert raise on a refused run and asserts the log line names the refusal key, shown RED before the fix.
 
+- [ ] **`[225-VENUE-SERVER-NORMALISED-CHECK]` The rebuilt account index compares `api_keys.venue_server` byte for byte, and nothing in the database enforces that it is normalised** (logged 2026-11-26, Phase 225 ONEACCOUNTONCE PR-3 review round 2, silent-failure-hunter M2, MEDIUM, defence in depth, not user-facing; owner: the next phase that writes `venue_server` or touches `api_keys_user_exchange_venue_account_uniq`)
+  - Migration B made `COALESCE(venue_server, '')` the fourth member of `api_keys_user_exchange_venue_account_uniq`. `api_keys_venue_server_valid` (20261123180000) refuses only a blank or over-128 value, so `'SRV-A'` and `'srv-a'` would be two accounts at the index, where the old login-only index collapsed them.
+  - Every writer normalises today (`create_wizard_strategy`, `swap_account_slot`, `normaliseVenueServer`, `normalise_venue_server`), and PROD on 2026-11-26 held 0 non-normalised servers. A future writer that skips the normaliser would create a silent duplicate.
+  - Fix: a CHECK `venue_server IS NULL OR venue_server = lower(btrim(venue_server, E' \t\r\n'))`, or the normalised expression in the index member. Mind Postgres `lower()` vs JS/Python case folding on non-ASCII input.
 - [ ] **`[225-SWAP-LOCKSET-PIN]` The `swap_account_slot` lock-set fix has no arm that fails on revert** (logged 2026-11-23, Phase 225 ONEACCOUNTONCE PR-1 review round 2, MEDIUM, not user-facing; owner: the next phase that touches `swap_account_slot`)
   - **What:** the WR-01 fix adds `OR account_shared_with_api_key_id = p_old_holder` to the id-ordered `FOR UPDATE` pass, so two swaps on sibling duplicates queue instead of deadlocking. The SQL lane runs one session, so reverting that clause brings back a raw 40P01 without any gate going red. The fix was proven with a two-session harness that is not in the repo.
   - **Fix direction:** a static twinned arm that asserts the function source carries the dependent clause inside the lock query, or a two-session lane test.
@@ -3436,18 +3440,6 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   "I rotated my credentials" path. Needs a product call — update-in-place, or refuse with copy
   that names the remedy (there is no credential-update UI today; the client UPDATE is revoked).
       ⭐ **Owned by Phase 228 KEYANSWERS, v1.22; REQUIREMENTS.md CONN-02; tagged 2026-11-23.**
-- [ ] **A-3 — `venue_account_id` is the MT5 login alone, but a login is only unique within a broker
-  server.** Two accounts at different brokers sharing a login number collide on
-  `(user_id, exchange, venue_account_id)` → wrong-account resolution. Server-qualifying the value
-  (`<broker_server>:<login>`, already carried as `passphrase`) closes it. ⚠️ NOT a patch: the column
-  is live on PROD, so changing what is stored is a migration decision with a backfill question.
-  Not declared anywhere before this review.
-  ⚠️ **2026-10-03 (167.1.2 plan 08, founder Option B):** the holdings poll now also stamps MT5 keys
-  connected before the column existed (2026-08-12), from the login alone. So a cross-server login
-  clash between two of one owner's keys surfaces as a `duplicate` marker (a key-card note plus an
-  audit event), not as a connect refusal. Re-score this entry if another path ever creates an MT5
-  key with a NULL `venue_account_id`.
-      ⭐ **Owned by Phase 225 ONEACCOUNTONCE, v1.22; REQUIREMENTS.md CONN-03; tagged 2026-11-23.**
 - [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
   `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
   keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;
@@ -3483,8 +3475,9 @@ named files are unmodified by the phase, so neither was quietly half-done.
   calling the venue, which is an application-tier probe; the MT5 gateway already performs one at
   validate time, so persisting *its verdict* alongside the value is the plausible remedy and needs
   its own decision (it is a migration + backfill question on a column that is live on PROD).
-  ⚠️ **Distinct from A-3 above:** A-3 is about this value's *shape* (a login is unique only within a
-  broker server); this entry is about its *provenance*. Fixing either does not fix the other.
+  ⚠️ **Distinct from the former A-3** (the value's *shape*: a login is unique only within a broker
+  server), closed by Phase 225 PR-3 in v0.133.92.0. This entry is about its *provenance*, which that fix
+  does not touch.
 
 ### Phase 153.7 ship gate — one unnamed vitest flake, recorded rather than lost (added 2026-08-14)
 

@@ -65,7 +65,7 @@
 -- create_wizard_strategy canary — so a migration EDIT aborts the apply instead of
 -- reaching the gate. The `sql` steps drift the LIVE object after apply, which is
 -- what this gate exists to catch: state that was correct once and is not now.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125132334_api_keys_venue_server_owner_read.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261125132334_api_keys_venue_server_owner_read.sql","supabase/migrations/20261126140500_api_keys_venue_server_index.sql"]}
 
 DO $$
 DECLARE
@@ -87,6 +87,8 @@ DECLARE
   v_idx_cols    TEXT[];
   v_idx_unique  BOOLEAN;
   v_idx_partial BOOLEAN;
+  v_idx_natts   INT;    -- Phase 225: indnkeyatts of the identity index
+  v_idx_exprs   TEXT;   -- Phase 225: pg_get_expr(indexprs) of the identity index
   v_overloads   INT;
   v_fn_src      TEXT;
   v_fn_src_k    TEXT;   -- add_wizard_composite_key, raw definition
@@ -127,11 +129,21 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (1): api_keys.venue_account_id must be text, got %', v_col_type;
   END IF;
 
-  -- ----- 2. partial-UNIQUE on (user_id, exchange, venue_account_id) ---------
-  -- RED-UNDER: DROP the LIVE api_keys_user_exchange_venue_account_uniq index —
-  --            WIZCONT-02's whole DB backstop. `sql` step for the same reason as
-  --            section 1: the migration re-verifies this index at apply time.
-  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq"}]}
+  -- ----- 2. partial-UNIQUE on (user_id, exchange, venue_account_id, COALESCE(venue_server, ''))
+  -- ⭐ Phase 225 / CONN-03 (plan 10): the index carries a FOURTH key member, the
+  -- expression COALESCE(venue_server, ''), so the same login on two servers is two
+  -- accounts. The three plain columns below are asserted exactly as before; the member
+  -- is asserted by indnkeyatts = 4 and by indexprs naming venue_server. ⛔ The member is
+  -- deliberately NOT pinned to the text COALESCE: the behavioural arms 6s-* each twin a
+  -- DIFFERENT wrong expression, and every such twin must pass THIS structural section so
+  -- that its own arm, not this one, is the first failure. What each wrong expression
+  -- does is pinned behaviourally, in section 6.
+  -- RED-UNDER: rebuild the LIVE api_keys_user_exchange_venue_account_uniq as the old
+  --            login-only index (user_id, exchange, venue_account_id) — the state before
+  --            Phase 225: same name, UNIQUE, partial, same three columns, both predicate
+  --            conjuncts, so only the key-width assertion can see it. `sql` step for the
+  --            same reason as section 1: the migration re-verifies this index at apply time.
+  -- RED-UNDER-M: {"arm":"2","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL"}]}
   SELECT indexdef INTO v_idx_def
     FROM pg_indexes
    WHERE schemaname = 'public'
@@ -163,7 +175,25 @@ BEGIN
    WHERE n.nspname = 'public'
      AND c.relname = 'api_keys_user_exchange_venue_account_uniq';
   IF v_idx_cols IS DISTINCT FROM ARRAY['user_id', 'exchange', 'venue_account_id']::TEXT[] THEN
-    RAISE EXCEPTION 'TEST FAILED (2): index must cover exactly (user_id, exchange, venue_account_id) in that order, got %', v_idx_cols;
+    RAISE EXCEPTION 'TEST FAILED (2): index must lead with the plain columns (user_id, exchange, venue_account_id) in that order, got %', v_idx_cols;
+  END IF;
+
+  -- ⭐ THE FOURTH MEMBER. The query above joins pg_attribute, so an expression member
+  -- (attnum 0) drops out of it: it returns the same three names for the old index and
+  -- the new one, and proves nothing about the member. indnkeyatts counts every key
+  -- attribute including the expression, and indexprs names what it is.
+  SELECT i.indnkeyatts, pg_get_expr(i.indexprs, i.indrelid)
+    INTO v_idx_natts, v_idx_exprs
+    FROM pg_index i
+    JOIN pg_class c     ON c.oid = i.indexrelid
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE n.nspname = 'public'
+     AND c.relname = 'api_keys_user_exchange_venue_account_uniq';
+  IF v_idx_natts IS DISTINCT FROM 4 THEN
+    RAISE EXCEPTION 'TEST FAILED (2): api_keys_user_exchange_venue_account_uniq keys on % attributes, expected 4 (user_id, exchange, venue_account_id, COALESCE(venue_server, '''')). A login-only index collides the same MT5 login on two broker servers (CONN-03)', v_idx_natts;
+  END IF;
+  IF v_idx_exprs IS NULL OR v_idx_exprs NOT ILIKE '%venue_server%' THEN
+    RAISE EXCEPTION 'TEST FAILED (2): the fourth key member of api_keys_user_exchange_venue_account_uniq is not an expression over venue_server (indexprs: %)', v_idx_exprs;
   END IF;
 
   -- Must be PARTIAL. NULL is the NORMAL value here — it means "this venue
@@ -619,6 +649,14 @@ DECLARE
   v_cname     TEXT;
   v_ws_err    TEXT;
   v_key_ws    UUID;
+  -- Phase 225 / CONN-03 plan 10 (arms 6s-*). One synthetic login per arm so the rows an
+  -- arm leaves live never touch another arm; servers are synthetic. A public repo.
+  c_s_nn      CONSTANT TEXT := 'wizcont225-s-nn';
+  c_s_two     CONSTANT TEXT := 'wizcont225-s-two';
+  c_s_same    CONSTANT TEXT := 'wizcont225-s-same';
+  c_s_mix     CONSTANT TEXT := 'wizcont225-s-mix';
+  c_s_own     CONSTANT TEXT := 'wizcont225-s-own';
+  c_idx       CONSTANT TEXT := 'api_keys_user_exchange_venue_account_uniq';
 BEGIN
   email_a := 'test-wizcont02-venue-a-' || v_run || '@quantalyze.test';
   email_b := 'test-wizcont02-venue-b-' || v_run || '@quantalyze.test';
@@ -656,6 +694,41 @@ BEGIN
   IF v_stamped IS DISTINCT FROM c_login THEN
     RAISE EXCEPTION 'TEST FAILED (6.0): seeded venue_account_id did not persist (got %, expected %). current_user is %, which the api_keys_scrub_venue_account_id trigger does not admit — this whole behavioural section would be vacuous. Run this file as postgres/service_role.',
       v_stamped, c_login, current_user;
+  END IF;
+
+  -- ----- 6s-null-null. two LIVE keys on one login, neither with a server, are REFUSED -----
+  -- Phase 225 / CONN-03 (plan 10). COALESCE(venue_server, '') makes two null servers equal:
+  -- a NULL server is NOT a wildcard at the index, so every key the backfill has not stamped
+  -- yet keeps today's one-live-key-per-login guarantee. ⛔ This arm runs BEFORE 6a on purpose:
+  -- 6a also inserts two null-server rows on one login, so a twin that makes nulls distinct
+  -- would trip 6a first and this arm could never be the first failure.
+  -- RED-UNDER: rebuild the LIVE index with the member NULLIF(venue_server, '') instead of
+  --            COALESCE(venue_server, ''): still a fourth expression member naming
+  --            venue_server, so section 2 passes, but two NULL servers are now DISTINCT
+  --            and the second key is admitted.
+  -- RED-UNDER-M: {"arm":"6s-null-null","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (NULLIF(venue_server, ''))) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL"}]}
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (uid_a, 'mt5', 'wizcont225 nn first', 'enc', true, c_s_nn);
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-null): the FIRST live key of a login with no server was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+  v_refused := FALSE;
+  v_cname := NULL;
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (uid_a, 'mt5', 'wizcont225 nn second', 'enc', true, c_s_nn);
+  EXCEPTION WHEN unique_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    v_refused := TRUE;
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-null): a second live key with no server on one login was refused with SQLSTATE % (%), not the 23505 of the identity index', SQLSTATE, SQLERRM;
+  END;
+  IF NOT v_refused THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-null): a SECOND live key with no server on one (user, exchange, login) was ADMITTED — two NULL servers are distinct at the index, so every key the backfill has not stamped yet lost its duplicate fence (CONN-03)';
+  END IF;
+  IF v_cname IS DISTINCT FROM c_idx THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-null): the second key was refused by % and not by %', v_cname, c_idx;
   END IF;
 
   -- ----- 6a. two LIVE rows, one identity → 23505 ----------------------------
@@ -755,9 +828,10 @@ BEGIN
   --            extra `exchange = 'mt5'` conjunct — the "only MT5 has an account
   --            id" assumption this phase retires. Sections 1-5 still read as
   --            intended (same name, UNIQUE, partial, same columns, both
-  --            predicate conjuncts present) and 6a-6e are all mt5, so only this
-  --            arm can see it.
-  -- RED-UNDER-M: {"arm":"6f CCXT","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL AND exchange = 'mt5'"}]}
+  --            predicate conjuncts present, and since Phase 225 the same four key
+  --            members, which section 2 asserts) and 6a-6e are all mt5, so only
+  --            this arm can see it.
+  -- RED-UNDER-M: {"arm":"6f CCXT","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (COALESCE(venue_server, ''))) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL AND exchange = 'mt5'"}]}
   BEGIN
     INSERT INTO api_keys (id, user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
     VALUES (k_okx, uid_a, 'okx', 'wizcont02 okx live', 'enc', true, c_okx_acct);
@@ -792,8 +866,9 @@ BEGIN
 
   -- ===== Phase 225 / CONN-03 — api_keys.venue_server (migration 20261123180000) ====
   -- The column and the 13th create_wizard_strategy parameter are new, and the unique
-  -- index is NOT changed by that migration (plan 10 owns it), so every arm below reads
-  -- the column, the function or the privileges, never the index.
+  -- index is NOT changed by that migration (plan 10's migration owns it), so every 6v arm
+  -- below reads the column, the function or the privileges, never the index. The index's
+  -- own behaviour is the 6s arms at the foot of this section.
   -- The wizard RPC admits service_role only (auth.role() reads request.jwt.claims),
   -- so each call sets that claim first and clears it again right after.
 
@@ -988,6 +1063,95 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (6v-no-grant): anon holds a privilege on api_keys.venue_server';
   END IF;
 
+  -- ----- 6s-two-servers. the same login on TWO servers: both keys are admitted ------------
+  -- Phase 225 / CONN-03 (plan 10), the point of the fourth member: login 1001 on one broker
+  -- and login 1001 on another are two accounts. Without the member the second insert is the
+  -- 23505 of the old login-only index.
+  -- RED-UNDER: rebuild the LIVE index with the member (venue_server IS NULL): still a fourth
+  --            expression member naming venue_server, so section 2 passes, but two keys that
+  --            both HAVE a server get the same member value and collide.
+  -- RED-UNDER-M: {"arm":"6s-two-servers","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (venue_server IS NULL)) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL"}]}
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 two servers a', 'enc', true, c_s_two, 'srv-a');
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 two servers b', 'enc', true, c_s_two, 'srv-b');
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-two-servers): the same login on two DIFFERENT servers was refused 23505 — the identity index does not key on the server, so one MT5 login on two brokers collides (CONN-03)';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-two-servers): two keys on one login and two servers were refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+
+  -- ----- 6s-same-server. the same login on the SAME server: the second key is REFUSED by NAME ----
+  -- A server in the key must not weaken the fence for the case the index exists for.
+  -- RED-UNDER: rebuild the LIVE index with an extra `AND venue_server IS NULL` conjunct in
+  --            its predicate: both predicate conjuncts section 2 reads are still there, but a
+  --            key that carries a server is no longer indexed at all, so an equal server is
+  --            admitted twice.
+  -- RED-UNDER-M: {"arm":"6s-same-server","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (COALESCE(venue_server, ''))) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL AND venue_server IS NULL"}]}
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 same server first', 'enc', true, c_s_same, 'srv-a');
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-same-server): the FIRST live key on a login and server was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+  v_refused := FALSE;
+  v_cname := NULL;
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 same server second', 'enc', true, c_s_same, 'srv-a');
+  EXCEPTION WHEN unique_violation THEN
+    GET STACKED DIAGNOSTICS v_cname = CONSTRAINT_NAME;
+    v_refused := TRUE;
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-same-server): a second live key on one login and server was refused with SQLSTATE % (%), not the 23505 of the identity index', SQLSTATE, SQLERRM;
+  END;
+  IF NOT v_refused THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-same-server): a SECOND live key on one (user, exchange, login, server) was ADMITTED — the identity index no longer fences the same account on the same server (CONN-03, ONCE-02)';
+  END IF;
+  IF v_cname IS DISTINCT FROM c_idx THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-same-server): the second key was refused by % and not by %', v_cname, c_idx;
+  END IF;
+
+  -- ----- 6s-null-vs-set. a key with no server beside a key WITH a server is ADMITTED ----------
+  -- A NULL server is not a wildcard at the index: the wildcard that makes an unstamped key
+  -- count as the same account lives in the application fences and in reconnect, which refuse
+  -- before the index is reached. An index that treated NULL as a value would collide this pair.
+  -- RED-UNDER: rebuild the LIVE index with the member COALESCE(venue_server, 'srv-a'): a
+  --            fourth expression member naming venue_server, so section 2 passes, and the
+  --            pairs the earlier 6s arms insert behave as before, but a NULL server now equals
+  --            the server 'srv-a'.
+  -- RED-UNDER-M: {"arm":"6s-null-vs-set","apply":[{"kind":"sql","stmt":"DROP INDEX public.api_keys_user_exchange_venue_account_uniq; CREATE UNIQUE INDEX api_keys_user_exchange_venue_account_uniq ON public.api_keys (user_id, exchange, venue_account_id, (COALESCE(venue_server, 'srv-a'))) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL"}]}
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id)
+    VALUES (uid_a, 'mt5', 'wizcont225 mix null', 'enc', true, c_s_mix);
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 mix set', 'enc', true, c_s_mix, 'srv-a');
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-vs-set): a key with a server was refused 23505 beside a live key with NO server on the same login — the index treats a NULL server as a value that can equal a real one (CONN-03)';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-null-vs-set): a key with a server beside a key with none was refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+
+  -- ----- 6s-two-owners. two OWNERS on one login and server both insert (ONCE-02, Q3) ----------
+  -- The index is per tenant: the same login on the same server under two owners is allowed
+  -- (founder ruling Q3). 6e pins this for null servers; this arm pins it for a real server.
+  -- RED-UNDER: add a SECOND unique index on the LIVE database over (exchange, venue_account_id,
+  --            COALESCE(venue_server, '')) with no user_id, scoped to keys that carry a server
+  --            (so 6e, whose keys have none, is not its first failure): the cross-tenant
+  --            scoping error, alongside the correct index, which only this arm can see.
+  -- RED-UNDER-M: {"arm":"6s-two-owners","apply":[{"kind":"sql","stmt":"CREATE UNIQUE INDEX api_keys_venue_account_server_global_uniq ON public.api_keys (exchange, venue_account_id, (COALESCE(venue_server, ''))) WHERE venue_account_id IS NOT NULL AND disconnected_at IS NULL AND venue_server IS NOT NULL"}]}
+  BEGIN
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_a, 'mt5', 'wizcont225 owners a', 'enc', true, c_s_own, 'srv-a');
+    INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active, venue_account_id, venue_server)
+    VALUES (uid_b, 'mt5', 'wizcont225 owners b', 'enc', true, c_s_own, 'srv-a');
+  EXCEPTION WHEN unique_violation THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-two-owners): a DIFFERENT owner was refused 23505 for the same login and server — uniqueness is not tenant-scoped, one owner''s key leaks its existence to and blocks another''s (ONCE-02, founder ruling Q3)';
+  WHEN OTHERS THEN
+    RAISE EXCEPTION 'TEST FAILED (6s-two-owners): two owners on one login and server were refused with SQLSTATE % (%), not admitted', SQLSTATE, SQLERRM;
+  END;
+
   -- ----- cleanup ------------------------------------------------------------
   -- Explicit, in FK order, rather than relying on the profiles→api_keys cascade.
   -- The wizard drafts the 6v arms minted hang off uid_a through strategies.
@@ -995,5 +1159,5 @@ BEGIN
   DELETE FROM api_keys WHERE user_id IN (uid_a, uid_b);
   DELETE FROM auth.users WHERE id IN (uid_a, uid_b);
 
-  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes) and a tab/newline-only login or server stores NULL (6v-writes-ws), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank) and a tab/newline-only one (6v-check-ws), the owner may read api_keys.venue_server through the column grant (6v-owner-read), and the browser roles may not write it nor anon read it (6v-no-grant).';
+  RAISE NOTICE 'PASS (behavioural): duplicate LIVE identity refused (23505); a soft-disconnected row does NOT squat the slot; reconnecting into an occupied slot refused (23505); '''' and ''   '' refused (23514); a different tenant admitted the same identity; a second live okx row on one account refused and admitted once the first is disconnected (6f CCXT); the 13-parameter wizard RPC stores the normalised broker server in the same INSERT (6v-writes) and a tab/newline-only login or server stores NULL (6v-writes-ws), a call that omits it stores NULL (6v-omitted), api_keys_venue_server_valid refuses a blank or 129-character server by name (6v-check-blank) and a tab/newline-only one (6v-check-ws), the owner may read api_keys.venue_server through the column grant (6v-owner-read), and the browser roles may not write it nor anon read it (6v-no-grant); two null servers on one login are refused by the identity index (6s-null-null), the same login on two servers is admitted (6s-two-servers) and on one server refused by name (6s-same-server), a null server beside a set one is admitted (6s-null-vs-set), and two owners on one login and server are both admitted (6s-two-owners).';
 END $behavioural$;
