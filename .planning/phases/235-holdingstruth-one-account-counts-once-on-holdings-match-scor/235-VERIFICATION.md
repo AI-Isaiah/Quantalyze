@@ -1,9 +1,9 @@
 ---
 phase: 235-holdingstruth-one-account-counts-once-on-holdings-match-scor
 verified: 2026-11-26T17:55:00Z
-status: human_needed
-score: 6/7 must-haves verified
-verified_at_sha: 829e18b7d9daddb818a0eb15046e1dd4f333e564
+status: passed
+score: 7/7 must-haves verified
+verified_at_sha: c4a9f9ea16d6df879aac3733d7205b18ef26400a
 drift_subjects:
   - src/lib/latest-holdings-per-key.ts
   - src/lib/holdings-account-day.ts
@@ -18,17 +18,13 @@ drift_subjects:
   - src/app/(dashboard)/allocations/HoldingsTabPanel.tsx
 behavior_unverified: 0
 overrides_applied: 0
-human_verification:
-  - test: "Open My Allocation at a 390px viewport on a book whose native-unpriced marker read fails (or force the flag), on the Overview and on the Holdings tab."
-    expected: "The note 'We could not check whether each account's newest day could be priced in USD ...' is visible on both surfaces, wraps inside its column, and #main-content does not scroll horizontally."
-    why_human: "UI-SPEC marks this truth `backstop` (non-inferable). jsdom has no layout engine, so the shipped tests only prove the class lists carry no hidden/md:block toggle. Plan 04 itself says the verifier confirms it in a browser at 390px or records human_needed."
 ---
 
 # Phase 235: HOLDINGSTRUTH Verification Report
 
 **Phase Goal:** Once 225 has settled what the account identity holds, every reader counts one account once.
 **Verified:** 2026-11-26T17:55:00Z
-**Status:** human_needed
+**Status:** passed (the 390px item passed 2026-11-26, see Human Verification)
 **Re-verification:** No, initial verification
 
 ## Goal Achievement
@@ -43,9 +39,9 @@ human_verification:
 | 4 | SC-3b / HOLD-04: stale rows are never shown silently (rows kept, note shown) | VERIFIED | New registry entry `allocation.holdings-unpriced-check-failed` (read_failure, scope none, A-RELOAD). Rendered through `DegradeLine` on the Overview (`AllocationDashboardV2.tsx`, below `MissingDataMessage`, not gated on rebuilding) and the Holdings tab (`HoldingsTabPanel.tsx`), each only when the flag is true AND `holdingsSummary` is non-empty (no rows, nothing to mislead). Rows are not hidden when the flag is true (arm H4/regression guard). Tests `AllocationDashboardV2.unpriced-check.test.tsx`, `HoldingsTabPanel.unpriced-check.test.tsx`, `degrade-warnings.test.tsx`, `degrade-warning-scan.test.ts` green. |
 | 5 | SC-4 / HOLD-05: every failing key of a shared account is named, including a second key whose cause another key already printed | VERIFIED | Producer: `sharedAccountFailingGroups` (`key-data-gaps.ts:292-305`) uses the same `accountGroups`/`failing` logic as the `shared_account_failing` gap arm, so every all-failing group is emitted with or without a tail range; owner-only ids (T-186-18). `deriveSharedAccountFailingGroupsField` shares one private input builder with `deriveKeyDataGapsField`; field set in BOTH payload literals. Message: `missingDataLines` applies the R3-01 rule (`MissingDataMessage.tsx:348-388`): a group is named by a printed dated gap with exactly its ids, else by a new undated labelled line (`allocation.key-gap.shared-account-failing-undated`, no date, no "no complete history" claim); the book fallback stays for any group with a key the list cannot label. Overview passes `sharedFailingGroups`. Tests green (`key-data-gaps.test.ts`, `MissingDataMessage.test.tsx`, `...shared-account-named.test.tsx`, `queries.my-allocation.test.ts`). Neutered the undated push: 5 arms RED (M1, M2, M3, M6, M8), restored byte-equal. ⛔ CORRECTED 2026-11-26 (review round 1 WR-01, verified fixed in round 2): when any shared-account group is named only by the undated line, the book-level fallback line also prints (`everyGroupNamed && !anyUndated` in `missingDataLines`). The fallback is dropped only when every group is named by a printed dated gap. Every failing key is still named by label (SC-4). The row text before this note is kept as lineage. |
 | 6 | SC-5 / PROOF-01: each gate goes RED with its named arm first, restored from a byte backup, GREEN, recorded verbatim in the plan SUMMARY | VERIFIED | All six SUMMARYs carry a `PROOF-01 transcripts` section with pre-fix RED lines, per-neuter RED, `cmp` against backup (silent) and a GREEN re-run (01: lines 62-236; 02: 64-212; 03: 66-202+; 04: 82-187; 05: 58-126+; 06: 67-123+). Three independent spot neuters by this verifier reproduced RED on the named arms. |
-| 7 | UI-SPEC long-text (`backstop`): at 390px both unpriced-check notes are visible and wrap with no horizontal scroll | HUMAN | Class lists carry no hidden/breakpoint toggle (Mount B has `[overflow-wrap:anywhere]`; Mount A is a plain sentence with no unbreakable token) and a jsdom arm pins that, but layout cannot be exercised without a browser. See Human Verification. |
+| 7 | UI-SPEC long-text (`backstop`): at 390px both unpriced-check notes are visible and wrap with no horizontal scroll | VERIFIED 2026-11-26 (browser, throwaway harness; see Human Verification) | Class lists carry no hidden/breakpoint toggle (Mount B has `[overflow-wrap:anywhere]`; Mount A is a plain sentence with no unbreakable token) and a jsdom arm pins that, but layout cannot be exercised without a browser. See Human Verification. |
 
-**Score:** 6/7 truths verified (0 present-but-behavior-unverified; 1 routed to human, a `backstop` truth).
+**Score:** 7/7 truths verified (the `backstop` truth passed in a browser on 2026-11-26).
 
 ### Required Artifacts
 
@@ -117,11 +113,11 @@ None blocking. No `TBD`/`FIXME`/`XXX` in the diff of non-planning files. Only ad
 
 ### Human Verification Required
 
-#### 1. Unpriced-check note at 390px
+#### 1. Unpriced-check note at 390px: PASSED 2026-11-26
 
 **Test:** At a 390px viewport, load My Allocation with the marker read failing (or the flag forced) and look at the Overview and the Holdings tab.
-**Expected:** The one-line note is visible on both, wraps inside its column, and `#main-content` has no horizontal scroll.
-**Why human:** `backstop` truth; no layout engine in jsdom.
+**Result:** PASS. Run locally on a throwaway harness rendering the real `DashboardChrome`, `AllocationProvider` and `AllocationsTabs` (`AllocationDashboardV2` plus `HoldingsTabPanel`) with `holdingsUnpricedCheckFailed: true`, in Playwright at 390x844. For the Overview note (`dashboard-holdings-unpriced-check-note`) and the Holdings note (`positions-holdings-unpriced-check-note`): `documentElement` and `#main-content` `scrollWidth`/`clientWidth` were 390/390, the note box spanned left 40 to right 350 (width 310), wrapped to 5 lines and was visible. The Holdings table's own overflow is clipped by its `overflow-x-auto` wrapper.
+**Caveat:** stubbed data, layout only. The real marker-read path is covered by the phase's tests, including the multi-key arms added by #1380.
 
 ### Gaps Summary
 

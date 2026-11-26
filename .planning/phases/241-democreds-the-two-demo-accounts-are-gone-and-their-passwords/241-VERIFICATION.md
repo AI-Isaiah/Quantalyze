@@ -1,9 +1,9 @@
 ---
 phase: 241-democreds-the-two-demo-accounts-are-gone-and-their-passwords
 verified: 2026-11-25T00:00:00Z
-status: human_needed
-score: 4/4 roadmap success criteria verified (SC-1 as narrowed 2026-11-24); 1 founder step pending
-verified_at_sha: 9492075b50108ce87e09ab16743e4fb1324ddba3
+status: passed
+score: 4/4 roadmap success criteria verified (SC-1 as narrowed 2026-11-24); the founder step is done
+verified_at_sha: c4a9f9ea16d6df879aac3733d7205b18ef26400a
 drift_subjects:
   - scripts/check-demo-credential-digests.ts
   - src/__tests__/check-demo-credential-digests.test.ts
@@ -24,7 +24,7 @@ human_verification:
 
 **Phase Goal:** The two demo accounts no longer exist, and their passwords are out of the tree behind a guard that still bites, closing `158-OPS-03` (F-3). Narrowed by founder ruling 2026-11-24: Pair A is kept and the founder resets its password himself; Pair B is deleted on TEST and PROD.
 **Verified:** 2026-11-25 at HEAD `9492075b5`
-**Status:** human_needed (no gaps found; one founder step is pending)
+**Status:** passed (no gaps found; the founder step was done 2026-11-26)
 **Re-verification:** No, initial verification
 
 No credential, login, id, digest or marker text appears in this report. Pairs are named by role.
@@ -38,7 +38,7 @@ No credential, login, id, digest or marker text appears in this report. Pairs ar
 
 | # | Truth (ROADMAP SC) | Status | Evidence |
 |---|---|---|---|
-| 1 | SC-1 (narrowed): Pair B does not exist on TEST or PROD, dated, no literal in the record. Pair A kept; its reset is the founder's step. | VERIFIED for Pair B (record-based); Pair A reset pending, see human item 1 | `241-04-SUMMARY.md`: TEST deleted 2026-11-24 and re-verified present=0 on 2026-11-25; PROD chain committed and the admin-API delete printed matches-before=1, deleted=1, matches-after=0 on 2026-11-25; post-verify Pair B present=0, Pair A present=1, siblings_present=4, audit NULL-subject at the 4211 floor. The record holds counts and dates only. The ROADMAP entry and `241-CONTEXT.md` both carry the dated CORRECTED note for the narrowing. The PROD deletion was rehearsed on the lane first (`241-03-SUMMARY.md`: 9 PASS, 0 FAIL; four chain checks each neutered to RED by name and restored by `cp` then `cmp`). |
+| 1 | SC-1 (narrowed): Pair B does not exist on TEST or PROD, dated, no literal in the record. Pair A kept; its reset is the founder's step. | VERIFIED for Pair B (record-based); Pair A reset DONE 2026-11-26, see Founder step record | `241-04-SUMMARY.md`: TEST deleted 2026-11-24 and re-verified present=0 on 2026-11-25; PROD chain committed and the admin-API delete printed matches-before=1, deleted=1, matches-after=0 on 2026-11-25; post-verify Pair B present=0, Pair A present=1, siblings_present=4, audit NULL-subject at the 4211 floor. The record holds counts and dates only. The ROADMAP entry and `241-CONTEXT.md` both carry the dated CORRECTED note for the narrowing. The PROD deletion was rehearsed on the lane first (`241-03-SUMMARY.md`: 9 PASS, 0 FAIL; four chain checks each neutered to RED by name and restored by `cp` then `cmp`). |
 | 2 | SC-2: No tracked file contains either demo password literal. The guard checks a digest, and goes RED when a matching literal is planted. | VERIFIED | Run here: `npx tsx scripts/check-demo-credential-digests.ts` printed `OK, 12191 tracked files, 263484537 bytes scanned against 4 digest rows; 0 matches`, exit 0. The four digests appear in no tracked file other than the guard script itself (the test derives its canary at runtime). Source has no path allowlist, reads every `git ls-files` path as raw bytes, and fails on EMPTY-SCAN, UNREADABLE and the floors. Plan 01's records scrub covers all 12 archived files (`git diff --name-only` of the scrub range lists 12; whole-tree census after it showed literals only in the e2e test, which plan 02 then cleaned). RED on a plant is recorded in 241-02-SUMMARY P-03 to P-11 and reproduced below. |
 | 3 | SC-3: Seed and drain paths are retired or redirected as decided; the suites that read them run green. | VERIFIED | Decision recorded in CONTEXT (founder, keep as proposed): the seed reads its allocator login from the `DEMO_SEED_ALLOCATOR_*` environment variables, nothing reads either account, drain parses only fixed key ids. The non-planning diff (`6e8df792..HEAD`) touches no seed or drain file, consistent with that decision. The 11 TODOS-reading suites (558 tests) and the 28-file pre-push list (956 passed, 1 by-design skip) are recorded green in 241-04 and 241-02 SUMMARYs. The two suites asked for here passed on this run (22 tests). |
 | 4 | SC-4 / PROOF-01: the guard and any changed seed pin go RED on a neutered copy with the named arm first, restored from a byte backup, GREEN again, recorded without a literal. | VERIFIED | 241-02-SUMMARY has 19 rows (P-01 to P-19) in neuter, command, RED, restore (`cp` then `cmp`), GREEN form, including a binding row showing the digest row is what makes the live arm bite. 241-03-SUMMARY has R-01 to R-04 for the delete chain. Independently reproduced here: replacing the sha256 comparison in the guard with a constant made 5 arms fail (canary arm first, then case, edges, failure-text, every-window); restored from a scratch backup, `cmp` exit 0, 17 of 17 passed again. No seed pin changed, so no seed row is owed (stated in the SUMMARY). |
@@ -78,7 +78,7 @@ No credential, login, id, digest or marker text appears in this report. Pairs ar
 
 | Requirement | Plans | Status | Evidence |
 |---|---|---|---|
-| SECR-01 | 03, 04 | SATISFIED as narrowed (Pair B on TEST and PROD, record-based). Pair A is kept by ruling, and its reset is pending (human item 1). | 241-04-SUMMARY, 241-03-SUMMARY, ROADMAP and CONTEXT CORRECTED notes. REQUIREMENTS.md still shows SECR-01 unticked and its text still says both accounts; the narrowing is recorded in the ROADMAP and CONTEXT, so a milestone-audit reader should read those. |
+| SECR-01 | 03, 04 | SATISFIED as narrowed (Pair B on TEST and PROD, record-based). Pair A is kept by ruling, and its reset was done 2026-11-26 (see Founder step record). | 241-04-SUMMARY, 241-03-SUMMARY, ROADMAP and CONTEXT CORRECTED notes. REQUIREMENTS.md still shows SECR-01 unticked and its text still says both accounts; the narrowing is recorded in the ROADMAP and CONTEXT, so a milestone-audit reader should read those. |
 | SECR-02 | 01, 02 | SATISFIED | Guard clean over 12191 files, records scrubbed, arms bite. |
 | PROOF-01 | 02, 03 | Phase-level evidence SATISFIED. The requirement is milestone-wide and closes at the v1.22 audit. | Rows listed under SC-4. |
 
@@ -113,11 +113,15 @@ Human item 2 (spot-confirm the Pair B deletion) was re-measured live rather than
 
 Limit: Pair B's key is deleted, so the sibling count is a stand-in query keyed on Pair A's OKX venue account. It matches the expected number and does NOT prove they are the same 4 rows the delete left behind. Counts and dates only; no literal is recorded.
 
-**Status stays `human_needed`.** Item 1 (the founder resets Pair A's password) is still open and nothing here changes it.
+Item 1 (the founder resets Pair A's password) was open at this reading and is recorded done below.
+
+## Founder step record, 2026-11-26
+
+Human item 1 is DONE. The founder reset the shared e2e Pair A login's password through the product's password-reset flow on PROD and signed in with the new password. The leaked Pair A credential no longer authenticates, so `158-OPS-03` is now closed in fact as well as in the tree. Human item 2 was recorded in #1379. No credential, login or id is recorded here.
 
 ## Gaps Summary
 
-No gaps. Every roadmap success criterion is met in the repository, and the guard's ability to fail was reproduced independently here. The phase cannot be `passed` yet only because Pair A's password reset is a founder-only step that nothing in the repo can show.
+No gaps. Every roadmap success criterion is met in the repository, and the guard's ability to fail was reproduced independently here. The phase was held at `human_needed` only because Pair A's password reset is a founder-only step that nothing in the repo can show. It is recorded done below.
 
 ---
 

@@ -90,6 +90,8 @@ No migration and no new wizard code.
 
 ## Human Verification Required
 
+**Partial evidence 2026-11-26 (PROD, live broker):** the "unchanged password" case, item 3 (b), was observed in the same attempt as the 225 control: the wizard showed "Your key "Test" already uses this password and it signs in, so we changed nothing." Still open: item 3 (a) the changed-password reconnect with "updated" and the next sync, (c) the mistyped and (d) the master-password cases, and the 320 px and axe items. The status stays `human_needed`.
+
 1. **320 px reflow with the notice and the envelope rendered** on `/strategies/new/wizard`. Expected: no horizontal scroll, no clipped text, notice announced politely.
 2. **axe on `/strategies/new/wizard`** with both rendered. Expected: no violations.
 3. **Live MT5 broker**: correct new password, unchanged password, mistyped password and master password against a stored key on the same login and server. Expected: the four answers listed in the frontmatter, and `api_keys` holds the new password only in case (a).

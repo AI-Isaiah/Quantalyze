@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.100.1] - 2026-11-26 — records: Phases 235 HOLDINGSTRUTH and 241 DEMOCREDS close with verification passed; 225 and 228 gain PROD evidence and stay human_needed
+
+### Changed
+- **Phase 235 HOLDINGSTRUTH is complete.** The one open human item, the unpriced-check note at 390px, PASSED on 2026-11-26.
+  - Run locally on a throwaway harness rendering the real `DashboardChrome`, `AllocationProvider` and `AllocationsTabs` (`AllocationDashboardV2` plus `HoldingsTabPanel`) with `holdingsUnpricedCheckFailed: true`, in Playwright at 390x844.
+  - On the Overview note and the Holdings note, `documentElement` and `#main-content` measured `scrollWidth` 390 and `clientWidth` 390. The note box ran from left 40 to right 350 (width 310), wrapped to 5 lines and was visible. The Holdings table's overflow is clipped by its own `overflow-x-auto` wrapper.
+  - `235-VERIFICATION.md` is `passed` with a fresh `verified_at_sha` and its `drift_subjects` kept; `235-UAT.md` is `complete`; `phase complete 235` was run.
+- **Phase 241 DEMOCREDS is complete.** Human item 1 is done: the founder reset the shared e2e Pair A login's password through the product's password-reset flow on PROD and signed in with the new password, so `158-OPS-03` is closed in fact as well as in the tree. `241-VERIFICATION.md` is `passed`; `phase complete 241` was run (SECR-01 and SECR-02 ticked).
+- **Phase 225 stays `human_needed`.** Plan 18's positive control PASSED on PROD: the founder re-entered an already-stored MT5 login on its real broker server in the wizard, the server matched the server-qualified identity to the founder's stored key, and the wizard refused before broker sign-in. The code was `KEY_ORPHANED`, the correct refusal variant for a stored key with no strategy now (its draft was deleted earlier). Recorded in `225-VERIFICATION.md` and `225-18-SUMMARY.md`. Plan 21 Task 3 (the poll-cycle read, 2026-11-27) is still open, so the phase is not completed.
+- **Phase 228 stays `human_needed`.** The "unchanged password" case was observed on PROD in the same attempt: the wizard showed that the key already uses this password and it signs in, so nothing was changed. Recorded as partial evidence in `228-VERIFICATION.md`. Still open: the changed-password reconnect ("updated" plus the next sync), the mistyped and master-password cases, and 320px.
+
+### Notes
+- Evidence for 235 is stubbed data and layout only. The real marker-read path is covered by the phase's tests, including the multi-key arms from #1380.
+- After `phase complete`, collateral was hand-fixed: STATE's `## Current Position` and frontmatter were restored (the handler had moved them to Phase 225), the Deferred Verification rows were updated, and the `state.json` reset was reverted.
+- No `TODOS.md` entry is closed here. No code changes.
+
 ## [0.133.100.0] - 2026-11-26 — POLLVENUES: the daily positions poll enqueues only strategies on a venue it can serve end to end
 
 ### Fixed

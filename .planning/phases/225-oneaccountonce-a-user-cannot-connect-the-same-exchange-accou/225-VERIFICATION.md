@@ -134,6 +134,8 @@ Debt-marker scan over the nine plan-21 files was not exhaustive; the independent
 
 ## Human Verification Required
 
+**Update 2026-11-26: item 1 (plan 18 positive control) PASSED on PROD.** The founder re-entered an already-stored MT5 login on its real broker server in the wizard. The server matched the server-qualified identity to the founder's stored key and refused before broker sign-in. The code was `KEY_ORPHANED`, because that key has no strategy now (its draft was deleted earlier), which is the correct refusal variant for an unused stored key. Not a transient answer, so the bracket does not refuse correct sessions. Items 2 and 3 are still open, so the status stays `human_needed` and the phase is NOT complete: plan 21 Task 3 (the poll-cycle read, 2026-11-27) is outstanding.
+
 1. **Plan 18 Task 3 post-deploy positive control (founder).** In the PROD add-key form, for one working MT5 account, correct login, investor password and the CORRECT server. Expected: the 409 already-connected code. A transient answer means the bracket refuses correct sessions: stop and revert PR-2c. Why human: real credentials, PROD.
 2. **Plan 21 Task 3 poll-cycle reading (orchestrator, post-deploy).** Read one daily cycle on Railway: verdict lines present, 0 False, 0 not_captured, 0 refusals, a True line for every live active MT5 key polled; zero lines is a STOP; the same holder refused on two consecutive cycles means revert. Why human: needs deploy and Railway access.
 3. **Route the handed-back findings SF-M1 and SF-M4** (validation path, `services/mt5_probe.py`, `routers/exchange.py`) to an owner. A routing decision.
