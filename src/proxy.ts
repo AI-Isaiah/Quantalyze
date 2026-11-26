@@ -78,7 +78,16 @@ export async function proxy(request: NextRequest) {
     path === "/" ||
     PUBLIC_ROUTES.some((route) => path === route || path.startsWith(route + "/"));
 
-  if (!session && !isPublicRoute) {
+  // /auth/callback is where an email link (password recovery, signup
+  // confirmation, email change) mints the session, so a signed-out caller is
+  // its normal case. It stays out of PUBLIC_ROUTES so the signed-in bounce
+  // below never applies to it, but the anon gate must let it through. Without
+  // this, a signed-out click went to /login?code=..., whose Server Component
+  // spent the code and could not set the session cookies, so /reset-password
+  // had no session and the new password was never saved (PROD 2026-11-26).
+  const isAuthCallbackRoute = path === "/auth/callback";
+
+  if (!session && !isPublicRoute && !isAuthCallbackRoute) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);

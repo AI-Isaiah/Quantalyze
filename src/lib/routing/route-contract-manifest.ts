@@ -426,7 +426,7 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     route: "/auth/callback",
     class: "exception",
     notes:
-      "EXCEPTION: Supabase OAuth / recovery callback (route.ts, not a page). Exchanges the auth code / token_hash and mints a session, then redirects. Not in PUBLIC_ROUTES by design. Skipped from the Rule-4 page-existence check. 51-RESEARCH L140.",
+      "EXCEPTION: Supabase OAuth / recovery callback (route.ts, not a page). Exchanges the auth code / token_hash and mints a session, then redirects. Not in PUBLIC_ROUTES by design, so the signed-in bounce never applies to it; the proxy's anon gate exempts the exact path instead, because a signed-out email-link click is its normal case (PROD 2026-11-26: without the exemption a signed-out password reset never got a session). Skipped from the Rule-4 page-existence check. 51-RESEARCH L140.",
   },
   {
     route: "/forgot-password",

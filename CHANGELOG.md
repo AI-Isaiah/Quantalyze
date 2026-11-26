@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.94.0] - 2026-11-26 — RESETSESSION: a signed-out password reset gets its session and saves the new password
+
+A signed-out user who requested a password reset could not set a new password. Submitting the form on `/reset-password` showed "Open the password-reset link from your email to continue.", the password stayed unchanged, and signing in with the new one failed with "Invalid login credentials". The founder hit it twice in PROD on 2026-11-26 (15:01Z and 15:03Z). Each time the PROD auth logs show the PKCE exchange succeeding server-side and no `PUT /auth/v1/user` afterwards.
+
+### Root cause
+- **`src/proxy.ts` sent a signed-out request for `/auth/callback` to `/login`.** `/auth/callback` is deliberately not in `PUBLIC_ROUTES`, so a signed-in user is never bounced off it, but nothing exempted it from the anon gate. A signed-out user's email link (`/auth/callback?code=...&next=/reset-password`) was therefore 307'd to `/login?code=...&next=/reset-password`, with the code still on the URL.
+- **`/login` then spent the code without keeping the session.** Its Server Component calls `exchangeCodeForSession` (the server-side exchange in the logs) and redirects to `next`. A Server Component cannot set cookies in this Next.js (`cookies.md`: "Setting cookies is not supported during Server Component rendering"), and `src/lib/supabase/server.ts` swallows that throw. So the browser reached `/reset-password` with no session cookie, and `updateUser` failed locally with `AuthSessionMissingError` before any request left the browser.
+- The callback route handler itself was fine: Next merges its `cookies()` writes into the redirect it returns. It just never ran for a signed-out user.
+
+### Fixed
+- **The proxy's anon gate now lets the exact path `/auth/callback` through** (`isAuthCallbackRoute` in `src/proxy.ts`). The route handler runs for a signed-out user, exchanges the code and sets the session cookies on its redirect to `/reset-password`. `PUBLIC_ROUTES` is unchanged, so the signed-in bounce still never applies to the callback.
+- The same proxy redirect also sent a signed-out signup confirmation (`next=/pending-approval`) through `/login`, which landed the new user back on `/login` without a session. That link now reaches the callback too.
+
+### Changed
+- The `/auth/callback` note in `src/lib/routing/route-contract-manifest.ts` now says why the anon gate exempts the path.
+
+### Tests
+- `src/proxy.test.ts`: a signed-out request for `/auth/callback` (PKCE recovery, PKCE signup confirmation, `token_hash` recovery, bare path) is not redirected. Its parent, a sibling and a child (`/auth`, `/auth/callbackx`, `/auth/callback/extra`) still 307 to `/login`. A signed-in request for `/auth/callback` still stays on the route. The four signed-out cases were RED on `origin/main` and with the fix neutered. The three boundary cases were RED with the exemption widened to a prefix match. Both neutered copies were restored byte-equal.
+
+### Notes
+- Not fixed here: `src/app/(auth)/login/page.tsx` still exchanges a `?code=` in a Server Component. That spends a code and can never keep the session. The email flows no longer reach it after this fix.
+- An end-to-end run against PROD Auth needs a real recovery email, so it is left to the founder after deploy: sign out, request a reset, open the link, set a new password, sign in with it.
+
 ## [0.133.93.4] - 2026-11-26 — records: Phase 238 NEVERCOMPUTED complete; all five human verification items resolved
 
 ### Changed

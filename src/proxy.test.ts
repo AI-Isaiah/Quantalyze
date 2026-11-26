@@ -334,6 +334,45 @@ describe("proxy public-route gating (anonymous session)", () => {
     });
   });
 
+  // ---------- /auth/callback: the one route that MINTS the session ----------
+  // PROD 2026-11-26 (password reset broken): a signed-out user's recovery link
+  // lands on /auth/callback?code=...&next=/reset-password. The anon gate sent
+  // it to /login?code=..., whose Server Component exchanged the code (and so
+  // spent it) but could not write the session cookies, because a Server
+  // Component cannot set cookies. /reset-password then had no session, and
+  // updateUser failed in the browser without ever reaching Auth. The callback
+  // route handler is the only place the exchange can persist a session, so a
+  // signed-out request must reach it. Signup confirmation takes the same path.
+  describe("anonymous request to /auth/callback reaches the route handler", () => {
+    it.each([
+      "/auth/callback?code=pkce-code&next=/reset-password",
+      "/auth/callback?code=pkce-code&next=/pending-approval",
+      "/auth/callback?token_hash=otp-hash&type=recovery&next=/reset-password",
+      "/auth/callback",
+    ])("%s → no redirect", async (path) => {
+      const req = new NextRequest(`https://example.com${path}`, {
+        method: "GET",
+      });
+      const res = await proxy(req);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("location")).toBeNull();
+    });
+
+    // The carve-out is the exact path only: its parent, a sibling and a child
+    // stay behind the gate like any other non-public path.
+    it.each(["/auth", "/auth/callbackx", "/auth/callback/extra"])(
+      "%s → 307 redirect to /login",
+      async (path) => {
+        const req = new NextRequest(`https://example.com${path}`, {
+          method: "GET",
+        });
+        const res = await proxy(req);
+        expect(res.status).toBe(307);
+        expect(new URL(res.headers.get("location")!).pathname).toBe("/login");
+      },
+    );
+  });
+
   // ---------- Marketing-exempt branch (signed-in user on /for-quants, /security) ----------
   describe("authenticated user on marketing-exempt routes stays on the page", () => {
     // The session branch needs a session object — re-mock just for this
@@ -402,6 +441,9 @@ describe("proxy public-route gating (anonymous session)", () => {
       // dashboard. (/forgot-password is NOT exempt — see the dedicated test
       // below — so an authed user there bounces away, matching /login.)
       "/reset-password",
+      // A signed-in user who opens a recovery or email-change link must reach
+      // the callback route handler too, not bounce to the role home.
+      "/auth/callback?code=pkce-code&next=/reset-password",
       // Phase 199 (CD-07): /home is where a signed-in user is SENT. If the
       // bounce below applied to it, /home would redirect to its own fallback
       // and loop; the page itself redirects by role.
