@@ -1126,7 +1126,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `armsSeen` 910 -> 979, the 69 twinned arms of the seven NEW phase gates (14 + 6 + 5 + 8 + 21 + 11 + 4). MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 13): `armsSeen` 1020 -> 1021, +1 twinned arm (6v-owner-read) in the EXISTING gate test_api_keys_venue_identity_uniq.sql. MEASURED: this file's run read `expected 1021 to be 1020`, and `--parse-only` printed `arms: 0/1021/0`.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `armsSeen` 1021 -> 1033, the 12 twinned arms of the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 1033 to be 1021`, `--parse-only` printed `arms: 0/1033/0` and `coverage: files 94/121`, and the `--file` diagnostic run printed `arms: 12/12/0`, `biting: 12`.
-    expect(armsSeen).toBe(1033);
+    // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19, PR-3 re-base): `armsSeen` 1033 -> 1042, plan 10's +9 twinned arms (5 in test_api_keys_venue_identity_uniq.sql, 4 in test_api_keys_account_identity.sql) on top of plans 13 and 16. MEASURED: this file's run read `expected 1042 to be 1033`, `--parse-only` printed `arms: 0/1042/0` and `coverage: files 94/121`, and the `--file` diagnostic runs printed `arms: 20/20/0`, `biting: 20` and `arms: 45/45/0`, `biting: 45`.
+    expect(armsSeen).toBe(1042);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1187,7 +1188,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `stepsSeen` 1041 -> 1055, +14 file steps: the 13 new twins carry one `edit` step each, and 6v-writes-ws carries two. MEASURED: this file's run read `expected 1055 to be 1041`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `stepsSeen` 1028 -> 1130, +102 file steps contributed by the seven NEW phase gates, read off the run, never summed. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `stepsSeen` 1171 -> 1186, +15 file steps in the NEW gate test_commit_scenario_batch_venue_server_identity.sql (one `edit` per arm, three for exchange-partitions-server-count, two for marker-links-ambiguous-key). MEASURED: this file's run read `expected 1186 to be 1171`.
-    expect(stepsSeen).toBe(1186);
+    // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19, PR-3 re-base): `stepsSeen` 1186 -> 1190, +4 file steps from plan 10's arms and rewritten twins (plan 10 measured 1171 -> 1175 on its own base), read off the run, never summed. MEASURED: this file's run read `expected 1190 to be 1186`, `--parse-only` printed `arms: 0/1042/0`.
+    expect(stepsSeen).toBe(1190);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2164,7 +2166,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `needles.length` 1041 -> 1055, the same +14 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1055 to be 1041`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `needles.length` 1028 -> 1130, the same +102 file steps as `stepsSeen`. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `needles.length` 1171 -> 1186, the same +15 `edit` needles. MEASURED: this file's run read `expected 1186 to be 1171`.
-    expect(needles.length).toBe(1186);
+    // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19, PR-3 re-base): `needles.length` 1186 -> 1190, the same +4 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1190 to be 1186`.
+    expect(needles.length).toBe(1190);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
