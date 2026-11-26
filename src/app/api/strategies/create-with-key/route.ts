@@ -119,6 +119,14 @@ function pickPlaceholderCodename(): string {
  * orphan all of that — the DB index refuses the duplicate INSERT precisely so
  * nothing has to be overwritten (migration 20260812083206's own contract).
  *
+ * ⛔ CORRECTED 2026-11-26 (Phase 228): `api_keys.venue_account_id` IS on the
+ * authenticated column-SELECT allowlist now:
+ * `supabase/migrations/20260920120000_api_keys_venue_account_id_grant.sql` grants
+ * it, and the rotate leg's user-scoped re-read relies on that grant, as
+ * `PATCH /api/keys/[id]/rotate-secret`'s pre-read already does. The same-account
+ * fence read below still uses the admin client for its other reasons. The
+ * paragraph is kept as lineage.
+ *
  * ⛔ WHY THE ADMIN CLIENT, AND WHY IT IS NOT A SHORTCUT. `api_keys.venue_account_id`
  * is NOT on the column-SELECT allowlist: 20260410225608 revoked table-level
  * SELECT from `authenticated` and granted back a named list, extended since by
@@ -732,6 +740,12 @@ function venueAlreadyConnectedResponse(
  * so those remedies would act on the wrong row. `VENUE_ALREADY_CONNECTED` says
  * the account is held by a connected strategy, which is false for a draft.
  *
+ * ⛔ CORRECTED 2026-11-26 (Phase 228): the sentence below is kept as lineage and
+ * is no longer literally true. This builder now takes the caller's OWN holder
+ * and, from the rotate leg, the caller's OWN password outcome (`key_secret`).
+ * It still takes NO IDENTITY: no login, server, key id or password can reach
+ * it, which is the property the sentence below was written to guarantee.
+ *
  * ⛔ IT TAKES NO IDENTITY PARAMETER, so the login, the server and every id are
  * structurally unable to leak through it (T-154-06-C / T-225-14). The only value
  * it carries is the caller's OWN draft's name (owner-scoped read), and that is
@@ -766,6 +780,12 @@ function venueDraftInProgressResponse(
  * and the 23505 race arm (ccxt venues and any race, identity known only after
  * validation). Same shape as `venueAlreadyConnectedResponse`, for the same
  * reason: two copies of one body is how TWIN-8 happened.
+ *
+ * ⛔ CORRECTED 2026-11-26 (Phase 228): the sentence below is kept as lineage and
+ * is no longer literally true. This builder now takes the caller's OWN holder
+ * and, from the rotate leg, the caller's OWN password outcome (`key_secret`).
+ * It still takes NO IDENTITY: no login, server, key id or password can reach
+ * it, which is the property the sentence below was written to guarantee.
  *
  * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO VENUE ID CAN
  * LEAK INTO IT (T-154-06-C / T-212-04). `code` FIRST, as a literal: the order
@@ -803,6 +823,12 @@ function keyOrphanedResponse(
  * through a composite (`held`), and for the interim case where the login-only
  * index refused a connect beside a failing key on a DIFFERENT server. It is the
  * same body `keys/validate-and-encrypt` answers.
+ *
+ * ⛔ CORRECTED 2026-11-26 (Phase 228): the sentence below is kept as lineage and
+ * is no longer literally true. This builder now takes the caller's OWN holder
+ * and, from the rotate leg, the caller's OWN password outcome (`key_secret`).
+ * It still takes NO IDENTITY: no login, server, key id or password can reach
+ * it, which is the property the sentence below was written to guarantee.
  *
  * ⛔ IT TAKES NO PARAMETERS, WHICH IS THE STRUCTURAL REASON NO LOGIN, SERVER OR
  * KEY ID CAN LEAK INTO IT (T-154-06-C). `code` FIRST, as a literal, the order the
@@ -1751,6 +1777,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       return venueAlreadyConnectedResponse(venueMatch.strategyName, venueMatch.holder);
     }
     if (venueMatch.kind === "orphaned" && rotateVerdict === null) {
+      // ⛔ CORRECTED 2026-11-26 (Phase 228): this arm is now reached ONLY when the
+      // holder is NOT rotatable (the null-server legacy tier, or a different
+      // server). The MT5 exact-tier working-holder arms validate the typed
+      // password through the rotate seam and rewrite the key in place (founder
+      // ruling, CONN-02), which REVERSES 212-03 SC5 for MT5. The text below is
+      // kept as lineage.
       // 212-03 / SC5 — REFUSE BEFORE THE UP-TO-120 s `validateKey`. The identity
       // is known here (MT5 only), and the refusal is a fact about the caller's
       // OWN stored key that no credential check can change. The comment block
@@ -1801,6 +1833,11 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     // and any 23505 race, all unchanged and answered by the race arm. No
     // validation at all: the `reuse_api_key_id` arm (`handleReuseExistingKey`),
     // where an orphan is the very case it resumes, unchanged.
+    // ⛔ CORRECTED 2026-11-26 (Phase 228): "`held` keeps the latency" and the
+    // "refused before validation" wording of the 212-03 / SC5 notes above no
+    // longer hold for an exact-server working holder: that arm runs the rotate
+    // seam's probe (up to the same latency) and updates the key in place. Lineage
+    // follows.
     // `composite/add-key` mints no `KEY_ORPHANED`. `held` keeps the latency
     // (its refusal needs the race arm's re-read) and is out of scope here.
   }

@@ -536,6 +536,14 @@ const reuseKeyUserScopedLookupMock = vi.fn(
   },
 );
 
+/**
+ * Phase 228 (CONN-04 / SC-2) — a `profiles` double that RECORDS every read and
+ * answers the seeded role. The route must never read it: KEY_ORPHANED is the same
+ * named answer for every role, so an allocator and a manager get the same bytes.
+ */
+const profilesReads: Array<{ filters: CapturedFilters }> = [];
+const profilesRoleSeed = { value: "allocator" };
+
 /** Phase 228 — the rotate leg's re-read select list, and its double. */
 const ROTATE_REREAD_COLUMNS = "id, label, venue_account_id, disconnected_at, is_active";
 const rotateRereadMock = vi.fn(
@@ -596,6 +604,7 @@ function makeSelectBuilder(
 ) {
   const filters: CapturedFilters = {};
   capturedSelects.push({ table, client, filters, columns });
+  if (table === "profiles") profilesReads.push({ filters });
   const node = {
     eq: (col: string, val: unknown) => {
       filters[col] = val;
@@ -638,6 +647,7 @@ function makeSelectBuilder(
         .then(resolve, reject);
     },
     maybeSingle: () => {
+      if (table === "profiles") return { data: { role: profilesRoleSeed.value }, error: null };
       if (table === "strategy_keys") return keyMembershipLookupMock();
       if (table === "api_keys") {
         // ⭐ 162-05 — `api_keys` IS NOW READ BY TWO DIFFERENT QUESTIONS, and the
@@ -5225,6 +5235,72 @@ describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", (
       expect(JSON.parse(unchanged).key_secret.outcome).toBe("unchanged");
       NO_ECHO(updated);
       NO_ECHO(unchanged);
+    });
+
+    // ── CONN-04 / SC-2: KEY_ORPHANED is the same named answer for every role ──
+    describe("SC-2: KEY_ORPHANED names the caller's own key identically for every role", () => {
+      const ROLES = ["allocator", "manager", "both"] as const;
+      const ADDED_AT = "2026-11-19T10:00:00Z";
+
+      function seedKeyHolder() {
+        ownKeyLabelReadMock.mockImplementation(() => ({
+          data: { label: KEY_LABEL, created_at: ADDED_AT },
+          error: null,
+        }));
+      }
+
+      it.each([
+        // A null-server working holder: the refusal path (no rotate).
+        ["refusal", null],
+        // The exact server: the rotate path (`secret_changed: true`).
+        ["rotate", SERVER_NORMALISED],
+      ])("%s path: allocator, manager and both get byte-equal KEY_ORPHANED bodies naming the key, and `profiles` is never read", async (_path, server) => {
+        const bodies: string[] = [];
+        for (const role of ROLES) {
+          profilesReads.length = 0;
+          profilesRoleSeed.value = role;
+          adminUpdates.length = 0;
+          venueKeyLookupMock.mockResolvedValue({
+            data: [{ id: EXISTING_KEY_ID, venue_server: server }],
+            error: null,
+          });
+          seedKeyHolder();
+          const POST = await importPost();
+          const res = await POST(makeReq(MT5_RECONNECT_BODY));
+          const text = await res.text();
+          const body = JSON.parse(text);
+
+          expect(res.status).toBe(409);
+          expect(body.code).toBe("KEY_ORPHANED");
+          expect(body.holder).toEqual({
+            kind: "key",
+            name: KEY_LABEL,
+            added_at: ADDED_AT,
+            href: "/strategies",
+          });
+          expect(profilesReads, `role ${role}: the route read profiles`).toEqual([]);
+          bodies.push(text);
+        }
+        expect(bodies[1]).toBe(bodies[0]);
+        expect(bodies[2]).toBe(bodies[0]);
+      });
+
+      it("with the holder read faulting, the body carries no holder (the client renders today's bullet)", async () => {
+        venueKeyLookupMock.mockResolvedValue({
+          data: [{ id: EXISTING_KEY_ID, venue_server: null }],
+          error: null,
+        });
+        ownKeyLabelReadMock.mockImplementation(() => ({
+          data: null,
+          error: { code: "XX000", message: "boom" },
+        }));
+        vi.spyOn(console, "error").mockImplementation(() => {});
+        const POST = await importPost();
+        const body = await (await POST(makeReq(MT5_RECONNECT_BODY))).json();
+
+        expect(body.code).toBe("KEY_ORPHANED");
+        expect("holder" in body).toBe(false);
+      });
     });
   });
 });
