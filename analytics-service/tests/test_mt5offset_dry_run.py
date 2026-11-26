@@ -306,3 +306,117 @@ def test_the_script_imports_no_client_or_network_module() -> None:
     for name in imported:
         assert name.split(".")[0] not in banned, name
         assert name != "services.db" and not name.startswith("services.db."), name
+
+
+# ---------------------------------------------------------------------------
+# MT5D-03 (Phase 230 plan 03): --days-out hands the coordinator day sets, not just counts
+# ---------------------------------------------------------------------------
+
+_DAY_LISTS = ("moved_return_days", "moved_level_days", "legacy_return_days", "target_return_days")
+_REPLAY_ARGS = ["--rule", "us", "--legacy-offset-s", "7200"]
+
+
+def _summer_close_key() -> dict:
+    """A July ledger whose closing trade is stamped 02:30 broker time. Under legacy +2 that is 00:30 UTC
+    on 07-16; under ``us`` summer (+3) it is 23:30 UTC on 07-15, so the trade's P&L moves between two
+    return days. A deposit alone never moves a RETURN day (a flow is neutral to a return), so the
+    return-day assertions need a trade, while the flow-only summer key proves the NAV-level days."""
+    deals = [
+        _balance(_wall(2025, 7, 1, 12), 20000.0),
+        _close(_wall(2025, 7, 8, 12), 300.0),
+        _close(_wall(2025, 7, 16, 2, 30), 400.0),
+    ]
+    return {"status": "captured", "deals": deals, "equity": 20700.0, "balance": 20700.0, "currency": "USD"}
+
+
+def _replay(tmp_path: Path, keys: dict, *, days_out: bool, tag: str) -> tuple[str, dict | None]:
+    """One CLI replay under the one fold the attribution rests on (legacy 7200, rule us)."""
+    cap = _write_captured(tmp_path, keys)
+    out = tmp_path / f"report-{tag}.md"
+    argv = ["--captured", str(cap), *_REPLAY_ARGS, "--out", str(out)]
+    days = tmp_path / f"days-{tag}.json"
+    if days_out:
+        argv += ["--days-out", str(days)]
+    dr.main(argv)
+    return out.read_text(encoding="utf-8"), (
+        json.loads(days.read_text(encoding="utf-8")) if days_out else None
+    )
+
+
+def test_days_out_holds_the_moved_and_fold_day_sets_per_ordinal_and_nothing_identifying(
+    tmp_path: Path,
+) -> None:
+    """MT5D-03: the replay is compared with 202's moved DAYS, not counts (s5, s8 and s13 report
+    identical counts), so the file carries four sorted ISO-date lists per ordinal and, to stay
+    scratch-safe, no id, amount or deal field. Each moved list is as long as the report's count."""
+    key_id = "123e4567-e89b-12d3-a456-426614174000"
+    entry = _summer_close_key()
+    entry.update({"server": "Broker-Live", "login": 123456789})
+    report, days = _replay(tmp_path, {key_id: entry}, days_out=True, tag="shape")
+    assert days is not None and list(days) == ["mt5-key-1"]
+    row = days["mt5-key-1"]
+    assert sorted(row) == sorted(_DAY_LISTS)
+    for name in _DAY_LISTS:
+        assert row[name] == sorted(row[name]), name
+        assert all(len(d) == 10 and d[4] == "-" for d in row[name]), name
+    assert row["moved_return_days"], "a summer trade folded under 7200 then us must move return days"
+    def _cells(prefix: str) -> list[str]:
+        line = next(ln for ln in report.splitlines() if ln.startswith(prefix))
+        return [c.strip() for c in line.split("|")]
+
+    cells, labels = _cells("| mt5-key-1 |"), _cells("| key |")
+    count = lambda label: int(cells[labels.index(label)])  # noqa: E731
+    assert len(row["moved_return_days"]) == count("return days changed")
+    assert len(row["moved_level_days"]) == count("NAV-level days changed")
+    blob = (tmp_path / "days-shape.json").read_text(encoding="utf-8")
+    for planted in (key_id, "Broker-Live", "123456789", "20000", "deal", "profit"):
+        assert planted not in blob
+
+
+def test_days_out_under_7200_and_us_moves_a_summer_flow_and_not_a_winter_one(tmp_path: Path) -> None:
+    """MT5D-03 / DEC-03-A: both older sides of 202's pairs were written under 7200, so the
+    structural prediction is that US-summer deals move a day (the rule says +3, the history says +2)
+    and US-winter ones do not (the two agree). If this inverts, the attribution rests on nothing.
+    A summer FLOW moves its NAV-level day; a summer TRADE moves its return day."""
+    _, days = _replay(
+        tmp_path,
+        {"k-flow": _summer_key(), "k-trade": _summer_close_key(), "k-winter": _winter_key()},
+        days_out=True,
+        tag="season",
+    )
+    assert days is not None
+    assert days["mt5-key-1"]["moved_level_days"], "a summer flow must move a level day under 7200 -> us"
+    # A flow is neutral to a return: the level set and the return set are different evidence.
+    assert days["mt5-key-1"]["moved_return_days"] == []
+    assert days["mt5-key-2"]["moved_return_days"] == ["2025-07-15", "2025-07-16"]
+    assert days["mt5-key-3"]["moved_return_days"] == [], "winter key must not move under 7200 -> us"
+    assert days["mt5-key-3"]["moved_level_days"] == []
+
+
+def test_the_report_is_byte_identical_with_and_without_days_out_and_no_file_appears_without_it(
+    tmp_path: Path,
+) -> None:
+    """MT5D-03: the report stays counts-only and passes _scrub, so the flag may not change one byte
+    of it; and without the flag nothing but --out is written, so a day set never lands by accident."""
+    keys = {"k-summer": _summer_close_key(), "k-winter": _winter_key()}
+    with_flag, _ = _replay(tmp_path, keys, days_out=True, tag="with")
+    before = {p.name for p in tmp_path.iterdir()}
+    without_flag, none = _replay(tmp_path, keys, days_out=False, tag="without")
+    assert none is None
+    assert with_flag == without_flag
+    new_files = {p.name for p in tmp_path.iterdir()} - before
+    assert new_files == {"report-without.md"}
+
+
+def test_days_out_lists_an_unmeasured_key_with_four_empty_lists_and_no_error_text(tmp_path: Path) -> None:
+    """MT5D-03: the coordinator indexes the file by ordinal, so a key the tool could not fold is
+    present and empty (the report's own row carries the error class), never absent or described."""
+    keys = {
+        "k1": {"status": "not_captured", "error_class": "Mt5ConnectError"},
+        "k2": _summer_close_key(),
+    }
+    _, days = _replay(tmp_path, keys, days_out=True, tag="unmeasured")
+    assert days is not None
+    assert days["mt5-key-1"] == {name: [] for name in _DAY_LISTS}
+    assert "Mt5ConnectError" not in (tmp_path / "days-unmeasured.json").read_text(encoding="utf-8")
+    assert days["mt5-key-2"]["moved_return_days"]

@@ -425,6 +425,8 @@ Details are in `202-REVIEW.md` Round 3 and `202-REVIEW-DISPOSITION.md`.
 
 **What closing it means.** One test confirms or rules out the lead and records the result. Either replay a moved scope's derive under both clock settings and show the moved days match, or read the worker's recorded setting history and show it does not fit. If confirmed, name the bucket the founder assigns. If ruled out, the values stay (d) with the lead struck.
 
+2026-11-26: Phase 230 MT5NIGHTLY shipped the replay tooling (`--days-out`, docs/runbooks/mt5-clock-replay.md; the PR carrying v0.133.82.0). Plan 10 owns the close, after the coordinator's capture and replay.
+
 ### ALLOCSYNC-CAPTION-01 — the AllocatorSyncStatus pill and helper line are text-xs inside the /strategies note row, whose other lines are text-caption (booked 2026-10-09, Phase 170.7)
 
 **Why it is open.** The Phase 170.7 UI-SPEC accepted this typography residue. `AllocatorSyncStatus` is a
@@ -1258,6 +1260,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
       ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-01, MT5D-02; tagged 2026-11-23.**
   - 2026-11-24: Phase 227 JOBLEDGER shipped the per-attempt record (`compute_job_attempt_failures`, all four cause classes: error, watchdog_reset, stall_reclaim, orphan_reaped). Phase 230 MT5NIGHTLY owns the close: real nights of these records read and explained.
+  - 2026-11-26: Phase 230 MT5NIGHTLY shipped the cross-process MT5 terminal lease (the PR carrying v0.133.82.0). Plan 09 owns the close, after seven clean nights counted from night 1 (docs/runbooks/mt5-terminal-lease.md sections 5(a) and 6).
+
+- [ ] **[230-MT5-REGISTRY-CROSS-PROCESS-STALE]** (logged 2026-11-26, Phase 230 MT5NIGHTLY; owner: unrouted, founder to assign). The per-process MT5 terminal registries (`_MT5_TERMINAL_HOLDERS`, `_MT5_TERMINAL_HISTORY_SETTLED`, relaunch debt, scrub owed) stay in-process after Phase 230's lease. The lease serializes access to the terminal but does not make these registries cross-process: after the other process moves the terminal, this process can still believe a key is "settled" and skip the history wait (`mt5_history_wait_due`). Pre-existing and not widened by the lease (230-RESEARCH Runtime State Inventory, Open Question 5). The kept lease row (release clears `owner_token` but keeps `holder` and `site`) is the hook for a later "someone else held since my record" invalidation. **Trigger:** the next phase that touches `mt5_history_wait_due` or the holder registry, or any evidence of a skipped history wait after a cross-process handover.
 
 - **[192-ORPHANED-LANDING-VERIFY]** (logged 2026-11-07, Phase 192 PUBLICTRUTH; owner: unrouted, founder to assign). The landing verification section, form, results and progress components under `src/components/landing` are rendered nowhere after Phase 192 turned the home verify band into a sign-up link (no non-test importer outside that directory). `VerificationForm.tsx` still carries its false "never stored" line, and `/api/verify-strategy` stays in `PUBLIC_ROUTES` in `src/proxy.ts` with no caller. The public-truth census does not scan this directory for that reason. **Closed when:** the components are deleted together with their registry entries (`closed-sets.test.ts`, `complete-status-scan.test.ts`) and the public allowlist entry, or reused behind sign-in.
 

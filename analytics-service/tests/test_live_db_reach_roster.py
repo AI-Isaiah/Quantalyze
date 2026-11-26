@@ -228,6 +228,7 @@ ENV_GATED_SKIP_ALLOWLIST: dict[str, str] = {
     "test_computed_at_now_literal_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_flow_price_store_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_nav_marks_writer_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
+    "test_mt5_xlease_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_sync_trades_enqueue_failure_bridge_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_trade_read_store_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_compute_jobs_fencing.py::_need_supabase": (
@@ -254,8 +255,8 @@ ENV_GATED_SKIP_ALLOWLIST: dict[str, str] = {
         "python job leaves it unset, so the shipped-default assertion runs in CI."
     ),
 }
-# Measured: 21 env-gated skip sites at HEAD (3 covered by the roster, 2 more added to it, 16 here).
-_ENV_GATED_SITE_FLOOR = 21
+# Measured: 22 env-gated skip sites at HEAD (3 covered by the roster, 2 more added to it, 17 here).
+_ENV_GATED_SITE_FLOOR = 22
 
 
 def _reads_environment(node: ast.AST) -> bool:

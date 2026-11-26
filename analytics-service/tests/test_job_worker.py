@@ -521,6 +521,32 @@ class TestClassifyException:
         kind, _ = classify_exception(HybridError())
         assert kind == "permanent"
 
+    def test_a_lease_unavailable_raise_is_transient_with_a_fixed_text(self) -> None:
+        """Phase 230 MT5D-02. A cross-process lease that cannot be reached is OUR
+        infrastructure: the queue must retry (the next attempt meets a reachable
+        lease), never file it under ``unknown`` and never ship its text. The fixed
+        text carries no host, port, key or digest, whatever the raise carried.
+        Mutation guard: drop the arm and this flips to ('unknown', <the raise's
+        own text>)."""
+        from services.mt5_concurrency import Mt5TerminalLeaseUnavailableError
+
+        kind, msg = classify_exception(
+            Mt5TerminalLeaseUnavailableError("host=10.0.0.9:443 digest=" + "ab" * 32)
+        )
+        assert kind == "transient"
+        assert msg == "MT5 terminal lease unavailable; the job will retry"
+        for leak in ("10.0.0.9", "443", "digest", "ab" * 8):
+            assert leak not in msg
+
+    def test_a_plain_busy_raise_keeps_its_current_classification(self) -> None:
+        """No unbounded caller raises ``Mt5TerminalBusyError`` (D-29: it is the
+        interactive validate path's contract), so this plan adds no arm for it:
+        it still lands on the catch-all. Recorded so a later widening of the new
+        arm to the busy parent is a visible decision, not drift."""
+        from services.mt5_concurrency import Mt5TerminalBusyError
+
+        assert classify_exception(Mt5TerminalBusyError("busy")) == ("unknown", "busy")
+
 
 # ---------------------------------------------------------------------------
 # dispatch routing
@@ -862,6 +888,85 @@ class TestDispatchExceptionHandling:
         assert result.outcome == DispatchOutcome.FAILED
         assert result.error_kind == "unknown"
         assert "mystery fault" in (result.error_message or "")
+
+
+class TestMt5LeaseUnavailableOnTheDerive:
+    """Phase 230 MT5D-02 — the tracer slice, end to end: an MT5 derive whose lease
+    entry cannot reach the cross-process lease lets the raise propagate, and the
+    dispatch catch-all turns it into one transient retry."""
+
+    @staticmethod
+    def _lease_unavailable_on_entry() -> object:
+        from contextlib import asynccontextmanager
+
+        from services.mt5_concurrency import Mt5TerminalLeaseUnavailableError
+
+        @asynccontextmanager
+        async def _lease(terminal_key: str, **kwargs: object):  # noqa: ANN202
+            raise Mt5TerminalLeaseUnavailableError("lease rpc down")
+            yield  # pragma: no cover
+
+        return _lease
+
+    @pytest.mark.asyncio
+    async def test_the_raise_propagates_out_of_the_derive_unswallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from services.job_worker import run_derive_broker_dailies_job
+        from services.mt5_concurrency import Mt5TerminalLeaseUnavailableError
+        from tests.test_mt5_derive_branch import (
+            _FakeMt5Transport,
+            _apply,
+            _build_ctx,
+            _job,
+            _patches,
+        )
+
+        monkeypatch.setenv("MT5_ENABLED", "true")
+        transport = _FakeMt5Transport(
+            account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+            deals=[],
+        )
+        ctx, capture = _build_ctx(transport)
+        monkeypatch.setattr(
+            "services.job_worker.mt5_terminal_lease", self._lease_unavailable_on_entry()
+        )
+        with _apply(_patches(ctx)):
+            with pytest.raises(Mt5TerminalLeaseUnavailableError):
+                await run_derive_broker_dailies_job(_job())
+        # Nothing was read from the terminal and nothing was recorded.
+        assert "history_deals_get" not in transport.calls
+        assert not any(u[0] == "strategy_analytics" for u in capture["upserts"])
+
+    @pytest.mark.asyncio
+    async def test_dispatch_files_it_as_one_transient_retry_with_the_fixed_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from tests.test_mt5_derive_branch import (
+            _FakeMt5Transport,
+            _apply,
+            _build_ctx,
+            _job,
+            _patches,
+        )
+
+        monkeypatch.setenv("MT5_ENABLED", "true")
+        transport = _FakeMt5Transport(
+            account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+            deals=[],
+        )
+        ctx, _capture = _build_ctx(transport)
+        monkeypatch.setattr(
+            "services.job_worker.mt5_terminal_lease", self._lease_unavailable_on_entry()
+        )
+        with _apply(_patches(ctx)), patch(
+            "services.job_worker.sync_strategy_analytics_status",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await dispatch(_job())
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "transient"
+        assert result.error_message == "MT5 terminal lease unavailable; the job will retry"
 
 
 # ---------------------------------------------------------------------------

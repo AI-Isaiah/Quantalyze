@@ -33,7 +33,13 @@ A capture ``offset_s`` that differs from ``--legacy-offset-s`` is a stderr WARNI
 not a refusal: the deals are broker wall times, folded once per offset the history was written under.
 
 It never opens a database connection or a socket, imports no supabase or HTTP client, and writes no
-file except where ``--out`` / ``--map-out`` name one.
+file except where ``--out`` / ``--map-out`` / ``--days-out`` name one.
+
+``--days-out`` (Phase 230 MT5D-03) writes, per ordinal only, four sorted ISO-date lists: the return days
+and the NAV-level days the clock switch moves, and the full legacy and target return-fold day lists.
+It exists because two keys can report identical counts while moving different days, so the operator
+compares DAYS with a prior investigation's sets. Dates only: no key id, amount or deal field, and the
+rendered report is byte-identical with or without it.
 
 REDACTION. The report speaks in ordinals ("mt5-key-1") and counts. Identifiers, logins, amounts and
 server names are never rendered: ordinals come from capture position, not from any id, and every
@@ -44,7 +50,7 @@ CLI::
 
     python -m scripts.mt5offset_dry_run --captured captured.json \
         (--rule eu|us | --fixed-offset-s N) --legacy-offset-s N \
-        [--out report.md] [--map-out ordinals.json] [--note TEXT ...]
+        [--out report.md] [--map-out ordinals.json] [--days-out days.json] [--note TEXT ...]
 """
 from __future__ import annotations
 
@@ -83,26 +89,39 @@ def _error_class(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _empty_days() -> dict[str, list[str]]:
+    return {
+        "moved_return_days": [],
+        "moved_level_days": [],
+        "legacy_return_days": [],
+        "target_return_days": [],
+    }
+
+
 def _by_day(series: pd.Series) -> dict[str, float]:
     return {ts.date().isoformat(): float(value) for ts, value in series.items()}
 
 
-def _days_changed(before: Mapping[str, float], after: Mapping[str, float]) -> int:
+def _changed_day_set(before: Mapping[str, float], after: Mapping[str, float]) -> set[str]:
     """Days present on one side only, or on both with values differing beyond ``_REL_TOL``."""
-    changed = 0
+    changed: set[str] = set()
     for day in set(before) | set(after):
         if day not in before or day not in after:
-            changed += 1
+            changed.add(day)
             continue
         a, b = before[day], after[day]
         if math.isnan(a) and math.isnan(b):
             continue
         if math.isnan(a) or math.isnan(b):
-            changed += 1
+            changed.add(day)
             continue
         if abs(a - b) > _REL_TOL * max(abs(a), abs(b)):
-            changed += 1
+            changed.add(day)
     return changed
+
+
+def _days_changed(before: Mapping[str, float], after: Mapping[str, float]) -> int:
+    return len(_changed_day_set(before, after))
 
 
 def key_shift(
@@ -150,10 +169,14 @@ def key_shift(
         target_returns, _ = combine_mt5_deal_ledger(
             deals, equity, balance, server_utc_offset_s=target, floors=floors
         )
-        level_days_changed = _days_changed(_by_day(legacy_levels), _by_day(target_levels))
-        return_days_changed = _days_changed(_by_day(legacy_returns), _by_day(target_returns))
+        legacy_return_by_day = _by_day(legacy_returns)
+        target_return_by_day = _by_day(target_returns)
+        moved_level_days = _changed_day_set(_by_day(legacy_levels), _by_day(target_levels))
+        moved_return_days = _changed_day_set(legacy_return_by_day, target_return_by_day)
+        level_days_changed = len(moved_level_days)
+        return_days_changed = len(moved_return_days)
     except Exception as exc:  # noqa: BLE001 - the class is recorded for the key, never hidden
-        return {"verdict": "not measured", "error_class": _error_class(exc)}
+        return {"verdict": "not measured", "error_class": _error_class(exc), "days": _empty_days()}
     return {
         "verdict": "rebuild" if level_days_changed > 0 else "none",
         "error_class": None,
@@ -164,6 +187,13 @@ def key_shift(
         "instantless_flow_deals": instantless_flow_deals,
         "level_days_changed": level_days_changed,
         "return_days_changed": return_days_changed,
+        # Scratch-only (``--days-out``); ``render_report`` never reads it and ``analyze`` moves it out.
+        "days": {
+            "moved_return_days": sorted(moved_return_days),
+            "moved_level_days": sorted(moved_level_days),
+            "legacy_return_days": sorted(legacy_return_by_day),
+            "target_return_days": sorted(target_return_by_day),
+        },
     }
 
 
@@ -174,6 +204,7 @@ def analyze(
     is kept apart (``ordinals``) and is the only place an id appears."""
     rows: list[dict[str, Any]] = []
     ordinals: dict[str, str] = {}
+    days: dict[str, dict[str, list[str]]] = {}
     for position, (key_id, entry) in enumerate((captured.get("keys") or {}).items(), start=1):
         ordinal = f"mt5-key-{position}"
         ordinals[ordinal] = str(key_id)
@@ -186,6 +217,7 @@ def analyze(
                     "error_class": str(raw) if raw else "NotCaptured",
                 }
             )
+            days[ordinal] = _empty_days()
             continue
         try:
             shift = key_shift(
@@ -198,8 +230,9 @@ def analyze(
             )
         except Exception as exc:  # noqa: BLE001 - a malformed entry is a class, not a crash
             shift = {"verdict": "not measured", "error_class": _error_class(exc)}
+        days[ordinal] = shift.pop("days", None) or _empty_days()
         rows.append({"ordinal": ordinal, **shift})
-    return {"rows": rows, "ordinals": ordinals, "notes": []}
+    return {"rows": rows, "ordinals": ordinals, "days": days, "notes": []}
 
 
 def _hours(offset_s: int) -> str:
@@ -260,6 +293,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--out", help="write the report here instead of stdout")
     parser.add_argument("--map-out", help="write the ordinal map (scratch only; it holds ids)")
+    parser.add_argument(
+        "--days-out",
+        help="write per-ordinal day sets (scratch only; dates, no ids or amounts)",
+    )
     parser.add_argument("--note", action="append", default=[], help="a line to add under the header")
     args = parser.parse_args(argv)
 
@@ -288,6 +325,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.map_out:
         with open(args.map_out, "w", encoding="utf-8") as fh:
             json.dump(analysis["ordinals"], fh)
+    if args.days_out:
+        with open(args.days_out, "w", encoding="utf-8") as fh:
+            json.dump(analysis["days"], fh)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(text)

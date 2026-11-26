@@ -1126,7 +1126,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `armsSeen` 910 -> 979, the 69 twinned arms of the seven NEW phase gates (14 + 6 + 5 + 8 + 21 + 11 + 4). MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 13): `armsSeen` 1020 -> 1021, +1 twinned arm (6v-owner-read) in the EXISTING gate test_api_keys_venue_identity_uniq.sql. MEASURED: this file's run read `expected 1021 to be 1020`, and `--parse-only` printed `arms: 0/1021/0`.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `armsSeen` 1021 -> 1033, the 12 twinned arms of the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 1033 to be 1021`, `--parse-only` printed `arms: 0/1033/0` and `coverage: files 94/121`, and the `--file` diagnostic run printed `arms: 12/12/0`, `biting: 12`.
-    expect(armsSeen).toBe(1033);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `armsSeen` 1033 -> 1041, the 8 twinned arms of the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `arms: 0/1041/0`.
+    expect(armsSeen).toBe(1041);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1187,7 +1188,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `stepsSeen` 1041 -> 1055, +14 file steps: the 13 new twins carry one `edit` step each, and 6v-writes-ws carries two. MEASURED: this file's run read `expected 1055 to be 1041`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `stepsSeen` 1028 -> 1130, +102 file steps contributed by the seven NEW phase gates, read off the run, never summed. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `stepsSeen` 1171 -> 1186, +15 file steps in the NEW gate test_commit_scenario_batch_venue_server_identity.sql (one `edit` per arm, three for exchange-partitions-server-count, two for marker-links-ambiguous-key). MEASURED: this file's run read `expected 1186 to be 1171`.
-    expect(stepsSeen).toBe(1186);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `stepsSeen` 1186 -> 1195, +9 file steps in the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: this file's run read `expected 1195 to be 1186`.
+    expect(stepsSeen).toBe(1195);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2164,7 +2166,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, review round 1 SQL fixes): `needles.length` 1041 -> 1055, the same +14 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1055 to be 1041`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `needles.length` 1028 -> 1130, the same +102 file steps as `stepsSeen`. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `needles.length` 1171 -> 1186, the same +15 `edit` needles. MEASURED: this file's run read `expected 1186 to be 1171`.
-    expect(needles.length).toBe(1186);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `needles.length` 1186 -> 1195, the same +9 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1195 to be 1186`.
+    expect(needles.length).toBe(1195);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2780,7 +2783,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesTotal` 112 -> 113, the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`; this file's run read `expected 113 to be 112`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `filesTotal` 120 -> 121, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: `--parse-only` printed `coverage: files 94/121`; this file's run read `expected 121 to be 120`.
-    expect(corpus.filesTotal).toBe(121);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
+    expect(corpus.filesTotal).toBe(122);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2878,7 +2882,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesAnnotated` 85 -> 86, moving WITH `filesTotal`; the by-name list below gained test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesAnnotated` 85 -> 92, moving WITH `filesTotal`; the by-name list gained the seven phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): annotated files 93 -> 94, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 94 to be 93`; `--parse-only` printed `coverage: files 94/121`.
-    expect(corpus.filesAnnotated).toBe(94);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
+    expect(corpus.filesAnnotated).toBe(95);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -2985,6 +2990,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_metrics_by_basis_write.sql",
       // ⭐ ADDED 2026-11-17 (Phase 155.1 SERVERCLOCK, plan 05): the server-clock readings write-once and value-rule gate (24 twinned arms) for migration 20261117120000.
       "test_mt5_server_clock_readings.sql",
+      // ⭐ ADDED 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): the MT5 terminal lease gate (8 twinned arms L1 to L8) for migration 20261126140000.
+      "test_mt5_terminal_lease.sql",
       // ⭐ ADDED 2026-10-15 (Phase 167.1.2.2.2.1 OKXHISTORY, plan 09): the okx archive rebuild gate (15 arms).
       "test_okx_archive_rebuild.sql",
       // ⭐ ADDED 2026-10-13 (Phase 164.6.8 OUTAGEALERT, plan 05): the ops_staleness_check gate (14 arms).
@@ -3485,7 +3492,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): `filesTotal` 112 -> 113, the NEW gate test_swap_account_slot.sql. MEASURED: `--parse-only` printed `coverage: files 86/113`; this file's run read `expected 113 to be 112`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `filesTotal` 120 -> 121, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: `--parse-only` printed `coverage: files 94/121`; this file's run read `expected 121 to be 120`.
-    expect(corpus.filesTotal).toBe(121);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
+    expect(corpus.filesTotal).toBe(122);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3539,7 +3547,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `annotatedFiles` 85 -> 92, moving WITH `filesAnnotated`. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY MERGE 2026-11-24 (Phase 227 JOBLEDGER merged onto origin/main at Phase 225): 86 + 7 = 93 annotated files; the by-name list carries both phases' gates.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): annotated files 93 -> 94, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 94 to be 93`; `--parse-only` printed `coverage: files 94/121`.
-    expect(corpus.annotatedFiles).toHaveLength(94);
+    // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
+    expect(corpus.annotatedFiles).toHaveLength(95);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
