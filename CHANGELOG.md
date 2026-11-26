@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.91.1] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of 9c26bf3f
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45807605366`, after the PROD apply of merge `9c26bf3f`: sha256 `25b2314d…` → `b4f15e84…`.
+- Shape, old → new: tables 71 → 72, policies 154 → 154, function statements 144 → 147, distinct function names 142 → 145, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126140000_mt5_terminal_lease.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.91.0 → 0.133.91.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=341 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 147 — MATCH 144, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45807605366` succeeded, and this entry was composed by the `redump-pr` job. Run `45807605366` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.91.0] - 2026-11-26 — Phase 230 MT5NIGHTLY: one database lease per MT5 terminal, so the nightly derive and the holdings poll never share it
 
 MT5 `derive_broker_dailies` jobs kept needing a second attempt. Phase 230 named the cause: the backfill worker's nightly derive and the API process's `poll_allocator_positions` logged the one shared Wine terminal into different accounts at the same moment. The MT5CONC-02 login bracket then refused the read. The in-process lock (`_MT5_TERMINAL_LOCKS`) is one `asyncio.Lock` per process, so across two Railway services it serialized nothing. The HEAL-02 heartbeat hypothesis is refuted. The fix is the founder's D-01, "Database lease": a token-fenced lease row per terminal, taken by every MT5 terminal user.

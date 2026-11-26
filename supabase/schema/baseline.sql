@@ -962,6 +962,69 @@ COMMENT ON FUNCTION "public"."_validate_scenario_diff"("p_diff" "jsonb", "p_inde
 
 
 
+CREATE OR REPLACE FUNCTION "public"."acquire_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_holder" "text", "p_site" "text", "p_ttl_s" integer) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_terminal_digest must be 64 lower-case hex characters'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_owner_token IS NULL THEN
+    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_owner_token must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_ttl_s IS NULL OR p_ttl_s < 1 OR p_ttl_s > 900 THEN
+    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_ttl_s must be between 1 and 900'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_holder IS NULL
+     OR NOT (
+       p_holder IN ('house', 'validation', 'unknown', 'unattributed')
+       OR p_holder ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     ) THEN
+    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_holder must be a closed literal or a canonical lower-case UUID'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_site IS NULL OR p_site !~ '^[a-z_]{1,48}$' THEN
+    RAISE EXCEPTION 'acquire_mt5_terminal_lease: p_site must be 1 to 48 lower-case letters or underscores'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  INSERT INTO public.mt5_terminal_leases AS l
+         (terminal_digest, owner_token, holder, site, acquired_at, expires_at)
+  VALUES (p_terminal_digest, p_owner_token, p_holder, p_site, now(),
+          now() + make_interval(secs => p_ttl_s))
+  ON CONFLICT (terminal_digest) DO UPDATE
+     SET owner_token = EXCLUDED.owner_token,
+         holder      = EXCLUDED.holder,
+         site        = EXCLUDED.site,
+         acquired_at = CASE
+                         WHEN l.owner_token IS NOT DISTINCT FROM EXCLUDED.owner_token
+                           THEN l.acquired_at
+                         ELSE now()
+                       END,
+         expires_at  = EXCLUDED.expires_at
+   WHERE l.owner_token IS NULL
+      OR l.expires_at <= now()
+      OR l.owner_token = EXCLUDED.owner_token;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."acquire_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_holder" "text", "p_site" "text", "p_ttl_s" integer) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."acquire_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_holder" "text", "p_site" "text", "p_ttl_s" integer) IS 'Phase 230 MT5D-02. Takes the lease row for p_terminal_digest for p_ttl_s seconds (1 to 900) and returns true, or returns false when an unexpired lease is held by a different token. Free means owner_token IS NULL or expires_at <= now(). The same token re-acquiring is granted (idempotent). One INSERT ... ON CONFLICT DO UPDATE ... WHERE statement under the row lock; the expiry is the database now(). Bad input raises invalid_parameter_value (22023) with a fixed message that echoes no argument. service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."add_wizard_composite_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid") RETURNS TABLE("strategy_id" "uuid", "api_key_id" "uuid")
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -9997,6 +10060,41 @@ COMMENT ON FUNCTION "public"."reject_sentinel_writes"() IS 'Rejects user-origina
 
 
 
+CREATE OR REPLACE FUNCTION "public"."release_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'release_mt5_terminal_lease: p_terminal_digest must be 64 lower-case hex characters'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_owner_token IS NULL THEN
+    RAISE EXCEPTION 'release_mt5_terminal_lease: p_owner_token must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  UPDATE public.mt5_terminal_leases
+     SET owner_token = NULL,
+         expires_at  = now()
+   WHERE terminal_digest = p_terminal_digest
+     AND owner_token = p_owner_token;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."release_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."release_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid") IS 'Phase 230 MT5D-02. Frees the lease for p_terminal_digest when p_owner_token holds it: sets owner_token NULL and expires_at now(), keeps the row, and returns true. A token that does not hold the lease changes nothing and gets false. Because the token is cleared, a renew that lands after the release can never match. Bad input raises invalid_parameter_value (22023). service_role only.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) RETURNS SETOF "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -10028,6 +10126,44 @@ ALTER FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_clai
 
 
 COMMENT ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) IS 'Phase 227 JOBLEDGER HEAL-02. Moves claimed_at to now() for each (id, claim_token) pair whose row is still status running under exactly that token, and returns the ids it renewed. A row the watchdog already reset (token NULLed), a row not running, and a token that does not match renew nothing and are absent from the result, so the caller reads membership of the result as "I still own this row". Mismatched or NULL arrays raise invalid_parameter_value. Writes no column but claimed_at. Never call it for the row currently executing: that row''s staleness stays governed by its own per-kind watchdog override. service_role only.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."renew_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_ttl_s" integer) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $_$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_terminal_digest IS NULL OR p_terminal_digest !~ '^[0-9a-f]{64}$' THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_terminal_digest must be 64 lower-case hex characters'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_owner_token IS NULL THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_owner_token must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+  IF p_ttl_s IS NULL OR p_ttl_s < 1 OR p_ttl_s > 900 THEN
+    RAISE EXCEPTION 'renew_mt5_terminal_lease: p_ttl_s must be between 1 and 900'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  UPDATE public.mt5_terminal_leases
+     SET expires_at = now() + make_interval(secs => p_ttl_s)
+   WHERE terminal_digest = p_terminal_digest
+     AND owner_token = p_owner_token;
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+  RETURN v_rows = 1;
+END
+$_$;
+
+
+ALTER FUNCTION "public"."renew_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_ttl_s" integer) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."renew_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_ttl_s" integer) IS 'Phase 230 MT5D-02. Moves expires_at to now() plus p_ttl_s seconds (1 to 900) for the row whose owner_token equals p_owner_token, and returns true iff a row matched. It matches regardless of expiry, but a row another token has taken, and a row its holder released (owner_token NULL), match nothing and return false. Bad input raises invalid_parameter_value (22023). service_role only.';
 
 
 
@@ -15180,6 +15316,26 @@ ALTER TABLE "public"."mt5_server_clock_readings" ALTER COLUMN "id" ADD GENERATED
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."mt5_terminal_leases" (
+    "terminal_digest" "text" NOT NULL,
+    "owner_token" "uuid",
+    "holder" "text" NOT NULL,
+    "site" "text" NOT NULL,
+    "acquired_at" timestamp with time zone NOT NULL,
+    "expires_at" timestamp with time zone NOT NULL,
+    CONSTRAINT "mt5_terminal_leases_digest_chk" CHECK (("terminal_digest" ~ '^[0-9a-f]{64}$'::"text")),
+    CONSTRAINT "mt5_terminal_leases_holder_chk" CHECK ((("holder" = ANY (ARRAY['house'::"text", 'validation'::"text", 'unknown'::"text", 'unattributed'::"text"])) OR ("holder" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'::"text"))),
+    CONSTRAINT "mt5_terminal_leases_site_chk" CHECK (("site" ~ '^[a-z_]{1,48}$'::"text"))
+);
+
+
+ALTER TABLE "public"."mt5_terminal_leases" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."mt5_terminal_leases" IS 'Phase 230 MT5D-02 (migration 20261126140000): one row per MT5 terminal, the cross-process lease. Keyed by a sha256 digest of the terminal key, never the raw host:port. owner_token is the current holder''s token (NULL = free); holder is an api_key_id or one of the closed literals house, validation, unknown, unattributed; site is the lease site name (shape only). Free means owner_token IS NULL OR expires_at <= now(). Written only by acquire_mt5_terminal_lease, renew_mt5_terminal_lease and release_mt5_terminal_lease. service_role holds SELECT only.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."notification_dispatches" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "notification_type" "text" NOT NULL,
@@ -16210,6 +16366,11 @@ ALTER TABLE ONLY "public"."match_decisions"
 
 ALTER TABLE ONLY "public"."mt5_server_clock_readings"
     ADD CONSTRAINT "mt5_server_clock_readings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."mt5_terminal_leases"
+    ADD CONSTRAINT "mt5_terminal_leases_pkey" PRIMARY KEY ("terminal_digest");
 
 
 
@@ -18293,6 +18454,9 @@ ALTER TABLE "public"."match_decisions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."mt5_server_clock_readings" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."mt5_terminal_leases" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."notification_dispatches" ENABLE ROW LEVEL SECURITY;
 
 
@@ -18988,6 +19152,11 @@ GRANT ALL ON FUNCTION "public"."_validate_scenario_diff"("p_diff" "jsonb", "p_in
 
 
 
+REVOKE ALL ON FUNCTION "public"."acquire_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_holder" "text", "p_site" "text", "p_ttl_s" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."acquire_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_holder" "text", "p_site" "text", "p_ttl_s" integer) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."add_wizard_composite_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."add_wizard_composite_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_placeholder_name" "text", "p_wizard_session_id" "uuid") TO "service_role";
 
@@ -19514,8 +19683,18 @@ GRANT ALL ON FUNCTION "public"."reject_sentinel_writes"() TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."release_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."release_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."renew_compute_job_claims"("p_job_ids" "uuid"[], "p_claim_tokens" "uuid"[]) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."renew_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_ttl_s" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."renew_mt5_terminal_lease"("p_terminal_digest" "text", "p_owner_token" "uuid", "p_ttl_s" integer) TO "service_role";
 
 
 
@@ -20298,6 +20477,10 @@ GRANT SELECT,INSERT ON TABLE "public"."mt5_server_clock_readings" TO "service_ro
 GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "anon";
 GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "authenticated";
 GRANT ALL ON SEQUENCE "public"."mt5_server_clock_readings_id_seq" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."mt5_terminal_leases" TO "service_role";
 
 
 
