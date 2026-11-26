@@ -12,8 +12,9 @@
 -- ROLLOUT ORDER (CONTEXT Q2): column first (20261123180000), then the writers and the
 -- backfill (PR-2), then THIS index change. It merges only after the gate-A5 census on
 -- PROD passed: no live active MT5 key with a null server, and at least one daily poll
--- after the PR-2 deploy. A half-finished backfill errs toward refusing, never toward a
--- silent duplicate, because a null server is NOT a wildcard at the index (see below).
+-- after the PR-2 deploy. A half-finished backfill does not open a hole the index closes:
+-- the index refuses a null-null pair, but a null server beside a set server is ADMITTED
+-- at the index (see below) and is refused only by the app fences and reconnect's EXISTS.
 --
 -- WHY THE SAME NAME (D-01): one index, so pgConstraintName stays unambiguous for every
 -- app mapping that reads it. The predicate is unchanged:
@@ -124,7 +125,11 @@ BEGIN
   -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
   -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
   -- A concurrent race past this check still hits the index and raises the SAME
-  -- SQLSTATE, so one client mapping covers both.
+  -- SQLSTATE, so one client mapping covers both, for the null-null and equal-server
+  -- pairs only. A concurrent race on a null-vs-set pair is NOT caught by the index.
+  -- PROD on 2026-11-26 held 0 MT5 keys with no server (live or disconnected), and the
+  -- connect writers refuse an MT5 key with no server (PR-2b-2, founder ruling CONTEXT
+  -- Q6), so that pair cannot arise from current writers.
   -- Phase 225 / CONN-03: "the same account" now means the same login AND, when both
   -- keys carry a server, the same server. A key whose server is not captured yet
   -- (NULL) reads as a wildcard and still counts as the same account.
@@ -157,7 +162,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION public.reconnect_allocator_api_key IS
-  'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE. Phase 225: a live sibling on a DIFFERENT server no longer blocks it; a sibling whose server or this key''s server is NULL (not captured yet) is a wildcard and still blocks it. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
+  'Migration 075: reverse of disconnect_allocator_api_key. Clears disconnected_at + resets sync_error and sync_status=idle so the next cron tick picks the key up fresh. Returns false if the key was not disconnected. Phase 167.1.2: refuses with SQLSTATE 23505 and message KEY_VENUE_ALREADY_CONNECTED, leaving the key disconnected, when a LIVE key of the same user, exchange and venue_account_id exists; a race that reaches api_keys_user_exchange_venue_account_uniq raises the same SQLSTATE (null-null and equal-server pairs only; the index admits a null server beside a set one, so a race on that pair is not caught there). Phase 225: a live sibling on a DIFFERENT server no longer blocks it; a sibling whose server or this key''s server is NULL (not captured yet) is a wildcard and still blocks it. A successful reconnect also resets history_inclusion to NULL, so an include/exclude choice made for a past departure never applies to a later one.';
 
 -- The ACL pair of 20260925120000, re-issued verbatim.
 REVOKE ALL ON FUNCTION public.reconnect_allocator_api_key(uuid)

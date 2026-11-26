@@ -44,7 +44,11 @@ BEGIN
   -- Phase 167.1.2 Pitfall 5: a LIVE sibling already holds this account. Refuse
   -- by name before the UPDATE reaches api_keys_user_exchange_venue_account_uniq.
   -- A concurrent race past this check still hits the index and raises the SAME
-  -- SQLSTATE, so one client mapping covers both.
+  -- SQLSTATE, so one client mapping covers both, for the null-null and equal-server
+  -- pairs only. A concurrent race on a null-vs-set pair is NOT caught by the index.
+  -- PROD on 2026-11-26 held 0 MT5 keys with no server (live or disconnected), and the
+  -- connect writers refuse an MT5 key with no server (PR-2b-2, founder ruling CONTEXT
+  -- Q6), so that pair cannot arise from current writers.
   -- Phase 225 / CONN-03: "the same account" now means the same login AND, when both
   -- keys carry a server, the same server. A key whose server is not captured yet
   -- (NULL) reads as a wildcard and still counts as the same account.
