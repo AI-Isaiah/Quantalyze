@@ -2326,6 +2326,44 @@ describe("[154.1 / WIZCONT-02] ConnectKeyStep — an already-connected account r
     expect(link).toHaveTextContent("finish setup on “Test”");
   });
 
+  it("[228-02 / CONN-04] KEY_ORPHANED's Disconnect bullet names the key when the holder is a key", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(
+        {
+          code: "KEY_ORPHANED",
+          error: "x",
+          holder: { kind: "key", name: "Gold book", href: "/strategies" },
+        },
+        409,
+      ),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent(
+      "choose “Disconnect” on the row for your key “Gold book”. The stored key is kept on record",
+    );
+    expect(envelope.textContent).not.toContain("choose “Disconnect” on that row");
+  });
+
+  it.each([
+    ["a strategy holder", { kind: "strategy", name: "Helios Momentum", href: "/factsheet/s-1" }],
+    ["no holder", undefined],
+  ])("[228-02 / CONN-04] %s: today's Disconnect sentence", async (_l, holder) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_ORPHANED", error: "x", ...(holder ? { holder } : {}) }, 409),
+    );
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fillKeyAndSecret();
+    fireEvent.click(screen.getByTestId("wizard-connect-submit"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    expect(envelope).toHaveTextContent("choose “Disconnect” on that row. The stored key is kept on record");
+    expect(envelope.textContent).not.toContain("on the row for your key");
+  });
+
   it("a holder with a hostile href is dropped: no link renders", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse(
