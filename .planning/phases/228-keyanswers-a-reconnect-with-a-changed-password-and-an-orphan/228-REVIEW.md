@@ -237,3 +237,62 @@ The zero-writes property still holds by construction, because every throw exits 
 _Reviewed: 2026-11-26T16:24:31Z_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
+
+## Round 2
+
+**Reviewed:** 2026-11-26 (worktree head `5f8b29964`; fix commit `77664a0b8`)
+**Depth:** deep, scoped to `77664a0b8` plus a re-check of the phase diff (`git diff 0e6ebeedbc HEAD -- . ':!.planning'`) for anything this change pushes over MEDIUM.
+**Result:** 0 CRITICAL, 0 HIGH, 0 MEDIUM, 1 LOW, 2 INFO.
+
+### WR-01: RESOLVED
+
+What I checked against source:
+
+- **Catch order and types match `analyticsRequest`** (`analytics-client.ts:961-981` against `:543-589`). The order is CircuitOpenError, then SeamConfigError, then `(Error || DOMException)` named `AbortError`/`TimeoutError` mapped to `AnalyticsTimeoutError`, then `notReachableError()`. The DOMException half of the shape guard is kept, so jsdom timeouts are not sent to the not-reachable arm. The deadline quoted is `SEAM_BUDGETS["keys-rotate-secret"].timeoutMs`, and that is the deadline the core actually applies, because no `timeoutMsOverride` is passed.
+- **CircuitOpenError and SeamConfigError are rethrown unchanged** (`:969-971`). The classifier still answers `SERVICE_UNAVAILABLE_RETRY` 503 for a breaker trip. `keyRouteFailureHeaders`' `instanceof CircuitOpenError` branch in create-with-key still gets the original object.
+- **A non-ok HTTP answer is not swallowed.** The `try` covers only the `resilientFetch` call. The `AnalyticsUpstreamError`-named throw with `seamCode` and `status` (`:984-998`) is outside it, so every `VENUE_WIRE_CODE_TO_VERDICT` verdict and the 212-04 bare-401/403 branch reach the classifier exactly as before. `resilientFetch` returns non-ok statuses and does not throw them: its only throws are the SeamConfigError and CircuitOpenError arms, the rethrown transport error, and an unreachable loop guard (`resilient-fetch.ts:2463-2654, 2771, 2880`).
+- **PATCH `/api/keys/[id]/rotate-secret`** (`route.ts:299-330`). A timeout used to answer `KEY_NETWORK_TIMEOUT` 502, and a refused connection used to answer `UNKNOWN` 500 with a Sentry page. Both now answer `SERVICE_UNREACHABLE` 502 with no page, because `SERVICE_UNREACHABLE` is not in `OUR_DEFECT_KEY_ERROR_CODES` (`wizardErrors.ts:6306-6337`). The `keys/[id]/rotate-secret` roster (`wizardErrors.ts:6578-6716`) holds none of `SERVICE_UNREACHABLE`, `KEY_NETWORK_TIMEOUT` or `SERVICE_UNAVAILABLE_RETRY`, so `UpdateMt5SecretDialog` rendered `UNKNOWN` before the fix and still does. The route's literal-code ARRIVAL derivation is unaffected because no `json({ code })` literal changed.
+- **create-with-key rotate leg** (`route.ts:1934`, outer catch at `:2773`). It now gives the same answer as the sibling `validateKey` arm on the same hop. The wizard already renders `SERVICE_UNREACHABLE`, since `validateKey` has emitted it since 140.5-02. Nothing is persisted on either failure arm: `persistRotatedMt5Secret` runs only after `rotateKeySecret` resolves.
+- **The test exercises the real code and can fail** (`analytics-client.test.ts:2341-2382`). Only `server-only` and `next/headers` are mocked. `globalThis.fetch` rejects inside the real `resilientFetch` (`resilient-fetch.ts:2700`), loaded fresh after `vi.resetModules()`. The classifier is the real `./wizardErrors`. The expected codes are literals. Run at head: 2 passed. It is falsifiable on both arms, derived rather than mutated, because review is read-only:
+  - Without the catch, the `TimeoutError` message contains `"timeout"` and the cascade answers `KEY_NETWORK_TIMEOUT`.
+  - Without the catch, `TypeError("fetch failed")` matches no branch and the cascade answers `UNKNOWN` 500.
+  - A misconfigured env would throw `SeamConfigError` and land on `UNKNOWN`, so the test cannot pass vacuously.
+- **Phase diff re-check.** Nothing else in the diff depends on the old unwrapped shapes. No route test asserts `KEY_NETWORK_TIMEOUT` from a rotate rejection, because those tests mock `rotateKeySecret` wholesale. No round-1 LOW or INFO item changes severity because of this commit.
+
+### R2-01 (LOW): Body-read failures on the rotate seam still escape the taxonomy and answer `UNKNOWN` 500 with a Sentry page
+
+**File:** `src/lib/analytics-client.ts:986` (the non-ok arm rethrows `SeamBodyReadError` raw) and `:1001` (the success-path `await res.json()` is unguarded)
+**Issue:** WR-01 named the fetch-level throws, and those are fixed. The body half of the same transport is still unmapped:
+- A `SeamBodyReadError` has the message "Analytics service response body could not be read", no `seamCode` and no `seamTransportCode`. It matches no cascade substring, so it answers `UNKNOWN` 500 with a page. `analyticsRequest` sends the same throw through `mapBodyReadFailure` (`:345-353`), which answers `SERVICE_UNREACHABLE`.
+- A 2xx answer that is not JSON (for example, a Railway edge page) throws a raw `SyntaxError` at `:1001`.
+
+The window is narrow: headers have already arrived and the body is a small JSON object. The code is inherited verbatim from the pre-phase route (`0e6ebeedbc` `route.ts:328-329, :401`), and no write is at risk. That is why this is LOW and not MEDIUM. Recorded here only, per the repo rule.
+**Fix (minimal):**
+```ts
+const errBody = await res.json().catch((readErr: unknown) => {
+  if (readErr instanceof SeamBodyReadError) {
+    mapBodyReadFailure(readErr, "/internal/keys/{id}/rotate-secret", SEAM_BUDGETS["keys-rotate-secret"].timeoutMs);
+  }
+  return {};
+});
+// …
+const body = await res.json().catch((e: unknown) =>
+  mapBodyReadFailure(e, "/internal/keys/{id}/rotate-secret", SEAM_BUDGETS["keys-rotate-secret"].timeoutMs),
+);
+const result = RotateSecretResponseSchema.safeParse(body);
+```
+`mapBodyReadFailure` rethrows anything that is not a `SeamBodyReadError` unchanged, so this fix covers the body-read half only. The 2xx non-JSON `SyntaxError` still needs `analyticsRequest`'s content-type guard (`unusableSeamResponseMessage`) to be handled. Leave it out of a minimal fix.
+
+### R2-02 (INFO): The SeamConfigError arm drops `analyticsRequest`'s named CONFIG-fault log
+
+**File:** `src/lib/analytics-client.ts:969-971` (compare `:562-568`)
+**Issue:** The fix comment says "same three arms, same order", but `analyticsRequest` logs `CONFIG fault on <path> — not an upstream failure` before it rethrows, and `rotateKeySecret` rethrows silently. Both callers still log the scrubbed error and page on `UNKNOWN`, so nothing is lost. Only the operator-facing "not Railway" hint is missing.
+**Fix:** None required. If wanted, copy the one `console.error(... scrubSeamString(err.message))` line.
+
+### R2-03 (INFO): Recorded behaviour change: a refused connection on PATCH rotate-secret no longer pages
+
+**File:** `src/app/api/keys/[id]/rotate-secret/route.ts:307-327`
+**Issue:** This is intended, and it matches the other two key routes, where `SERVICE_UNREACHABLE` has never paged. A Railway outage seen only through this route is now visible in `console.error` and the breaker, not in Sentry. The dialog still shows `UNKNOWN` for it, because the code is not rostered. That gap pre-exists, and the fixer correctly left it out of scope.
+**Fix:** None.
+
+**Round 2 verdict: WR-01 RESOLVED. No new MEDIUM or higher. The phase is clear of MEDIUM+ findings.**
