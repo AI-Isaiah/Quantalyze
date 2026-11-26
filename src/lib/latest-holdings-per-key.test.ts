@@ -1280,3 +1280,116 @@ describe("fetchLatestHoldingsPerKey: { auditEvidence: false } (170.4 plan 12)", 
     expect(res.markerReadError).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 235 HOLD-04 (server half, reader level). Every arm above fails the WHOLE
+// `allocator_equity_derived` table, so every key's marker read fails together and
+// an aggregation that only looked at the first key would pass. These arms fail
+// ONE key's marker read while its sibling's succeeds, in both orders that matter.
+// ---------------------------------------------------------------------------
+describe("Phase 235 HOLD-04: one key's failed marker read in a multi-key book", () => {
+  /**
+   * Wraps `client` so the `allocator_equity_derived` read whose `kind` filter names one
+   * of `failingKeyIds` resolves `{ data: null, error }`; every other read is delegated.
+   * `failedKinds` records which marker kinds were actually failed, so an arm can prove
+   * the wrapper hit exactly the intended key and not the whole table.
+   */
+  const failMarkerReadFor = (
+    client: ReturnType<typeof fakeClient>,
+    failingKeyIds: string[],
+    message: string,
+  ) => {
+    const failingKinds = new Set(failingKeyIds.map((id) => `${NATIVE_UNPRICED_KIND_PREFIX}${id}`));
+    const failedKinds: string[] = [];
+    type Inner = {
+      select: (c: string) => unknown;
+      eq: (c: string, v: unknown) => unknown;
+      limit: (n: number) => unknown;
+      then: (resolve: (v: unknown) => void) => void;
+    };
+    const wrapped = {
+      from: (table: string) => {
+        const inner = (client as unknown as { from: (t: string) => Inner }).from(table);
+        if (table !== "allocator_equity_derived") return inner;
+        let kind: string | null = null;
+        const chain = {
+          select(c: string) {
+            inner.select(c);
+            return chain;
+          },
+          eq(c: string, v: unknown) {
+            if (c === "kind") kind = String(v);
+            inner.eq(c, v);
+            return chain;
+          },
+          limit(n: number) {
+            inner.limit(n);
+            return chain;
+          },
+          then(resolve: (v: unknown) => void) {
+            if (kind !== null && failingKinds.has(kind)) {
+              failedKinds.push(kind);
+              resolve({ data: null, error: { message } });
+              return;
+            }
+            inner.then(resolve);
+          },
+        };
+        return chain;
+      },
+    } as unknown as ReturnType<typeof fakeClient>;
+    return { wrapped, failedKinds };
+  };
+
+  it("a LATER key's failed marker read still raises markerReadError, else the dashboard shows stale rows silently", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { wrapped, failedKinds } = failMarkerReadFor(
+        fakeClient(
+          [
+            { id: "key-a", user_id: "user-1" },
+            { id: "key-b", user_id: "user-1" },
+          ],
+          [h("key-a", "2026-10-10", "BTC-PERP"), h("key-b", "2026-10-10", "ETH-PERP")],
+        ),
+        ["key-b"],
+        "second key marker read down",
+      );
+      const res = await fetchLatestHoldingsPerKey(wrapped, "user-1", COLS);
+      // The wrapper failed the SECOND key's marker only; the first key read fine.
+      expect(failedKinds).toEqual([`${NATIVE_UNPRICED_KIND_PREFIX}key-b`]);
+      expect(res.error).toBeNull();
+      expect(res.markerReadError).toBe("second key marker read down");
+      expect(ids(res.data as Row[]).sort()).toEqual([
+        "key-a:2026-10-10:BTC-PERP",
+        "key-b:2026-10-10:ETH-PERP",
+      ]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("a zero-row key's failed marker read after a healthy key is not lost, else the dashboard shows stale rows silently", async () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { wrapped, failedKinds } = failMarkerReadFor(
+        fakeClient(
+          [
+            { id: "key-a", user_id: "user-1" },
+            { id: "key-empty", user_id: "user-1" },
+          ],
+          [h("key-a", "2026-10-10", "BTC-PERP")],
+        ),
+        ["key-empty"],
+        "zero-row key marker read down",
+      );
+      const res = await fetchLatestHoldingsPerKey(wrapped, "user-1", COLS);
+      expect(failedKinds).toEqual([`${NATIVE_UNPRICED_KIND_PREFIX}key-empty`]);
+      expect(res.error).toBeNull();
+      expect(res.markerReadError).toBe("zero-row key marker read down");
+      expect(ids(res.data as Row[])).toEqual(["key-a:2026-10-10:BTC-PERP"]);
+    } finally {
+      err.mockRestore();
+    }
+  });
+});
