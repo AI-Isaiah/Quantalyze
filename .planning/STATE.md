@@ -5,16 +5,16 @@ milestone_name: TRUTH — data you can trust
 current_phase: 233
 current_phase_name: DERIBITTRUTH
 status: executing
-stopped_at: Phases 233, 250 and 251 closed; 230 and 238 records landed (human verification pending)
+stopped_at: Phase 225 PR-3 merged and applied to PROD (records PR); 225 stays open for plan 18's founder control and plan 225-21
 last_updated: "2026-11-26T11:52:29.989Z"
 last_activity: 2026-11-26
-last_activity_desc: "Phases 233 DERIBITTRUTH (#1360), 250 BINANCEFILLS (#1355) and 251 SYNCSTORE (#1359) complete; 230 MT5NIGHTLY (#1358) and 238 NEVERCOMPUTED (#1331, #1363) shipped, human verification pending"
-state_head: 19ee154a6d81443bcacdb9855a26096e968b5a1f
+last_activity_desc: "Phase 225 ONEACCOUNTONCE PR-3 (#1368, v0.133.92.0) merged, migration 20261126140500 applied to TEST and PROD and read back equal; Phase 254 OPENINGDEPOSIT booked in v1.23"
+state_head: 734e51f53b3590834b7f5539fec08bd39a95690d
 progress:
   total_phases: 23
   completed_phases: 14
-  total_plans: 138
-  completed_plans: 128
+  total_plans: 146
+  completed_plans: 143
   percent: 61
 ---
 
@@ -182,8 +182,8 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 250 (BINANCEFILLS, v0.133.84.0, #1355) and 251 (SYNCSTORE, v0.133.87.0, #1359) closed in the same records PR; v1.22 phases run in parallel
 Plan: 7 of 7
-Status: Phases complete; 230 (MT5NIGHTLY, shipped v0.133.91.0, #1358) and 238 (NEVERCOMPUTED, shipped #1331 and #1363) records landed in the same records PR, both with human verification pending (see Deferred Verification); 225 and 253 in flight
-Last activity: 2026-11-26 — records PR for 230, 233, 238, 250 and 251
+Status: Phases complete; 230 (MT5NIGHTLY, shipped v0.133.91.0, #1358) and 238 (NEVERCOMPUTED, shipped #1331 and #1363) records landed in the same records PR, both with human verification pending (see Deferred Verification); 225 (PR-3 merged #1368, still open) and 253 in flight
+Last activity: 2026-11-26 — records PR for 225 PR-3 (#1368, plans 05-17, 19 and 20 ticked; 18 open on its founder control; 225-21 booked, not written) and the v1.23 booking of 254 OPENINGDEPOSIT
 Progress: [██████░░░░] 61%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -741,6 +741,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 252 added (2026-11-25, /gsd-phase add, founder decision 2026-11-25, AskUserQuestion, "Book it in v1.22 (Recommended)"): DERIBITOPTIONS, a Deribit options strategy's published figures are mark-to-market or withheld, never a cash-wallet artefact. It books the fix the diagnosed debug session `deribit-implausible-returns` (mechanism B) named as its next action, now tracked so the phase can cite it. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 250` and a TBD stub; all three were corrected by hand. Number 252 because 251 (SYNCSTORE) was already booked in the 222 worktrees; 251 is carried onto main in the same records PR.
 - Phase 155.2 and Phase 157 moved out of v1.22 TRUTH into v1.23 HARDEN: 2026-11-25, hand-edit of ROADMAP.md because /gsd-phase --edit preserves a phase's milestone; founder ruling in chat, "We will Move 157 and 155.2 into the next milestone". Their sections, Progress rows and 10 requirements (MT5-07..10, MT5-15, MT5-GOAL-01, FCONF-01..04) move to v1.23; v1.22 holds 22 phases (10 complete) and 71 requirements, v1.23 12 phases and 45. The 155.2 freeze window still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs.
 - Phase 253 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "ship Phase 250 now ... The Binance switch stays off until that phase closes"): BINANCECURSOR, the [250-BINANCE-STOP-BELOW-CURSOR] re-read gap, its predicate and its short-lived signal; an RPC change, so a migration; depends on 250. The handler appended the section below the v1.22 Progress table with `Depends on: Phase 252`, a placeholder goal and a TBD stub; all were corrected by hand, and `TODOS.md` `[250-BINANCE-STOP-BELOW-CURSOR]` now names Phase 253 as owner.
+- Phase 254 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "Exempt it, book for v1.23"): OPENINGDEPOSIT, a deposit dated exactly the day before a key's first return is that key's opening deposit on every venue, by a narrow opening-run exemption in `replay_key_equity`, not by widening `FULL_HISTORY_VENUES` (shared with the D-13 zero-start checks). Source: an allocator book's `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return. The handler appended it to v1.22 with `Depends on: Phase 253`, a placeholder goal and a TBD stub, and churned `state.json` statuses; the section, bullet and Progress row were moved to v1.23 HARDEN by hand, the goal written, and `state.json` reverted.
 
 ### Decisions
 
