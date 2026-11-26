@@ -221,20 +221,23 @@ mypy --strict (CI command, from analytics-service/): Success: no issues found in
 
 **NOT RUN, loud:** pytest on the analytics-service tests touched by the merge (`test_mt5_xlease.py`, `test_job_worker.py`, `test_process_key.py` and eleven others). The local Python lacks `pandas` (`ModuleNotFoundError` in `tests/conftest.py`), and installing packages is out of scope for this plan. The merge had no analytics-service conflicts: those files are main's own, covered by its CI. mypy strict passed.
 
-## Task 3: PENDING (blocking-human, run by the orchestrator)
+## Task 3: the read-only PROD pass (phase orchestrator, 2026-11-26)
 
-Not attempted by this executor. The orchestrator runs the read-only PROD pass per the plan's Task 3 instructions (marker query first, one query per call, counts and verdicts only), and records each step's result here:
+Read through the PROD Supabase MCP, one query per call, never chained, marker query first each session. Counts and verdicts only; no login, server, id or email is recorded here.
 
-1. Marker names PRODUCTION: _pending_
-2. PROD ledger tip is earlier than `20261126140500` (B's name after round 2): _pending_
-3. Gate A5, both censuses: _pending_
-4. Multi-server groups = 0; ambiguous keys = 0: _pending_
-5. PR-2b-2 bodies live (`login_servers` in `commit_scenario_batch`; venue_server grant authenticated true, anon false); analytics and Vercel deploys at or after PR-2b-2: _pending_
-6. PR-2c live; 225-18-SUMMARY.md records the post-deploy wrong-server attempt as a refusal: _pending_
-6b. Poll-path server refusal (WR-01) shipped on origin/main or booked with an owner in 225-20-SUMMARY.md: _pending_
-7. 155.2 freeze open: _pending_
-8. Exactly one open PR touches `supabase/migrations/` (this one): _pending_
-Also pending for the orchestrator: VAC-04 on the PR must report `8ebf2301...` for live PROD `reconnect_allocator_api_key`, which is what earns the ack in B. After merge, read the index definition from `pg_indexes` and the reconnect body from `pg_proc` on PROD and record both.
+1. **Marker** named PRODUCTION (both sessions, ~10:25Z and ~12:30Z).
+2. **PROD ledger tip** `20261126140000` (re-read ~12:30Z, after #1358's apply). B is `20261126140500`, later. PASS.
+3. **Gate A5.** Census 1: 0 rows (no live active MT5 key without a server). Census 2: newest live active MT5 `last_sync_at` 2026-11-26 01:08Z, after the PR-2 deploy (#1324, 2026-11-24). 11 live active MT5 keys on 4 distinct servers. PASS.
+4. **Multi-server groups** (all `api_keys` rows, owner + exchange + login with two or more distinct set servers): 0. **Ambiguous keys** (no server, in such a group): 0. PASS. These are also the counts plan 17 Task 3 owed before PR-2b-2 and never recorded (225-17-SUMMARY.md).
+5. **PR-2b-2 live.** `commit_scenario_batch` (1 overload) contains `login_servers`. `venue_server` column SELECT: authenticated true, anon false. PASS.
+6. **PR-2c live.** Analytics `/health` `git_sha` = `2aa1a0cbb` (PR-2c's merge); Vercel production deployment at `2aa1a0cbb` (10:08Z); Railway's analytics deployment of that SHA went live after main CI turned green (~10:22Z). 225-18-SUMMARY.md records every measured wrong-server attempt as refused before storage (two at the broker's sign-in on 2026-11-25, one on 2026-11-26 most likely before the analytics deploy, two pre-broker for unknown names). The post-deploy positive control (the correct server answering the already-connected code) is still not recorded. PASS on the refusal half.
+6b. **Poll-path server refusal (WR-01).** Not shipped: `git grep -c "assert_expected_server(" origin/main` over `services/mt5_read.py`, `services/job_worker.py` and `services/allocator_positions.py` prints nothing. BOOKED: plan 20 Task 3 read PASS (28 verdict lines, all True, 11/11 keys, 4/4 servers), and 225-20-SUMMARY.md's `## Poll-path server enforcement: owner` names follow-up gap plan 225-21. PASS (booked).
+7. **155.2 freeze.** Neither `155.2-12-SUMMARY.md` nor `155.2-14-SUMMARY.md` exists on origin/main. Open. PASS.
+8. **Open PRs touching `supabase/migrations/`:** _filled at READY below_.
+
+**VAC-04** on #1368 must report the live `reconnect_allocator_api_key` hash as `8ebf2301…`: _filled at READY below_.
+
+**After merge (main's step, not done here):** read the index definition from `pg_indexes` and the reconnect body from `pg_proc` on PROD, and record both.
 
 ## Self-Check: PASSED
 
