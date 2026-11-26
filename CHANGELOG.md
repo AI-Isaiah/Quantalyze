@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.100.2] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of eedbc243
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `45885399093`, after the PROD apply of merge `eedbc243`: sha256 `0e814551…` → `24ba8a9b…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 148 → 148, distinct function names 146 → 146, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261126180000_poll_positions_cohort_ccxt_venues.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-26` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.100.1 → 0.133.100.2 (re-picked after #1384 took 0.133.100.1).
+- The gates on the composed tree, verbatim: `baseline-currency: carried=344 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 148 — MATCH 145, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `45885399093` succeeded, and this entry was composed by the `redump-pr` job. Run `45885399093` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.100.1] - 2026-11-26 — records: Phases 235 HOLDINGSTRUTH and 241 DEMOCREDS close with verification passed; 225 and 228 gain PROD evidence and stay human_needed
 
 ### Changed
