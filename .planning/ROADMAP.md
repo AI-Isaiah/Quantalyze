@@ -901,6 +901,8 @@ Plans:
 4. The `DEF-142.2-07` census is re-run on PROD at HEAD (marker query first) and its reading recorded: the count of Deribit rows carrying `twr_chain_broken`, total and published. The entry is either closed and deleted in the ship PR, or rewritten with the new number and its open founder decision.
 5. Every Deribit strategy or book whose published figures move is re-derived, and the moved figures are listed in the CHANGELOG entry. No MT5 figure moves; if one does, the 155.2 freeze rule above governs the merge. ⭐ 2026-11-25: 155.2 moved to v1.23 HARDEN; this freeze rule still holds until 155.2 plan 12's recapture actually runs (see the milestone-wide rule).
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
+
+- ⭐ **FOUNDER DECISION 2026-11-26 (recorded in `252-CONTEXT.md` and `252-VERIFICATION.md`):** the OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld; both stay as they are. This narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Phase 252 stays `human_needed` (the founder still runs the PROD probe).
 **Plans:** 6/6 plans executed
 
 Plans:
