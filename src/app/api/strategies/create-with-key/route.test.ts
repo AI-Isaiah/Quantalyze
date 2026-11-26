@@ -545,6 +545,17 @@ function makeSelectBuilder(
       filters[col] = val;
       return node;
     },
+    // 225 review M-1 — the own-account holder read skips drafts and archived
+    // rows in the query. Recorded under a suffixed key so no table router here
+    // mistakes it for an equality filter.
+    neq: (col: string, val: unknown) => {
+      filters[`${col}:neq`] = val;
+      return node;
+    },
+    not: (col: string, op: string, val: unknown) => {
+      filters[`${col}:not.${op}`] = val;
+      return node;
+    },
     order: () => node,
     limit: () => node,
     // 225-07 — thenable api_keys list read: the same-account read is awaited

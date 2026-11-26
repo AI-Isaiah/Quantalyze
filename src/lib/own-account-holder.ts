@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { buildFactsheetHref } from "@/lib/factsheet/origin";
+import { captureToSentry } from "@/lib/sentry-capture";
 
 /**
  * WHO ALREADY HOLDS THIS ACCOUNT, as told to the person who just tried to add it
@@ -61,14 +62,18 @@ export async function readOwnAccountHolder(
   keyId: string,
   logLabel: string,
 ): Promise<AccountHolder | null> {
+  // Which read faulted, for the log and the Sentry tag.
+  let step = "direct-strategy";
   try {
     // 1. A strategy built on this key, oldest first (the one the account was
-    //    first connected for).
+    //    first connected for). Drafts and archived rows are skipped IN the query,
+    //    so an older draft never hides a newer real strategy (225 review M-1).
     const { data: direct, error: directErr } = await db
       .from("strategies")
       .select("id, name, status")
       .eq("user_id", userId)
       .eq("api_key_id", keyId)
+      .not("status", "in", "(draft,archived)")
       .order("created_at", { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -76,7 +81,25 @@ export async function readOwnAccountHolder(
     const viaStrategy = strategyHolder(direct as StrategyHolderRow | null);
     if (viaStrategy) return viaStrategy;
 
+    // 1b. A non-archived strategy still covers the key (a draft, or a blank
+    //     name). `/strategies` then shows no "No strategy yet" row for it
+    //     (`deriveStrategyLinkedKeyIds`: anything but archived is coverage), so
+    //     a key link would point at a page that does not list the key. Name
+    //     nothing rather than send the person looking for a row that is not there.
+    step = "covering-strategy";
+    const { data: covering, error: coveringErr } = await db
+      .from("strategies")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("api_key_id", keyId)
+      .neq("status", "archived")
+      .limit(1)
+      .maybeSingle();
+    if (coveringErr) throw coveringErr;
+    if (covering) return null;
+
     // 2. A composite strategy that uses the key through `strategy_keys`.
+    step = "composite-link";
     const { data: member, error: memberErr } = await db
       .from("strategy_keys")
       .select("strategy_id")
@@ -87,18 +110,26 @@ export async function readOwnAccountHolder(
     if (memberErr) throw memberErr;
     const memberStrategyId = (member as { strategy_id?: unknown } | null)?.strategy_id;
     if (typeof memberStrategyId === "string") {
+      step = "composite-strategy";
       const { data: composite, error: compositeErr } = await db
         .from("strategies")
         .select("id, name, status")
         .eq("user_id", userId)
         .eq("id", memberStrategyId)
+        .neq("status", "archived")
         .maybeSingle();
       if (compositeErr) throw compositeErr;
       const viaComposite = strategyHolder(composite as StrategyHolderRow | null);
       if (viaComposite) return viaComposite;
+      // A non-archived composite that cannot be named (a draft) still covers
+      // the key on `/strategies`, exactly as in 1b.
+      if (composite) return null;
     }
 
-    // 3. No strategy to open: name the key itself.
+    // 3. No strategy to open: name the key itself. Reached only when nothing
+    //    but archived strategies use the key, which is exactly when
+    //    `/strategies` lists it as "No strategy yet".
+    step = "key";
     const { data: key, error: keyErr } = await db
       .from("api_keys")
       .select("label, created_at")
@@ -124,7 +155,13 @@ export async function readOwnAccountHolder(
       typeof err === "object" && err !== null && "code" in err
         ? String((err as { code?: unknown }).code)
         : "unknown";
-    console.error(`[${logLabel}] own-account holder read failed (refusal sent without it): code=${code}`);
+    console.error(
+      `[${logLabel}] own-account holder read failed at ${step} (refusal sent without it): code=${code}`,
+    );
+    // 225 review (SFH M1): a dark read degrades every refusal to the unnamed
+    // copy, so it must be visible beyond a log line. The reads carry ids only,
+    // never credentials; `captureToSentry` scrubs at its chokepoint anyway.
+    void captureToSentry(err, { tags: { surface: logLabel, step: `own-account-holder:${step}` } });
     return null;
   }
 }

@@ -177,6 +177,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               filters[`${col}:is`] = val;
               return builder;
             },
+            // 225 review M-1 — the own-account holder read's status filters.
+            neq: (col: string, val: unknown) => {
+              filters[`${col}:neq`] = val;
+              return builder;
+            },
+            not: (col: string, op: string, val: unknown) => {
+              filters[`${col}:not.${op}`] = val;
+              return builder;
+            },
             order: (_col: string) => builder,
             limit: (_n: number) => builder,
             maybeSingle: async () => {
