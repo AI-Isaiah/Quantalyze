@@ -942,20 +942,44 @@ export async function rotateKeySecret(args: {
   correlationId: string;
 }): Promise<z.infer<typeof RotateSecretResponseSchema>> {
   const { keyId, userId, newSecret, correlationId } = args;
-  const res = await resilientFetch(
-    "keys-rotate-secret",
-    `/internal/keys/${encodeURIComponent(keyId)}/rotate-secret`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Internal-Token": process.env.INTERNAL_API_TOKEN!,
-        "X-Correlation-Id": correlationId,
+  let res: SeamResponse;
+  try {
+    res = await resilientFetch(
+      "keys-rotate-secret",
+      `/internal/keys/${encodeURIComponent(keyId)}/rotate-secret`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Internal-Token": process.env.INTERNAL_API_TOKEN!,
+          "X-Correlation-Id": correlationId,
+        },
+        body: JSON.stringify({ new_secret: newSecret, user_id: userId }),
+        retriesOverride: 0,
       },
-      body: JSON.stringify({ new_secret: newSecret, user_id: userId }),
-      retriesOverride: 0,
-    },
-  );
+    );
+  } catch (err) {
+    // Phase 228 review WR-01 — the core rethrows a transport failure UNWRAPPED
+    // (resilient-fetch.ts: "both clients map `err.name` onto their own typed
+    // errors"), and this wrapper is the only one that did not. Unwrapped, a
+    // 120 s deadline classified `KEY_NETWORK_TIMEOUT` (blames the exchange) and
+    // a refused connection classified `UNKNOWN` 500 with a Sentry page, while
+    // `validateKey` answers `SERVICE_UNREACHABLE` for the same hop. Same three
+    // arms, same order as `analyticsRequest`'s catch.
+    if (err instanceof CircuitOpenError || err instanceof SeamConfigError) {
+      throw err;
+    }
+    if (
+      (err instanceof Error || err instanceof DOMException) &&
+      (err.name === "AbortError" || err.name === "TimeoutError")
+    ) {
+      throw new AnalyticsTimeoutError(
+        "/internal/keys/{id}/rotate-secret",
+        SEAM_BUDGETS["keys-rotate-secret"].timeoutMs,
+      );
+    }
+    throw notReachableError();
+  }
 
   if (!res.ok) {
     const errBody = await res.json().catch((readErr: unknown) => {
