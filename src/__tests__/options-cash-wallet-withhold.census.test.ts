@@ -362,21 +362,30 @@ describe("options-book census - arm 1b: one promoted row through every seam", ()
     max_drawdown: SMOOTHED_FIGURES.max_drawdown,
   });
 
-  it("a promoted row (marker, no reason) shows the stored figures through the verdict, shaper, record, constituent and card seams", () => {
+  // One case per seam, so a neuter that reaches a seam fails THAT seam by name.
+  it("the predicate reads the promoted row as promoted, and the verdict is clean (not withheld)", () => {
     expect(isSmoothedHeadlineRow(PROMOTED_FLAGS)).toBe(true);
     expect(headlineVerdict(PROMOTED_FLAGS, GATE)).toEqual({ kind: "clean" });
+  });
 
+  it("the list shaper shows the stored figures and carries no headline_withheld_cause", () => {
     const shaped = shapeRowAnalytics(listRow(null), "s-1");
     expect(shaped).not.toHaveProperty("headline_withheld_cause");
     expect(shaped.cagr).toBe(SMOOTHED_FIGURES.cagr);
     expect(shaped.cumulative_return).toBe(SMOOTHED_FIGURES.cumulative_return);
+  });
 
+  it("the figure record carries no withheldBy and gateAnnualized reads full", () => {
     const record = recordFromScalars(scalars(null), "crypto");
     expect(record).not.toHaveProperty("withheldBy");
     expect(gateAnnualized(record)).toBe("full");
+  });
 
+  it("the constituent parser, with no figure_withheld_by, reads full", () => {
     expect(gateAnnualized(parseConstituentRecord(body(undefined)))).toBe("full");
+  });
 
+  it("the card prints the stored figures", () => {
     const card = computeOgHeadline(OG_ROWS, "crypto", persisted(PROMOTED_FLAGS));
     expect(card.sharpe).toBe(SMOOTHED_FIGURES.sharpe);
     expect(card.cagr).toBe(SMOOTHED_FIGURES.cagr);

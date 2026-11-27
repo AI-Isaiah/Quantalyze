@@ -156,6 +156,11 @@ function fixturePromotedComposite(): FactsheetPayload {
     // A promoted row carries no mtm_gated_reason (plan 09 drops it), so the MTM reason is the default.
     mtmGate: { available: false },
     smoothedGate: { available: true },
+    // The stored smoothed series row plan 09 writes beside the headline (a different drift from cash).
+    smoothedSeries: {
+      dailyReturns: makeReturnsSeries(300, 0.0021).map((p) => ({ date: p.date, value: p.value })),
+      gapSpans: [],
+    },
   });
   if (!built) throw new Error("fixture must build a payload");
   return built as FactsheetPayload;
@@ -204,6 +209,25 @@ describe("G252-MTM-PROMOTION — a promoted composite's factsheet with the UI fl
     const cells = [...container.querySelectorAll<HTMLElement>('[data-testid="factsheet-kpi-value"]')];
     expect(cells.length, "the strip is mounted").toBeGreaterThanOrEqual(7);
     for (const c of cells) expect((c.textContent ?? "").trim(), "every strip cell reads the dash").toBe("\u2014");
+  });
+
+  /**
+   * Rule 9: `build-payload` nulls the CASH windows of a withheld payload. If that leaked onto the
+   * smoothed view, a promoted row would open on figures with a dashed rail, which reads as broken.
+   * The rail's trailing windows come from the smoothed bundle on the smoothed basis, and stay dashes
+   * on the withheld cash basis.
+   */
+  it("the rail's trailing windows show figures on the smoothed basis and dashes on the withheld cash basis", () => {
+    const railCell = (container: HTMLElement, label: string) => {
+      const returns = [...container.querySelectorAll("section")].find((sec) => sec.querySelector("h3")?.textContent === "Returns");
+      expect(returns, "the Returns panel is mounted").toBeDefined();
+      const tr = [...returns!.querySelectorAll("tr")].find((r) => r.querySelector("td")?.textContent === label);
+      return (tr?.querySelectorAll("td")[1]?.textContent ?? "").trim();
+    };
+    const { container } = renderBody(fixturePromotedComposite());
+    for (const label of ["3 Month", "6 Month"]) expect(railCell(container, label), `${label} on smoothed`).toMatch(/^[+-]?\d/);
+    fireEvent.click(segments(container).getByText("Cash settlement"));
+    for (const label of ["3 Month", "6 Month"]) expect(railCell(container, label), `${label} on cash`).toBe("\u2014");
   });
 
   it("the Mark-to-market segment's disabled reason is the default sentence, not the options one", () => {
