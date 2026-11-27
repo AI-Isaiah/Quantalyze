@@ -392,28 +392,11 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-27: the two Phase 243 DBBACKSTOP plan 05 rows below are DELETED once the re-dump
-  // of supabase/schema/baseline.sql taken after 20261127120100_insert_api_key_rpc_and_user_id_immutable.sql
-  // applied to PROD turns each into `ratchet-stale`; the gate says so first, as it did for every
-  // earlier row.
-  {
-    name: "insert_api_key",
-    side: "snapshot-only",
-    capturedAt: "2026-11-27",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 243 DBBACKSTOP defines the audited api_keys writer in migration 20261127120100_insert_api_key_rpc_and_user_id_immutable.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
-  {
-    name: "enforce_api_keys_user_id_immutable",
-    side: "snapshot-only",
-    capturedAt: "2026-11-27",
-    clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
-    reason:
-      "Phase 243 DBBACKSTOP defines the user_id immutability trigger function in migration 20261127120100_insert_api_key_rpc_and_user_id_immutable.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
-  },
+  // ⭐ 2026-11-27: the two Phase 243 DBBACKSTOP plan 05 rows (`insert_api_key` and
+  // `enforce_api_keys_user_id_immutable`, `snapshot-only`, captured 2026-11-27) are DELETED:
+  // their clearing condition, a re-dump taken after
+  // 20261127120100_insert_api_key_rpc_and_user_id_immutable.sql applied to PROD, landed as
+  // v0.133.105.1, and the gate then reported each one `ratchet-stale`.
   // ⭐ 2026-11-26: the three Phase 230 MT5NIGHTLY plan 06 rows (`acquire_mt5_terminal_lease`,
   // `renew_mt5_terminal_lease`, `release_mt5_terminal_lease`, `snapshot-only`, captured
   // 2026-11-25) are DELETED: their clearing condition, a re-dump taken after
