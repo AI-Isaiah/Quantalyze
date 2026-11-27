@@ -96,6 +96,11 @@ export type BuildFactsheetOpts = {
   /** Phase 133 (SMTM-01) — the smoothed sibling of {@link mtmGate}. */
   smoothedGate?: FactsheetCommon["smoothedGate"];
   /**
+   * Phase 252 G252-MTM-PROMOTION — the basis the stored headline is measured on, set by the composite
+   * read path only for a promoted row. Copied into the payload present-only.
+   */
+  headlineBasis?: FactsheetCommon["headlineBasis"];
+  /**
    * Phase 103 (MTM-04) — the persisted MTM daily series (read from the
    * `mtm_daily_returns` `strategy_analytics_series` row via
    * `composite-read-path.ts readMtmSeries`). When present with ≥2 valid rows,
@@ -1163,6 +1168,8 @@ function buildFromBuildableSeries(
     // Phase 133 (SMTM-01) — additive smoothed gate passthrough (undefined dropped
     // from the serialized blob when no smoothed story, so cash/MTM stays identical).
     smoothedGate: opts?.smoothedGate,
+    // Phase 252 G252-MTM-PROMOTION — by spread, so an unpromoted payload has no key at all.
+    ...(opts?.headlineBasis ? { headlineBasis: opts.headlineBasis } : {}),
     dataQuality: opts?.dataQuality,
     // Phase 169.1 (D-27 as amended, D-30, D-83 (b)) — the strategy's conventions,
     // for the browser re-derive arms. Emitted ONLY when non-default, by spread so

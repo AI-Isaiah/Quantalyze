@@ -870,6 +870,13 @@ export type FactsheetCommon = {
     reason?: "unsmoothed_options_book" | "mtm_basis_unavailable_for_venue" | string;
   };
   /**
+   * Phase 252 G252-MTM-PROMOTION — the basis the STORED headline is measured on. Present only on a
+   * promoted composite (the worker stored the smoothed result as the headline, marker
+   * `data_quality_flags.headline_basis`); absent means the cash wallet, as before. Present-only, so
+   * every unpromoted payload is byte-identical.
+   */
+  headlineBasis?: "smoothed_mtm";
+  /**
    * Phase 133 (SMTM-01) — server-truth SMOOTHED gate, the sibling of {@link mtmGate}.
    * `available` = the `smoothed_mtm` key is present in `metrics_json_by_basis` with a
    * trustworthy headline. There is NO persisted smoothed-reason column (the worker

@@ -6,8 +6,11 @@ import { deriveSegmentMarkers } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { BASIS_KPI_MAP, hasBasisHeadline } from "./basis-metrics";
 import {
+  HEADLINE_BASIS_SMOOTHED,
+  OPTIONS_CASH_WALLET_CAUSE,
   headlineVerdict,
   isOptionsCashWalletBook,
+  isSmoothedHeadlineRow,
   isStoredResultReadable,
   readHeadlineBasis,
   storedCashHeadlineGate,
@@ -346,6 +349,7 @@ export async function readCompositeFactsheet(
       | {
           composite?: unknown;
           mtm_gated_reason?: unknown;
+          headline_basis?: unknown;
           per_key?: unknown;
           gap_spans?: unknown;
           insufficient_window?: unknown;
@@ -411,6 +415,10 @@ export async function readCompositeFactsheet(
   const smoothedAvailable = hasBasisHeadline(
     (metricsByBasis as { smoothed_mtm?: unknown } | undefined)?.smoothed_mtm,
   );
+  // Phase 252 G252-MTM-PROMOTION: the stored headline is the smoothed basis only when the producer's
+  // marker says so (and the reason is absent) AND a valid smoothed object is stored to open on. A marker
+  // without one leaves the cash basis withheld and does not switch the basis.
+  const smoothedHeadline = isSmoothedHeadlineRow(dqf) && smoothedAvailable;
   const markers = deriveSegmentMarkers(dqf);
   const tinyBaseDays = readTinyBaseDays(dqf?.tiny_base_days);
   if (
@@ -476,6 +484,7 @@ export async function readCompositeFactsheet(
       segmentBoundaries: markers.segmentBoundaries,
       missingSegments: markers.missingSegments,
       metricsByBasis: effectiveMetricsByBasis,
+      ...(smoothedHeadline ? { headlineBasis: HEADLINE_BASIS_SMOOTHED } : {}),
       ...(mtmSeries ? { mtmSeries } : {}),
       ...(smoothedSeries ? { smoothedSeries } : {}),
       // HARD-04 (#67): server-truth short-window flag. Strict `=== true`
@@ -519,6 +528,12 @@ export async function readCompositeFactsheet(
  * Call it only when a stored cash headline IS overlaid: when the TypeScript
  * computes the whole record, no stored figure is shown and there is nothing to
  * date or withhold.
+ *
+ * Phase 252 G252-MTM-PROMOTION: the headline handed in is always the stored CASH object. On a
+ * promoted composite (`isSmoothedHeadlineRow`, composite arm only) the row's top-level figures are
+ * the smoothed ones, so the verdict reads clean, yet this object is still the cash-wallet artefact
+ * the options-book withhold names. It is withheld under that cause (`options_cash_wallet`) with no
+ * chain-break or coverage flags, which describe the smoothed series on such a row.
  *
  * On a chain-broken row (`readHeadlineBasis`):
  *   - a valid `headline_since` → Dated: the figures are kept, and `quality`
@@ -571,6 +586,20 @@ export function applyHeadlineBasis(
     "twrChainBroken" | "headlineCoversFrom" | "headlineWithheld" | "headlineWithheldCause" | "headlineGuardReasons"
   >;
 } {
+  // Phase 252 G252-MTM-PROMOTION: a PROMOTED composite stores the smoothed result at top level, so
+  // `headlineVerdict` reads it as clean. This function is only ever handed the stored CASH headline,
+  // though, and on an options book that is the cash-wallet artefact: withhold it under the wave-1 cause.
+  // Its quality carries no chain or coverage flags, because on a promoted row they describe the smoothed
+  // series, not the cash object withheld here.
+  if (options.composite === true && isSmoothedHeadlineRow(dqf)) {
+    const redactedCash: Record<string, number | null> = { ...headline };
+    for (const { serverKey } of BASIS_KPI_MAP) redactedCash[serverKey] = null;
+    return {
+      headline: redactedCash,
+      redacted: true,
+      quality: { headlineWithheld: true, headlineWithheldCause: OPTIONS_CASH_WALLET_CAUSE },
+    };
+  }
   // SFH-R2-01: the verdict is the shared `headlineVerdict`, the same call the OG
   // card makes, so the two surfaces cannot drift. `options.gate` is the stored
   // headline's applicability (see the docblock above); absent, it is applicable.

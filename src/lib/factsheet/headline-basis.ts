@@ -156,6 +156,39 @@ export function isOptionsCashWalletBook(dqf: unknown): boolean {
   return isOptionsCashWalletReason((dqf as Record<string, unknown>).mtm_gated_reason);
 }
 
+/**
+ * Phase 252 G252-MTM-PROMOTION (plan 10) — the key and value of the marker the producer stores on a
+ * PROMOTED composite: `data_quality_flags.headline_basis = "smoothed_mtm"`. It says the row's stored
+ * top-level headline is measured on the smoothed mark-to-market basis, not the cash wallet. Producer:
+ * `HEADLINE_BASIS_FLAG` / `HEADLINE_BASIS_SMOOTHED` in `analytics-service/services/stitch_composite.py`
+ * (plan 252-09); a census arm pins the pair across the two languages.
+ */
+export const HEADLINE_BASIS_FLAG = "headline_basis";
+export const HEADLINE_BASIS_SMOOTHED = "smoothed_mtm";
+
+/**
+ * The ONE owner of the promoted-row trigger, beside {@link isOptionsCashWalletBook}. Per the
+ * 2026-11-25 founder ruling ("... switch the headline to it only if it actually works for these
+ * keys") plan 252-09 stores the smoothed result as an option-active composite's headline when it
+ * does. Same record-or-null guard and strict `===` as the reason: no trim, no case fold, so an
+ * untrusted JSONB marker (a case variant, a padded string, a boolean, an array, null) is NOT a
+ * promoted row.
+ *
+ * **The reason always wins.** A row carrying both the marker and `mtm_gated_reason` is withheld
+ * everywhere exactly as at wave 1, so a half-written or stale producer state can never publish a
+ * smoothed headline the producer disowned.
+ *
+ * It is deliberately NOT folded into {@link headlineVerdict}: the OG card and the single-key arm call
+ * `headlineVerdict` on the TOP-LEVEL headline, which on a promoted row IS the smoothed result and
+ * must not be withheld. Only the factsheet's CASH by-basis object is the cash-wallet artefact the
+ * withhold names, and only the composite read path asks this.
+ */
+export function isSmoothedHeadlineRow(dqf: unknown): boolean {
+  if (dqf === null || typeof dqf !== "object" || Array.isArray(dqf)) return false;
+  if (isOptionsCashWalletBook(dqf)) return false;
+  return (dqf as Record<string, unknown>)[HEADLINE_BASIS_FLAG] === HEADLINE_BASIS_SMOOTHED;
+}
+
 /** The withhold cause the options-book verdict carries (see {@link HeadlineWithholdCause}). */
 export const OPTIONS_CASH_WALLET_CAUSE = "options_cash_wallet";
 
