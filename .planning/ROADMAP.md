@@ -904,7 +904,7 @@ Plans:
 
 - ⭐ **FOUNDER DECISION 2026-11-26 (recorded in `252-CONTEXT.md` and `252-VERIFICATION.md`):** the OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld; both stay as they are. This narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Phase 252 stays `human_needed` (the founder still runs the PROD probe).
 - ⭐ **FOUNDER DECISION 2026-11-26 (AskUserQuestion via the coordinator), verbatim answer "Fix it inside 252" (recorded in `252-CONTEXT.md`):** the wave-2 probe read `fail` on PROD (member m3: smoothed build `LedgerValuationError:position`). The cause is fixed inside Phase 252, and 252 stays open until the probe passes. The fix invents no data and does not narrow the MTM span without a separate founder ruling.
-**Plans:** 6/6 plans executed
+**Plans:** 6/7 plans executed
 
 Plans:
 - [x] 252-01-PLAN.md — tracer: one predicate `isOptionsCashWalletBook`, a named withhold cause in the headline verdict, the factsheet read path and the share card name the reason (SC-2 RED fixture)
@@ -913,6 +913,7 @@ Plans:
 - [x] 252-04-PLAN.md — Discovery, owner lists, percentile ranks and allocator book legs
 - [x] 252-05-PLAN.md — Compare, the completeness census test and cross-language pin, DEF-142.2-07 closed, the single-key follow-up booked
 - [x] 252-06-PLAN.md — wave 2 measurement tooling: the read-only smoothed MTM probe (the founder-gated run and any promotion follow the ship)
+- [ ] 252-07-PLAN.md — name which smoothed-only refusal fired (G252-PROBE-M3, gap closure)
 
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - PROOF-01: each gate goes RED on a neutered copy with its arm named, is restored by cp from a byte backup with cmp exit 0, and goes GREEN; outputs verbatim in the SUMMARY
