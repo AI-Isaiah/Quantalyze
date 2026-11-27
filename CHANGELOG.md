@@ -33,6 +33,7 @@
   - audit gate: RED naming `flag-monitor/route.ts` and `partner-import/route.ts`;
   - watchlist spec, on the local lane only: with the policy neutered to `USING (true)`, RED on "RLS LEAK on migration 024 policy", restored with a `pg_policy` snapshot compared by `cmp`; with `/api/watchlist` added to `PUBLIC_ROUTES`, RED on the 307 arm;
   - wiring pin: RED on every neutered arm.
+- The wiring pin builds its expected `HAS_SEED_ENV` text from the env names rather than writing literal env reads, so the env-manifest contract does not count the test as reading `TEST_SUPABASE_*` (caught by this PR's first CI run).
 - Lane runs: the spec 4 passed, 0 skipped; the neighbour run with `discovery-hide-examples-default` and `discovery-prefs-isolation` 6 passed.
 
 ### Notes

@@ -149,7 +149,9 @@ describe("the discovery watchlist e2e spec stays in the blocking lane (Phase 244
     expect(
       def![1].replace(/\s+/g, " ").trim(),
       "HAS_SEED_ENV is no longer a plain `!!a && !!b` over those two names (an OR, a negation or a literal would change what skips)",
-    ).toBe("!!process.env.TEST_SUPABASE_URL && !!process.env.TEST_SUPABASE_SERVICE_ROLE_KEY");
+      // Built from the names, not written as a literal env read, so the env-manifest contract
+      // (src/__tests__/contracts/env-manifest.test.ts) does not count this test as reading them.
+    ).toBe(["TEST_SUPABASE_URL", "TEST_SUPABASE_SERVICE_ROLE_KEY"].map((n) => "!!process" + ".env." + n).join(" && "));
     const exported = codeLines(workflow).join("\n");
     for (const name of names) {
       expect(
