@@ -80,3 +80,8 @@ Out of scope: `_fetch_raw_trades_okx` (editing it fires `[255-OKX-BEGIN-REACH-PR
 - `[255-OKX-BEGIN-REACH-PROBE]` stays booked; this phase does not touch the OKX reader.
 
 </deferred>
+
+## Research outcome 2026-11-27 (phase agent)
+
+- The "one failed write is enough" premise was measured false: the epilogue write repairs a single failed provisional write. The ROADMAP goal bullet is corrected.
+- The escalation trigger FIRED for half 1 (`257-RESEARCH.md`, candidate table). The only existing non-anon-readable record that carries the span is the run's own `compute_jobs.metadata`, and a compliant write of it needs a new fenced merge RPC (Phase 191 REFUSALRACE convention), which is a migration. Planning stopped here pending a founder ruling. The Bybit half is prototyped and plannable.
