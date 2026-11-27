@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 import { RECORD_SCALAR_ALIASES } from "@/lib/figure-record-scalars";
 import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 
@@ -55,6 +56,22 @@ vi.mock("@/lib/supabase/server", () => ({
   }),
 }));
 
+// Phase 243 DBACC-01: the card's cash-basis question is answered by a second, admin-client read of
+// the 21 pinned aliases. Without this mock createAdminClient throws (no service key) and every
+// card takes the failure path. The default answer is a row whose embed holds 21 null aliases, the
+// same as a strategy with no stored by-basis values (a missing row is a failure, never this);
+// route.test.tsx pins the projection and the failure arms.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: async () => ({ data: { strategy_analytics: byBasisAliasRow(null) }, error: null }),
+    };
+    return { from: () => builder };
+  },
+}));
+
 beforeEach(() => {
   STATE.strategyRow = null;
   STATE.select = null;
@@ -105,7 +122,6 @@ function setRow(opts: {
         volatility: 0.1,
         sortino: 0.2,
         calmar: 0.3,
-        metrics_json_by_basis: null,
         data_quality_flags: {},
         ...(opts.scalars ?? {}),
       },
@@ -351,7 +367,9 @@ describe("the embed projection (T-194.1-12)", () => {
     expect(aliases).toHaveLength(4);
     for (const a of aliases) expect(entries, `the embed must carry ${a}`).toContain(a);
     expect(entries).not.toContain("metrics_json");
-    for (const e of entries.filter((x) => x.includes("metrics_json") && x !== "metrics_json_by_basis")) {
+    // Phase 243 DBACC-01: no form of the by-basis column rides on the anon session select.
+    expect(STATE.select).not.toMatch(/metrics_json_by_basis/);
+    for (const e of entries.filter((x) => x.includes("metrics_json"))) {
       expect(e, "a metrics_json entry must be a keyed alias").toMatch(/^[a-z_]+:metrics_json->[a-z_]+$/);
     }
   });

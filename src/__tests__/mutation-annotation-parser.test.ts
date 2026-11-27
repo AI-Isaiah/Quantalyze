@@ -1129,7 +1129,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `armsSeen` 1033 -> 1041, the 8 twinned arms of the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `arms: 0/1041/0`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `armsSeen` 1041 -> 1050, plan 10's +9 twinned arms (5 in test_api_keys_venue_identity_uniq.sql, 4 in test_api_keys_account_identity.sql) on top of main. MEASURED: this file's run read `expected 1050 to be 1041`, `--parse-only` printed `arms: 0/1050/0` and `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `armsSeen` 1074 -> 1079, +5 twinned arms in test_enqueue_poll_positions_cohort.sql.
-    expect(armsSeen).toBe(1079);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `armsSeen` 1079 -> 1085, the 6 twinned arms (1a, 1b, 2a, 2b, 3, 4) of the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `arms: 0/1085/0`. stepsSeen does not move: all six twins are `sql` steps, which this walk skips.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `armsSeen` 1085 -> 1099, the 14 twinned arms of the two NEW gates test_insert_api_key_rpc.sql (R1 to R8) and test_api_keys_user_id_immutable.sql (1a, 1b, 2a, 2b, 3, 4), migration 20261127120100. MEASURED: `--parse-only` printed `arms: 0/1099/0`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `armsSeen` 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
+    expect(armsSeen).toBe(1100);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1193,7 +1196,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `stepsSeen` 1186 -> 1195, +9 file steps in the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: this file's run read `expected 1195 to be 1186`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `stepsSeen` 1195 -> 1199, +4 file steps from plan 10's arms and rewritten twins, read off the run, never summed. MEASURED: this file's run read `expected 1199 to be 1195`.
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `stepsSeen` 1220 -> 1232, +12 file steps in test_enqueue_poll_positions_cohort.sql (five new twins of two edits each, and P7's twin edits both migrations, +2).
-    expect(stepsSeen).toBe(1232);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `stepsSeen` 1232 -> 1242, +10 file steps: 6 in test_insert_api_key_rpc.sql (R1, R3, R5, R6, R7 `edit`, R8 `insert-after`; R2 and R4 are `sql`) and 4 in test_api_keys_user_id_immutable.sql (2a, 2b, 3, 4 `edit`; 1a and 1b are `sql`).
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `stepsSeen` 1242 -> 1243, +1 `edit` file step (R9's twin swaps two credential parameters in the INSERT's VALUES list).
+    expect(stepsSeen).toBe(1243);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2173,7 +2178,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `needles.length` 1186 -> 1195, the same +9 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1195 to be 1186`.
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `needles.length` 1195 -> 1199, the same +4 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1199 to be 1195`.
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `needles.length` 1220 -> 1232, the same +12 `edit` needles.
-    expect(needles.length).toBe(1232);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `needles.length` 1232 -> 1242, the same +10 file steps as `stepsSeen`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `needles.length` 1242 -> 1243, the same +1 file step as `stepsSeen`.
+    expect(needles.length).toBe(1243);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2790,7 +2797,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `filesTotal` 120 -> 121, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: `--parse-only` printed `coverage: files 94/121`; this file's run read `expected 121 to be 120`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
-    expect(corpus.filesTotal).toBe(123);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `filesTotal` 123 -> 124, the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `coverage: files 97/124`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `filesTotal` 124 -> 126, the two NEW DBACC-02 gates test_insert_api_key_rpc.sql and test_api_keys_user_id_immutable.sql. MEASURED: `--parse-only` printed `coverage: files 99/126`.
+    expect(corpus.filesTotal).toBe(126);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2889,7 +2898,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesAnnotated` 85 -> 92, moving WITH `filesTotal`; the by-name list gained the seven phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): annotated files 93 -> 94, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 94 to be 93`; `--parse-only` printed `coverage: files 94/121`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
-    expect(corpus.filesAnnotated).toBe(96);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): annotated files 96 -> 97, the NEW gate test_client_role_timeouts.sql (6 twinned arms, migration 20261127120000). MEASURED: `--parse-only` printed `coverage: files 97/124`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): annotated files 97 -> 99, the two NEW DBACC-02 gates (8 and 6 twinned arms, migration 20261127120100). MEASURED: `--parse-only` printed `coverage: files 99/126`.
+    expect(corpus.filesAnnotated).toBe(99);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -2924,6 +2935,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // loses 'revoked' (2), and the prefix-family loss of 'complete' behind
       // 'complete_with_warnings' (3).
       "test_api_keys_sync_status_sign_in_failed.sql",
+      // ⭐ ADDED 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): api_keys.user_id immutable for every role (6 twinned arms), migration 20261127120100.
+      "test_api_keys_user_id_immutable.sql",
       "test_api_keys_venue_identity_uniq.sql",
       // ⭐ ADDED 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): the public.auth_user_has_password(uuid) gate (9 twinned arms) for migration 20261120120000.
       "test_auth_user_has_password.sql",
@@ -2939,6 +2952,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       // annotated file: a due failed_retry job beside a pending twin of the same
       // (kind, partition) never makes a claim entry point raise 23505 (15 arms).
       "test_claim_compute_jobs_failed_retry_pending_pair.sql",
+      // ⭐ ADDED 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): the client-role statement_timeout pin gate (6 twinned arms) for migration 20261127120000.
+      "test_client_role_timeouts.sql",
       // ⭐ ADDED 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): the fingerprint same-day-empty gate (5 arms) for migration 20261027120000, the D-02 rule that a same-day empty poll is dropped from the fingerprint.
       "test_commit_scenario_batch_fingerprint_sameday_empty.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09, review WR-02): the fingerprint native-unpriced gate (2 arms) for migration 20261011120100.
@@ -2986,6 +3001,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_get_published_trust_signals.sql",
       "test_get_verified_cohort_rank_gate.sql",
       "test_guard_wizard_draft_updates_auth_uid.sql",
+      // ⭐ ADDED 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): the audited api_keys writer insert_api_key (8 twinned arms), migration 20261127120100.
+      "test_insert_api_key_rpc.sql",
       "test_ledger_refresh_composite_arm.sql",
       "test_ledger_refresh_fanout.sql",
       "test_ledger_refresh_staleness.sql",
@@ -3501,7 +3518,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): `filesTotal` 112 -> 119, the seven NEW phase gates. MEASURED: `--parse-only` printed `coverage: files 92/119`, `arms: 0/979/0`, and ONE full `node scripts/mutation-runner/run.mjs` run printed `arms: 979/979/0`, `biting: 979`, exit 0.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): `filesTotal` 120 -> 121, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: `--parse-only` printed `coverage: files 94/121`; this file's run read `expected 121 to be 120`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
-    expect(corpus.filesTotal).toBe(123);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `filesTotal` 123 -> 124, the NEW gate test_client_role_timeouts.sql (6 twinned arms, migration 20261127120000). MEASURED: `--parse-only` printed `coverage: files 97/124`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `filesTotal` 124 -> 126, the two NEW DBACC-02 gates test_insert_api_key_rpc.sql and test_api_keys_user_id_immutable.sql. MEASURED: `--parse-only` printed `coverage: files 99/126`.
+    expect(corpus.filesTotal).toBe(126);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3556,7 +3575,9 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY MERGE 2026-11-24 (Phase 227 JOBLEDGER merged onto origin/main at Phase 225): 86 + 7 = 93 annotated files; the by-name list carries both phases' gates.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): annotated files 93 -> 94, the NEW gate test_commit_scenario_batch_venue_server_identity.sql. MEASURED: this file's run read `expected 94 to be 93`; `--parse-only` printed `coverage: files 94/121`.
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
-    expect(corpus.annotatedFiles).toHaveLength(96);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `annotatedFiles` 96 -> 97, moving WITH `filesAnnotated`; the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `coverage: files 97/124`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `annotatedFiles` 97 -> 99, moving WITH `filesAnnotated`; the two NEW DBACC-02 gates. MEASURED: `--parse-only` printed `coverage: files 99/126`.
+    expect(corpus.annotatedFiles).toHaveLength(99);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

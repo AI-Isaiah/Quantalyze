@@ -393,8 +393,20 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * migration 20261126150000_strategy_fills_reread_bound.sql (a SNAPSHOT_MISSING finding until the post-apply
  * re-dump, recorded as a `snapshot-only` row in NAME_SET_RATCHET). 147 is Phase 230's three lease functions
  * on top of 144; this phase adds the one more. Raising this floor does NOT suppress any finding.
+ *
+ * MOVED 2026-11-27 (Phase 243 DBBACKSTOP, plan 05), 148 -> 150: two ADDITIONS, not a parser gain.
+ * `public.insert_api_key(...)` and `public.enforce_api_keys_user_id_immutable()` enter the chain via forward
+ * migration 20261127120100_insert_api_key_rpc_and_user_id_immutable.sql. MEASURED by
+ * `node scripts/baseline-content-drift-check.mjs` on this tree: `functions compared 150 - MATCH 145, DRIFT 3,
+ * SNAPSHOT_MISSING 2, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 2`. The two SNAPSHOT_MISSING findings are
+ * exactly `insert_api_key/12` and `enforce_api_keys_user_id_immutable/0`, whose migration is not on PROD yet
+ * (each recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts). They
+ * are EXPECTED until the re-dump of supabase/schema/baseline.sql taken after PR-A's apply, and NO allowlist
+ * row was added for either; the CI baseline-content-drift step is red with exactly those two findings until
+ * then, and any other finding is a defect. Raising this floor records the functions joining the corpus; it
+ * does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 148;
+export const COMPARED_FLOOR = 150;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */

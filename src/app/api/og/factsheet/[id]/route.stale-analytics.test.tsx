@@ -34,6 +34,7 @@
  * present. So neither direction can pass on an empty series.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 import type { ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -69,6 +70,22 @@ vi.mock("@/lib/supabase/server", () => ({
       return chain;
     },
   }),
+}));
+
+// Phase 243 DBACC-01: the card's cash-basis question is answered by a second, admin-client read of
+// the 21 pinned aliases. Without this mock createAdminClient throws (no service key) and every
+// card takes the failure path. The default answer is a row whose embed holds 21 null aliases, the
+// same as a strategy with no stored by-basis values (a missing row is a failure, never this);
+// route.test.tsx pins the projection and the failure arms.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: async () => ({ data: { strategy_analytics: byBasisAliasRow(null) }, error: null }),
+    };
+    return { from: () => builder };
+  },
 }));
 
 import { GET } from "./route";
