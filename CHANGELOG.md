@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.100.5] - 2026-11-27 — Phase 225 validation pass: the MT5 short-circuit server bracket is pinned, and SF-M1 gets an owner
+
+### Tests
+- **The short-circuit POST server bracket in `run_probe` now has a test that fails without it.** This closes SF-M4 / IN-01 from Phase 225's PR-2c review. When the gateway terminal refuses trading, `run_probe` skips `order_check` and reads `account_info` once more before it answers. Nothing pinned the server check on that read: skipping it left every test green. The new test is `test_mt5_server_changing_before_the_short_circuit_verdict_fails_closed_transient` in `analytics-service/tests/test_mt5_validate.py`. Its session moves to another broker server before the second read, and the answer must be the transient 424, never the operator 500 computed on another account's terminal. With the bracket replaced by `pass` in a byte copy, the test goes RED on `assert 500 != 500` (`MT5_GATEWAY_UNCONFIGURED`). It goes GREEN once the copy is restored and `cmp` is silent.
+
+### Notes
+- **SF-M1 is booked, not fixed:** `[225-MT5-SERVER-MISMATCH-TRANSIENT-COPY]` in `TODOS.md` (MEDIUM, user-facing). A session that reports another broker server is still answered "try again". That answer is Phase 225's own mitigation for threat T-225-60, "never a permanent blame". A permanent wrong-server answer would blame a user whose broker aliases server names, and that case is unmeasured. The entry names its owner, its trigger and two fix directions.
+- No product behaviour changes. No migration. No `TODOS.md` entry is closed.
+
 ## [0.133.100.4] - 2026-11-27 — records: Phase 236 FIGUREMATH closed, FIG-05 fleet re-derive passed
 
 ### Changed
