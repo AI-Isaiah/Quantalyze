@@ -1,7 +1,7 @@
 ---
 phase: 252-deribitoptions
 verified: 2026-11-25T20:50:00Z
-status: gaps_found
+status: human_needed
 score: 6/6 criteria verified for the scope of this run (wave 1 withhold + wave 2 measurement tooling); the PROD and founder-gated halves of SC-3, SC-4 and SC-5 are human_needed items, none is a gap
 verified_at_sha: ee599e6c35e68271c9508eeabec8af5ad9a5a568
 behavior_unverified: 0
@@ -36,7 +36,8 @@ drift_subjects:
 gaps:
   - id: G252-PROBE-M3
     truth: "Wave 2: the smoothed mark-to-market reconstruction computes for every Deribit member of the evidence composite, so the read-only probe reads verdict pass (founder decision 2026-11-26: fix inside 252, keep 252 open until the probe passes)."
-    status: failed
+    status: closed
+    closed: "2026-11-27 18:36Z PROD probe after gap plan 08 (v0.133.107.0, #1400, merge 5413ce580; deployed as 9f0fb9e6a): verdict pass, members 3, failed_members 0."
     reason: "PROD probe 2026-11-26 21:32Z: verdict fail, members 3, failed_members 1. m3 smoothed build-error:LedgerValuationError, detail LedgerValuationError:position, series_days 0. That detail is produced by three smoothed-only raises in services/deribit_txn.py (D-07 daily-mark hole in option_mtm_daily, D-09 exercise refusal in replay_option_positions, D-09 expiry nonzero position in _expiry_close). The probe's closed vocabulary cannot tell them apart, so the root cause is not yet measured. Leading hypothesis, unmeasured: a retention straddler, because m3's 1232-day history is the only one older than the 913-day mark-retention default."
     artifacts:
       - analytics-service/services/deribit_txn.py (option_mtm_daily, replay_option_positions, _expiry_close)
@@ -171,6 +172,22 @@ Run in the worker against the evidence composite, 12:43Z, `DONE rc=0`. Closed-vo
 ```
 
 **Root cause (measured):** m3's smoothed build refuses on a D-09 `exercise` row: zero change, post-event position 0, on an instrument with 18 trades and no delivery, assignment or expiry row. Deribit documents `position` as the updated position size after the transaction, so the row states that the option closed. The retention-straddler hypothesis is disproved. The probe names only the first refusal per member. **Open:** accepting this exact shape reverses D-09 (founder decision 2026-09-26), so it waits on a founder ruling. G252-PROBE-M3 stays `failed` and Phase 252 stays open.
+
+### Probe re-run 2026-11-27 18:36Z (after gap plan 08 shipped): PASS
+
+Founder decision 2026-11-27 (partial reversal of D-09) shipped as gap plan 08. Same authorized launch, `DONE rc=0`:
+
+```
+{"basis":"smoothed_mtm","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":2,"member":"m1","member_verdict":"pass","option_activity":"yes","refusal_shape":null,"series_days":704,"top_ordinals":[242,219,264,222,257]}
+{"basis":"cash_settlement","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":6,"member":"m1","member_verdict":"contrast","option_activity":"yes","refusal_shape":null,"series_days":704,"top_ordinals":[241,219,240,242,222]}
+{"basis":"smoothed_mtm","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":0,"member":"m2","member_verdict":"pass","option_activity":"yes","refusal_shape":null,"series_days":410,"top_ordinals":[39,15,14,53,48]}
+{"basis":"cash_settlement","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":0,"member":"m2","member_verdict":"contrast","option_activity":"yes","refusal_shape":null,"series_days":410,"top_ordinals":[39,48,50,53,33]}
+{"basis":"smoothed_mtm","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":3,"member":"m3","member_verdict":"pass","option_activity":"yes","refusal_shape":null,"series_days":1232,"top_ordinals":[977,979,980,993,987]}
+{"basis":"cash_settlement","bucketed_days":0,"build":"ok","build_error_detail":null,"c3":"pass","c4":"pass","days_over_guard":0,"days_over_half":3,"member":"m3","member_verdict":"contrast","option_activity":"yes","refusal_shape":null,"series_days":1232,"top_ordinals":[977,1167,979,146,980]}
+{"failed_members":0,"members":3,"verdict":"pass"}
+```
+
+G252-PROBE-M3 is closed: the smoothed mark-to-market build computes for every member of the evidence composite. Per the 2026-11-25 ruling, this pass is the input to the MTM promotion plan. The headline stays withheld until that plan ships. The other human items in the frontmatter (post-deploy PROD factsheet check, ship-time census) stay open.
 
 ### Gaps Summary
 
