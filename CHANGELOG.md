@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.100.3] - 2026-11-27 — records: Phase 225 plan 21 post-deploy poll cycle PASSED; Phase 225 verification moves to passed
+
+### Changed
+- **Phase 225 ONEACCOUNTONCE is verified `passed`.** The last open gate, plan 21 Task 3, read the 2026-11-27 daily MT5 poll cycle on PROD with the #1374 server bracket live: both analytics services run `45d7b4e5`, a descendant of the #1374 merge. Counts: 22 `mt5 poll server verdict` lines, 22 True, 0 False, 0 not_captured; 0 `mt5 server bracket refused` ERROR lines on both services; the 11 live active MT5 keys each have a True line (11 of 11). No revert of #1374 is indicated.
+- `225-21-SUMMARY.md` records the reading under `## Post-deploy poll cycle`; `225-VERIFICATION.md` moves `human_needed` to `passed` with `verified_at_sha` set and `drift_subjects` kept.
+
+### Notes
+- Records only, no code, no migration. SF-M1 and SF-M4 (validation path) remain handed back for routing; they are not success criteria of this phase.
+- No `TODOS.md` entry is closed by this change.
+
 ## [0.133.100.2] - 2026-11-26 — BASELINE: automated re-dump after the PROD apply of eedbc243
 
 ### Changed

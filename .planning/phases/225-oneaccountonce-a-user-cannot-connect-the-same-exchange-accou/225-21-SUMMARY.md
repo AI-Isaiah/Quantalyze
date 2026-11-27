@@ -132,7 +132,18 @@ None (no new endpoint, auth path, file access or schema surface).
 
 ## Post-deploy poll cycle
 
-**PENDING.** Task 3 (`checkpoint:human-action`, gate `blocking-human`) is run by the orchestrator after this plan's PR merges, CI is green on its head SHA and both the analytics and worker services report a `git_sha` at or after the merge SHA. To record here: the deploy SHA, the read windows, the per-site and per-synthetic-label counts of True, False, not_captured and server refusals, and PASS (verdict lines > 0, False = 0, not_captured = 0, refusals = 0, every live active MT5 key polled has a True line) or a founder-routed STOP. Zero verdict lines is a STOP, not a pass. A refusal recurring for the same holder on two consecutive cycles is a false refusal and the default remedy is to revert this PR.
+**PASS (read 2026-11-27, orchestrator).** Counts only; no logins, servers or holder ids are recorded here.
+
+- **Deployed.** Both Railway analytics services, `quantalyze-analytics` and `quantalyze-analytics-backfill`, run a deployment at `45d7b4e5` (main, 2026-11-26 21:07Z, status SUCCESS). `git merge-base --is-ancestor b1eb7842 45d7b4e5` holds, so #1374 is deployed on both. Deployments were read, never variables.
+- **Window.** The 2026-11-27 daily MT5 poll cycle, deploy logs from 2026-11-27T00:00Z, read per service (Railway `get-logs`, filtered on the verdict line and on the refusal line).
+- **Verdict lines, by `session_server_matches_requested`.** 22 in total: **True 22, False 0, not_captured 0.**
+  - `quantalyze-analytics-backfill`: 11 True, all at site `derive_broker_dailies`, 11 distinct holders.
+  - `quantalyze-analytics`: 11 True, all at site `allocator_holdings`, the same 11 distinct holders.
+  - No `sync_balance` verdict line appeared in the window.
+- **Refusals.** `mt5 server bracket refused` ERROR lines: **0** on both services, read over 2026-11-26T00:00Z to now (so the previous cycle is covered too, and there is no consecutive-refusal question).
+- **Live keys, PROD read-only.** Marker query first, it named PRODUCTION. Active `api_keys` with `exchange = 'mt5'`: **11**. All 11 appear among the holders with a True line (11 of 11 covered); the holder id in the verdict line is the key id.
+- **Verdict.** PASS: verdict lines above 0, 0 False, 0 not_captured, 0 refused, and a True line for every live MT5 key. Threat T-225-71 (a broker spelling its server differently from the key's stored value) did not fire on any live key. No revert of #1374 is indicated.
+- **Limits.** The logs read are the deployments' current retained window. Only the derive and holdings sites logged verdicts in this cycle; no balance-site line appeared, which is a statement about the cycle's contents, not a failure.
 
 ## Self-Check: PASSED
 
