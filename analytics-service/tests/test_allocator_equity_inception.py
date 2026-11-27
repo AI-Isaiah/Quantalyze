@@ -19,6 +19,23 @@ replay. The expected verdict is ``|s| / level_on_first_return_day <= 1/10_000``
 computed in exact arithmetic here, never read off the replay. Each fixture also
 asserts its own share lands on the intended side of the band with margin, so a
 fixture that drifted onto the line could not pass quietly.
+
+The module also pins Phase 254 (founder ruling 2026-11-26, "Exempt it, book for v1.23"): off
+full history the day before the first return day carries the opening deposit (it is not an
+out-of-window flow and is named by the count flag ``opening_deposit_exempted``); on full
+history D-13 is unchanged.
+
+NEUTER (PROOF-01; Phase 254, each recorded verbatim in the 254-01 SUMMARY, restored with cp from a byte backup and checked with cmp):
+  N1: `if not history_reaches_inception:` (the exemption's gate) -> `if False:`; RED: A1 (bybit opening deposit), A2 (not judged by the band), A3 (job end to end), B2, B3, D1
+  N2: `if fbd.get(opening_eve, 0.0) > 0.0:` -> `!= 0.0` (a withdrawal exempted); RED: B4 [withdrawal], B4 [net-withdrawal-day]
+  N3: `timedelta(days=1)` on `opening_eve` -> `days=2` (the wrong day); RED: B1
+  N4: `out_of_window_flows -= 1` -> `out_of_window_flows = 0` (clears the whole count); RED: B2, B3, E1, E2 [binance-True], [okx-True], [bybit-True]
+  N5: the exemption's `if not history_reaches_inception:` -> `if True:` (also on full history); RED: C1 [inside-band], [outside-band], E1, E2 [deribit-False], [mt5-False], [MT5-False]
+  N6: `if opening_deposit_exempted:` (the flags block) -> `if False:` (no flag); RED: A1, A2, B2, B3, D1
+  N7: `flags["opening_deposit_exempted"] = 1` -> `= True` (a bool leaks into the payload); RED: A3, E1
+  N8: `fbd.get(opening_eve, 0.0)` -> `_flows_by_day(flows).get(opening_eve, 0.0)` (event flows, not fbd); RED: D1
+  N9: `FULL_HISTORY_VENUES` assignment -> adds "bybit" (the ROADMAP's Not the fix); RED: test_reason_is_blocking_and_the_band_and_venues_are_the_founders
+  N10: `_INCEPTION_ZERO_START_BAND = 1e-4` -> `1e-3`; RED: test_reason_is_blocking_and_the_band_and_venues_are_the_founders, C1 [outside-band]
 """
 from __future__ import annotations
 
@@ -228,15 +245,22 @@ def test_post_window_flow_keeps_out_of_window_flow_even_with_a_clean_opening() -
     assert ke.flags["opening_flows_reconciled"] == 1
 
 
-# ── a venue without full history: behaviour unchanged ─────────────────────────
+# ── a venue without full history: the opening deposit (Phase 254) ─────────────
 
-def test_venue_without_full_history_is_unchanged() -> None:
-    """The default (``history_reaches_inception=False``) is the pre-D-13 rule to the
-    letter: the same clean opening deposit that passes above still counts as one
-    out-of-window flow, and no inception reason or flag exists."""
+def test_a_bybit_opening_deposit_the_day_before_the_first_return_is_not_out_of_window() -> None:
+    """Bybit-shaped: a Bybit key is not in ``FULL_HISTORY_VENUES``, so the job passes
+    ``history_reaches_inception=False``. A deposit dated exactly the day before its first
+    return day is its opening deposit (Phase 254, SC-1): not an out-of-window flow, named by
+    the count flag ``opening_deposit_exempted``, and the curve is unchanged.
+
+    Intent change, Phase 254, founder ruling 2026-11-26, "Exempt it, book for v1.23": this is
+    the rewrite of ``test_venue_without_full_history_is_unchanged``, which pinned the pre-254
+    positional rule (the same fixture read as one ``out_of_window_flow`` with flags
+    ``{"out_of_window_flows": 1}``). The fixture and the default-vs-explicit comparison are
+    kept; the verdict is the new one."""
     flows = {-1: 100_000.0}
     start = _start_for_share(0.5e-4, 100_000.0)
-    _, anchor = _exact_book(start, flows)
+    level_lo, anchor = _exact_book(start, flows)
 
     ke = replay_key_equity(_returns(), _flows(flows), anchor)  # default: not full history
     explicit = replay_key_equity(
@@ -244,10 +268,120 @@ def test_venue_without_full_history_is_unchanged() -> None:
     )
 
     for result in (ke, explicit):
-        assert result.degrade_reasons == frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
-        assert result.flags == {"out_of_window_flows": 1}
+        assert result.degrade_reasons == frozenset()
+        assert result.flags == {"opening_deposit_exempted": 1}
+        assert result.is_trustworthy is True
+        assert result.equity is not None
+        assert float(result.equity.loc[_iso(-1)]) == pytest.approx(
+            float(start + 100_000), rel=1e-9
+        )
+        assert float(result.equity.loc[_iso(0)]) == pytest.approx(float(level_lo), rel=1e-9)
+        assert float(result.equity.iloc[-1]) == pytest.approx(anchor, rel=1e-9)
     assert ke.equity is not None and explicit.equity is not None
     pd.testing.assert_series_equal(ke.equity, explicit.equity)
+
+
+def test_the_opening_deposit_off_full_history_is_not_judged_by_the_zero_start_band() -> None:
+    """Phase 254, [Zero-start check on other venues]: the exempted deposit gets no band
+    check. A start of 120_000 is far outside the D-14 band (55% of the first-day level), which
+    a full-history key would block as ``inception_unreconciled``; off full history it reads
+    clean, with neither the inception flag nor the reconciled flag."""
+    flows = {-1: 100_000.0}
+    start = Fraction(120_000)
+    level_lo, anchor = _exact_book(start, flows)
+    assert _share(start, level_lo) > BAND  # fixture guard
+
+    ke = replay_key_equity(_returns(), _flows(flows), anchor)
+
+    assert ke.degrade_reasons == frozenset()
+    assert ke.flags == {"opening_deposit_exempted": 1}
+
+
+def test_a_deposit_two_days_before_the_first_return_stays_out_of_window() -> None:
+    """SC-2 (Phase 254): the exemption is exactly the day before the first return day. A
+    deposit one day earlier is not the opening deposit and keeps today's behaviour."""
+    flows = {-2: 100_000.0}
+    _, anchor = _exact_book(Fraction(0), flows)
+
+    ke = replay_key_equity(_returns(), _flows(flows), anchor)
+
+    assert ke.degrade_reasons == frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+    assert ke.flags == {"out_of_window_flows": 1}
+
+
+def test_a_two_day_run_off_full_history_exempts_only_the_day_before() -> None:
+    """SC-2 (Phase 254) and the wiring shape: of a two-day run (days -2 and -1) off full
+    history, only day -1 is the opening deposit; day -2 stays exactly one out-of-window flow."""
+    flows = {-2: 60_000.0, -1: 40_000.0}
+    _, anchor = _exact_book(Fraction(0), flows)
+
+    ke = replay_key_equity(_returns(), _flows(flows), anchor)
+
+    assert ke.degrade_reasons == frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+    assert ke.flags == {"out_of_window_flows": 1, "opening_deposit_exempted": 1}
+
+
+def test_a_post_window_flow_stays_out_of_window_beside_an_exempted_opening_deposit() -> None:
+    """SC-2 (Phase 254): a flow after the last return day on an unlisted day is still
+    counted, next to an exempted opening deposit. The exemption removes one flow, not the
+    count."""
+    flows = {-1: 100_000.0}
+    start = _start_for_share(0.5e-4, 100_000.0)
+    _, anchor_before = _exact_book(start, flows)
+    anchor = anchor_before + 5_000.0  # r = 0 on the extra day, as _post_window_book does
+
+    ke = replay_key_equity(_returns(), _flows({**flows, _N_WINDOW: 5_000.0}), anchor)
+
+    assert ke.degrade_reasons == frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+    assert ke.flags == {"out_of_window_flows": 1, "opening_deposit_exempted": 1}
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        [ExternalFlow(_iso(-1), -20_000.0)],
+        [ExternalFlow(_iso(-1), 30_000.0), ExternalFlow(_iso(-1), -50_000.0)],
+    ],
+    ids=["withdrawal", "net-withdrawal-day"],
+)
+def test_a_withdrawal_the_day_before_the_first_return_stays_out_of_window(
+    spec: list[ExternalFlow],
+) -> None:
+    """SC-2 and Phase 254 [Scope of "flow"]: only a deposit is exempted. A withdrawal, or a
+    day whose NET flow is negative (``_flows_by_day`` sums a day: +30_000 and -50_000 is
+    -20_000), cannot be an opening deposit and keeps ``out_of_window_flow``."""
+    _, anchor = _exact_book(Fraction(150_000), {-1: -20_000.0})
+
+    ke = replay_key_equity(_returns(), spec, anchor)
+
+    assert ke.degrade_reasons == frozenset({DegradeReason.OUT_OF_WINDOW_FLOW})
+    assert ke.flags == {"out_of_window_flows": 1}
+
+
+def test_the_opening_deposit_exemption_reads_the_writer_flows_on_the_writer_basis() -> None:
+    """Phase 254 [Writer basis]: the exemption reads ``fbd``, so in writer-basis mode the
+    writer's composed flow day decides, not the event flow day. The event flow sits on day -2
+    (not the day before the first return day) and the writer's on day -1."""
+    days = [_iso(i) for i in range(3)]
+    returns = pd.Series([0.01, 0.0, 0.0], index=days, name="k")
+    event_flows = [ExternalFlow(_iso(-2), 100.0)]
+
+    ke = replay_key_equity(
+        returns,
+        event_flows,
+        101.0,
+        realized_terminal=(days[2], 101.0),
+        writer_day_pnl={_iso(-1): 0.0, days[0]: 1.0, days[1]: 0.0, days[2]: 0.0},
+        writer_flows=[ExternalFlow(_iso(-1), 100.0)],
+    )
+
+    assert ke.flags == {"writer_basis": True, "opening_deposit_exempted": 1}
+    assert ke.degrade_reasons == frozenset()
+
+    # Control: the same returns and event flows on the legacy roll. The event flow is on day -2,
+    # so there is nothing on the day before the first return day to exempt.
+    legacy = replay_key_equity(returns, event_flows, 101.0)
+    assert legacy.flags == {"out_of_window_flows": 1}
 
 
 def test_no_opening_flow_on_a_full_history_venue_is_untouched() -> None:
@@ -276,10 +410,43 @@ def test_reason_is_blocking_and_the_band_and_venues_are_the_founders() -> None:
     assert FULL_HISTORY_VENUES == frozenset({"deribit", "mt5"})
 
 
+@pytest.mark.parametrize(
+    ("share", "inside"), [(0.5e-4, True), (1.4e-4, False)], ids=["inside-band", "outside-band"]
+)
+def test_a_full_history_opening_deposit_is_still_judged_by_the_zero_start_band(
+    share: float, inside: bool
+) -> None:
+    """SC-3 and Phase 254 [Which keys]: on a full-history key the day -1 deposit ends the D-13
+    opening run and is judged by the zero-start band exactly as before, and never carries
+    ``opening_deposit_exempted`` (the exemption would skip the check)."""
+    flows = {-1: 100_000.0}
+    start = _start_for_share(share, 100_000.0)
+    level_lo, anchor = _exact_book(start, flows)
+    assert (_share(start, level_lo) < BAND) is inside  # fixture guard: the intended side
+
+    ke = replay_key_equity(_returns(), _flows(flows), anchor, history_reaches_inception=True)
+
+    if inside:
+        assert ke.flags == {"opening_flows_reconciled": 1}
+        assert ke.degrade_reasons == frozenset()
+    else:
+        assert ke.flags == {"inception_unreconciled_flows": 1}
+        assert ke.degrade_reasons == frozenset({DegradeReason.INCEPTION_UNRECONCILED})
+    assert "opening_deposit_exempted" not in ke.flags
+
+
 # ── compose wiring: the caller's venue knowledge reaches the replay ───────────
 
 def _compose(full_history_keys: set[str] | None) -> dict:
-    flows = {-1: 100_000.0}
+    """The wiring fixture is a two-day opening run (days -2 and -1).
+
+    Phase 254, founder ruling 2026-11-26, "Exempt it, book for v1.23": it was a single day -1
+    deposit, which pinned the pre-254 positional rule on a key outside ``full_history_keys``.
+    With a single day -1 deposit a full-history key and any other key would now both read
+    clean, so the wiring test could no longer tell them apart. With days -2 and -1 the
+    full-history key reconciles both days and any other key keeps exactly one
+    ``out_of_window_flow`` (day -2)."""
+    flows = {-2: 60_000.0, -1: 40_000.0}
     start = _start_for_share(0.5e-4, 100_000.0)
     _, anchor = _exact_book(start, flows)
     return compose_allocator_equity(
@@ -301,14 +468,20 @@ def test_compose_passes_full_history_keys_to_the_replay() -> None:
 
     not_this_key = _compose({"some-other-key"})
     assert "out_of_window_flow" in not_this_key["degrade_reasons"]
+    # The day -1 opening deposit of a key outside ``full_history_keys`` is exempted (Phase 254),
+    # and the exemption's count flag never reaches the payload's flag tokens.
+    assert "opening_deposit_exempted" not in other["flags"]
 
 
 # ── job wiring: the key's exchange decides, read from api_keys ────────────────
 
-def _job_inputs(exchange: str) -> dict[str, list[dict]]:
+def _job_inputs(
+    exchange: str, flows: dict[int, float] | None = None
+) -> dict[str, list[dict]]:
+    """``flows=None`` is the single day -1 deposit; otherwise {offset from LO: amount}."""
     from tests.test_derive_allocator_equity_job import DERIVED_TABLE
 
-    flows = {-1: 100_000.0}
+    flows = {-1: 100_000.0} if flows is None else flows
     start = _start_for_share(0.5e-4, 100_000.0)
     _, anchor = _exact_book(start, flows)
     alloc = "alloc-open"
@@ -329,7 +502,10 @@ def _job_inputs(exchange: str) -> dict[str, list[dict]]:
                 "allocator_id": alloc,
                 "kind": "key_inputs:key-A",
                 "payload": {
-                    "flows": [{"utc_day_iso": _iso(-1), "usd_signed": 100_000.0}],
+                    "flows": [
+                        {"utc_day_iso": _iso(off), "usd_signed": amount}
+                        for off, amount in sorted(flows.items())
+                    ],
                     "anchor_usd": anchor,
                     "anchor_asof": _iso(_N_WINDOW - 1),
                     "venue": exchange,
@@ -342,9 +518,21 @@ def _job_inputs(exchange: str) -> dict[str, list[dict]]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("exchange", "blocked_by_position"),
-    [("deribit", False), ("mt5", False), ("MT5", False), ("binance", True), ("okx", True)],
+    [
+        ("deribit", False), ("mt5", False), ("MT5", False),
+        ("binance", True), ("okx", True), ("bybit", True),
+    ],
+    ids=[
+        "deribit-False", "mt5-False", "MT5-False", "binance-True", "okx-True", "bybit-True",
+    ],
 )
 async def test_job_reads_the_venue_from_api_keys(exchange: str, blocked_by_position: bool) -> None:
+    """Phase 254, founder ruling 2026-11-26, "Exempt it, book for v1.23": the job input is the
+    two-day opening run (days -2 and -1) instead of a single day -1 deposit, which pinned the
+    pre-254 positional rule on every venue outside ``FULL_HISTORY_VENUES``. A single day -1
+    deposit would now read clean on every venue and the venue could no longer be told apart; with
+    two days a full-history venue reconciles both and any other keeps one ``out_of_window_flow``
+    (day -2). ``bybit`` joins the list: a venue outside the set is blocked by the day -2 flow."""
     from unittest.mock import patch
 
     from services.job_worker import run_derive_allocator_equity_job
@@ -355,7 +543,7 @@ async def test_job_reads_the_venue_from_api_keys(exchange: str, blocked_by_posit
         _is_equity_curve_upsert,
     )
 
-    fake = _FakeSupabase(_job_inputs(exchange))
+    fake = _FakeSupabase(_job_inputs(exchange, flows={-2: 60_000.0, -1: 40_000.0}))
     job = {"id": "j-open", "kind": "derive_allocator_equity", "allocator_id": "alloc-open"}
     with patch("services.job_worker.get_supabase", return_value=fake):
         result = await run_derive_allocator_equity_job(job)
@@ -366,6 +554,21 @@ async def test_job_reads_the_venue_from_api_keys(exchange: str, blocked_by_posit
     payload = _extract_payload(upserts[0][1])
     assert ("out_of_window_flow" in payload["degrade_reasons"]) is blocked_by_position
     assert payload["is_trustworthy"] is (not blocked_by_position)
+
+
+@pytest.mark.asyncio
+async def test_job_exempts_a_bybit_opening_deposit_end_to_end() -> None:
+    """Phase 254 SC-1 through the derive job: a ``bybit`` key whose only flow is its day -1
+    deposit yields a payload with no ``out_of_window_flow`` and ``is_trustworthy`` True, and
+    the count flag stays out of the payload's ``flags`` tokens (it is the int 1)."""
+    result, fake, payloads = await _run_job(_job_inputs("bybit"))
+
+    assert result.outcome.name == "DONE"
+    assert len(payloads) == 1, fake.upserts
+    payload = payloads[0]
+    assert "out_of_window_flow" not in payload["degrade_reasons"]
+    assert payload["is_trustworthy"] is True
+    assert "opening_deposit_exempted" not in payload["flags"]
 
 
 def _job_inputs_post_window_flow(stated: bool, exchange: str = "deribit") -> dict[str, list[dict]]:
