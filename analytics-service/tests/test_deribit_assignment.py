@@ -1269,3 +1269,82 @@ def test_d09_a_row_of_an_unlisted_type_on_the_instrument_is_counted_as_other() -
             [_long_opening(), settlement, _otm_expiry(position=-1.0)]
         )
     assert caught.value.siblings == {**_NO_SIBLINGS, "trade": 1, "expiry": 1, "other": 1}
+
+
+# ---------------------------------------------------------------------------
+# Phase 252 plan 08 (gap G252-PROBE-M3), Founder decision 2026-11-27 (partial reversal of
+# D-09): an option `exercise` row is accepted ONLY in the shape the 2026-11-27 PROD probe
+# measured for member m3, `change` zero and `position` present and zero, and it closes the
+# instrument's position to 0 on its UTC day the way an `expiry` row does. Every other
+# exercise shape keeps refusing by name. The cases below that close a position are RED at
+# the plan-07 head with `OptionExerciseRowError`.
+# ---------------------------------------------------------------------------
+
+
+def _measured_exercise(**overrides: Any) -> dict[str, Any]:
+    """The measured m3 exercise shape on the OTM put: zero change, a present position of zero."""
+    return _otm_expiry(type="exercise", position=0.0, **overrides)
+
+
+def _measured_shape_ledger() -> list[dict[str, Any]]:
+    """A long put bought 01-15, exercised 01-17 in the measured shape, then unrelated later
+    activity on another put (the shape that raised the mark hole while the long stayed open)."""
+    opening = _opt_row(
+        instrument=OTM_PUT, day="2026-01-15", change=-0.04, position=1.0, id=1
+    )
+    later_open = _opt_row(
+        instrument=LATER_PUT, day="2026-01-20", change=0.01, position=-1.0, id=3
+    )
+    later_close = _opt_row(
+        instrument=LATER_PUT, day="2026-01-21", change=-0.01, position=0.0, id=4
+    )
+    return [opening, _measured_exercise(), later_open, later_close]
+
+
+def test_d09_measured_shape_exercise_closes_in_the_replay() -> None:
+    """Founder decision 2026-11-27 (pure): the measured-shape exercise row closes the long to 0
+    on its UTC day, exactly as an accepted expiry row does. Red means a PROD composite member
+    whose option was exercised in the money refuses its whole smoothed series (or, if the row
+    were merely skipped, leaves the long open and raises a mark hole on later activity)."""
+    book = replay_option_positions(_measured_shape_ledger())
+    assert book[OTM_PUT]["positions"] == {"2026-01-15": 1.0, "2026-01-17": 0.0}
+    assert book[OTM_PUT]["last_day"] == "2026-01-17"
+    assert book[OTM_PUT]["currency"] == "BTC"
+    expiry_book = replay_option_positions(
+        [_measured_shape_ledger()[0], _otm_expiry()]
+    )
+    assert expiry_book[OTM_PUT]["positions"] == book[OTM_PUT]["positions"]
+
+
+def test_d09_smoothed_e2e_measured_shape_exercise_then_later_activity_ingests(
+    monkeypatch: Any,
+) -> None:
+    """Founder decision 2026-11-27 (real smoothed harness): the long put is exercised on 01-17,
+    no mark exists for it after that day, and another put is traded on 01-20. The ledger builds
+    with no `OptionMarkHoleError`, which proves the book closed on 01-17. Red means the
+    exercised option would stay open past its life and the smoothed basis would be lost.
+
+    Book: +1 x 0.03 (01-15), +1 x 0.05 (01-16), 0 (01-17 exercise) => dMTM +0.03, +0.02,
+    -0.05; the later put -1 x 0.02 (01-20), 0 (01-21) => -0.02, +0.02. Cash: -0.04 (01-15),
+    +0.01 (01-20), -0.01 (01-21). Merged: -0.01 (01-15), +0.02 (01-16), -0.05 (01-17),
+    -0.01 (01-20), +0.01 (01-21). The sum is the cash total -0.04 (a closed terminal book)."""
+    ledger, _report, _stub = _run_options_ledger(
+        monkeypatch,
+        btc_rows=_measured_shape_ledger(),
+        summaries=[{"currency": "BTC", "equity": -0.04, "session_upl": 0.0,
+                    "options_value": 0.0}],
+        charts={
+            OTM_PUT: {"2026-01-15": 0.03, "2026-01-16": 0.05, "2026-01-17": 0.0},
+            LATER_PUT: {"2026-01-20": 0.02, "2026-01-21": 0.02},
+        },
+        pnl_basis="smoothed_mtm",
+    )
+    got = _series_to_daymap(ledger.native_pnl["BTC"])
+    expected = {
+        "2026-01-15": -0.01, "2026-01-16": 0.02, "2026-01-17": -0.05,
+        "2026-01-20": -0.01, "2026-01-21": 0.01,
+    }
+    assert {d: v for d, v in got.items() if v != 0.0} == pytest.approx(
+        expected, abs=1e-9
+    )
+    assert sum(got.values()) == pytest.approx(-0.04, abs=1e-9)
