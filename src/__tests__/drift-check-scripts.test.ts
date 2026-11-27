@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=41 and ARMS_FLOOR=620 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=42 and ARMS_FLOOR=627 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5144,9 +5144,12 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, migration 20261127130000), 41/610 -> 41/620. No file joined; four sentinels grew, each read off its own first
     // `ALL N ARMS EXECUTED` notice: test_cron_sync_tick.sql 8 -> 11, test_prod_prober_cadence.sql 7 -> 9, test_ops_staleness_check.sql 14 -> 16 and
     // test_analytics_service_settings_and_vault_tick.sql 13 -> 16. 610 + 10 = 620 is the table's own sum, which the anti-skip contract test re-derives from the corpus.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09, migration 20261127220000), 41/620 -> 42/627. ONE file JOINED (an ordinary sql-tests gate on a database private to
+    // its runner): test_strategy_analytics_anon_grants.sql (`ALL 7 ARMS EXECUTED`, arms GRANT 1, GRANT 2, GRANT 3, GRANT 4, WRITE 1, WRITE 2, KEEP 1), read off its own first
+    // sentinel. 620 + 7 = 627 is the table's own sum, which the anti-skip contract test re-derives from the corpus.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=41", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=42", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -5157,7 +5160,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=620", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=627", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

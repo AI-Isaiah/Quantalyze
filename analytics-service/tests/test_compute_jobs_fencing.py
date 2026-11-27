@@ -3159,13 +3159,14 @@ def test_advance_sync_cursor_monotonic_guard_no_regress(admin):
     so the UPDATE actually lands and the persisted columns are observable.
     """
     user_id = _seed_user_id(admin)
-    key = admin.table("api_keys").insert({
-        "user_id": user_id,
-        "exchange": "okx",
-        "label": f"advance-monotonic-{uuid.uuid4().hex[:8]}",
-        "api_key_encrypted": "test-placeholder",
-    }).execute().data[0]
-    key_id = key["id"]
+    # DBACC-02: service_role writes api_keys only through the audited writer RPC.
+    key_id = admin.rpc("insert_api_key", {
+        "p_user_id": user_id,
+        "p_exchange": "okx",
+        "p_label": f"advance-monotonic-{uuid.uuid4().hex[:8]}",
+        "p_api_key_encrypted": "test-placeholder",
+    }).execute().data
+    assert isinstance(key_id, str) and key_id, f"insert_api_key returned {key_id!r}"
 
     high = "2026-06-02T12:00:00+00:00"
     low = "2026-06-01T00:00:00+00:00"

@@ -1568,23 +1568,45 @@ async function main() {
 
   // ========= 4. api_keys =========
   console.log("[seed] Inserting api_keys for real-portfolio strategies...");
+  // DBACC-02: a fixed-id key is created through the audited writer RPC (p_id), never
+  // a PostgREST upsert: the PR-C insert fence fires on INSERT ... ON CONFLICT too.
+  // Absent -> RPC; present -> only the mutable columns are refreshed.
   for (const keyId of API_KEY_IDS) {
-    const { error } = await admin.from("api_keys").upsert({
-      id: keyId,
-      user_id: ALLOCATOR_ID,
-      exchange: keyId === API_KEY_IDS[0] ? "binance" : "okx",
-      label:
-        keyId === API_KEY_IDS[0]
-          ? "Atlas Binance Read-Only"
-          : "Atlas OKX Read-Only",
-      api_key_encrypted: "DEMO_SEED_PLACEHOLDER_ENCRYPTED",
-      api_secret_encrypted: "DEMO_SEED_PLACEHOLDER_ENCRYPTED",
-      is_active: true,
-      kek_version: 1,
-      sync_status: "idle",
-      last_sync_at: new Date().toISOString(),
-      account_balance_usdt: 5_000_000,
-    });
+    const { data: existing, error: readErr } = await admin
+      .from("api_keys")
+      .select("user_id")
+      .eq("id", keyId)
+      .maybeSingle();
+    if (readErr) throw new Error(`api_keys ${keyId}: ${readErr.message}`);
+    if (existing && existing.user_id !== ALLOCATOR_ID) {
+      throw new Error(
+        `api_keys ${keyId}: exists under another owner; refusing to repoint it`,
+      );
+    }
+    if (!existing) {
+      const { error: insErr } = await admin.rpc("insert_api_key", {
+        p_id: keyId,
+        p_user_id: ALLOCATOR_ID,
+        p_exchange: keyId === API_KEY_IDS[0] ? "binance" : "okx",
+        p_label:
+          keyId === API_KEY_IDS[0]
+            ? "Atlas Binance Read-Only"
+            : "Atlas OKX Read-Only",
+        p_api_key_encrypted: "DEMO_SEED_PLACEHOLDER_ENCRYPTED",
+        p_api_secret_encrypted: "DEMO_SEED_PLACEHOLDER_ENCRYPTED",
+        p_kek_version: 1,
+      });
+      if (insErr) throw new Error(`api_keys ${keyId}: ${insErr.message}`);
+    }
+    const { error } = await admin
+      .from("api_keys")
+      .update({
+        is_active: true,
+        sync_status: "idle",
+        last_sync_at: new Date().toISOString(),
+        account_balance_usdt: 5_000_000,
+      })
+      .eq("id", keyId);
     if (error) throw new Error(`api_keys ${keyId}: ${error.message}`);
   }
 

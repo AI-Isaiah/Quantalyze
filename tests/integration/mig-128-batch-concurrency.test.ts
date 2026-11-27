@@ -147,24 +147,20 @@ describe.skipIf(!HAS_TEST_SUPABASE)(
           { onConflict: "id" },
         );
 
-      const apiKeyRes = await admin
-        .from("api_keys")
-        .insert({
-          user_id: userId,
-          exchange: opts.venue ?? "binance",
-          label: `mig128-${labelSuffix}`,
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        })
-        .select("id")
-        .single();
-      if (apiKeyRes.error || !apiKeyRes.data) {
+      // DBACC-02: service_role writes api_keys only through the audited writer RPC.
+      const apiKeyRes = await admin.rpc("insert_api_key", {
+        p_user_id: userId,
+        p_exchange: opts.venue ?? "binance",
+        p_label: `mig128-${labelSuffix}`,
+        p_api_key_encrypted: "test-only:not-a-real-secret",
+        p_kek_version: 1,
+      });
+      if (apiKeyRes.error || typeof apiKeyRes.data !== "string" || !apiKeyRes.data) {
         throw new Error(
           `Seed: api_keys insert failed: ${apiKeyRes.error?.message ?? "no row"}`,
         );
       }
-      const apiKeyId = apiKeyRes.data.id as string;
+      const apiKeyId = apiKeyRes.data;
       seedApiKeyIds.push(apiKeyId);
 
       const today = new Date().toISOString().slice(0, 10);

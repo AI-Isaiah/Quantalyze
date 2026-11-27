@@ -53,6 +53,7 @@ import {
   seedStrategyWithHistory,
   seedBridgeCandidate,
   cleanupStrategiesByNamePrefix,
+  insertApiKeyViaRpc,
 } from "./helpers/seed-test-project";
 // VERIFY-02 hermetic teardown — the crypto-sma discovery seed below is the ONE
 // cross-spec-dangerous row (discovery-hide-examples-default.spec.ts asserts the
@@ -358,16 +359,16 @@ test.describe("axe app-wide (A11Y-01) — /strategies merged list per role", () 
         if (r.seesPlaceholders) {
           // An active key that feeds no strategy is a placeholder row. Same
           // placeholder-ciphertext idiom as seedWizardDraft; no real credential.
-          const { error } = await getCleanupAdmin().from("api_keys").insert({
-            user_id: owner.userId,
+          await insertApiKeyViaRpc(getCleanupAdmin(), {
+            userId: owner.userId,
             exchange: "binance",
             label: keyLabel,
-            api_key_encrypted: "e2e-placeholder-ciphertext",
-            is_active: true,
+            apiKeyEncrypted: "e2e-placeholder-ciphertext",
+          }).catch((e: unknown) => {
+            throw new Error(
+              `axe /strategies (${r.role}) bare key seed failed: ${e instanceof Error ? e.message : String(e)}`,
+            );
           });
-          if (error) {
-            throw new Error(`axe /strategies (${r.role}) bare key seed failed: ${error.message}`);
-          }
         }
         await loginViaForm(page, owner.email, owner.password);
 

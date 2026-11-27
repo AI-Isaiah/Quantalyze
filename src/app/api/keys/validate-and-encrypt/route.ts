@@ -735,9 +735,16 @@ async function legacyValidateAndEncryptHandler(args: {
     // never reads one, and this function only ever sees the session value.
     // (threat T-160-05)
     //
-    // The skip rationale (the PRAGMA ITSELF is immediately above the `.insert()`
-    // chain below, NOT here — see the ⚠️ at the end of this block):
-    // this INSERT replaces the browser-side INSERT
+    // Phase 243 DBBACKSTOP (DBACC-02, founder decision 2026-11-26): the write now
+    // goes through the audited writer `insert_api_key` (a service_role-only
+    // SECURITY DEFINER function), not a direct `.from("api_keys").insert(...)`.
+    // PR-C fences every other insert, and `attested_venue` is stamped inside the
+    // database from `p_exchange`, so this route sends no attestation. The `.insert()`
+    // wording below is lineage for the chain this call replaced.
+    //
+    // The skip rationale (the PRAGMA ITSELF is immediately above the `.rpc()`
+    // call below, NOT here — see the ⚠️ at the end of this block):
+    // this write replaces the browser-side INSERT
     // ApiKeyManager performed unaudited until 160-02, so moving the writer
     // server-side neither adds nor removes a forensic obligation. The
     // api_key.* connect taxonomy is the ADR-0023 follow-up tracked with the
@@ -748,7 +755,7 @@ async function legacyValidateAndEncryptHandler(args: {
     // ⚠️ `audit-coverage.test.ts` looks back only 8 lines from the mutation
     // chain start (the P694 tightening), so the pragma cannot live up here with
     // its rationale — `encryptedColumns` sits between them. Keep the pragma
-    // adjacent to `.insert()` or the coverage gate goes red.
+    // adjacent to the `.rpc("insert_api_key"` call or the coverage gate goes red.
     //
     // ⛔ NO SPREAD OF THE UPSTREAM RESPONSE (160 review WR-01, completed by 160
     // review F3). Ordering `...encrypted` first hardened only the four columns
@@ -788,9 +795,10 @@ async function legacyValidateAndEncryptHandler(args: {
     // upstream extra still cannot reach a column). It is also the discipline
     // the dormant handler's reviver note above already prescribes.
     //
-    // The provenance columns are still assigned explicitly and still win — the
-    // spread below is safe precisely because `encryptedColumns` is a local this
-    // route constructed, not an upstream response object.
+    // The provenance arguments (owner, exchange, label, venue identity) are
+    // passed explicitly to the writer, and each encrypted column is read off
+    // `encryptedColumns` by name: it is a local this route constructed, not an
+    // upstream response object.
     // 164.5.3-02 — `venue_account_id` (Phase 154 / WIZCONT-02) was populated
     // ONLY by the wizard's `create_wizard_strategy` RPC before this plan, so
     // every MT5 key connected through THIS route's "Add Key" persist arm
@@ -932,26 +940,36 @@ async function legacyValidateAndEncryptHandler(args: {
     };
 
     // @audit-skip: key connect — rationale in the block above `encryptedColumns`.
-    const { data: inserted, error: insertError } = await admin
-      .from("api_keys")
-      .insert({
-        ...encryptedColumns,
-        user_id: userId,
-        exchange: exchangeNormalized,
-        attested_venue: exchangeNormalized,
-        label: labelOrDefault,
-        // 164.5.3-02 / 167.1.2 — see the `venueAccountId` derivation above.
-        // Phase 225: a key admitted over a failing holder carries NO identity
-        // here (the holder still has it, and the index allows one); the swap
-        // below stamps login and server in the same transaction that demotes
-        // the holder.
-        venue_account_id: failingHolderId === null ? venueAccountId : null,
-        venue_server: failingHolderId === null ? venueServer : null,
-      })
-      .select("id")
-      .single();
+    // (This comment line must stay between the pragma and the call: the audit gate
+    // anchors its 8-line pragma window on the last comment line above the statement.)
+    const { data: insertedKeyId, error: insertError } = await admin.rpc("insert_api_key", {
+      p_user_id: userId,
+      p_exchange: exchangeNormalized,
+      p_label: labelOrDefault,
+      // One argument per `encryptedColumns` member, written out so a new encrypted
+      // column fails type-checking here. `attested_venue` is NOT sent: the writer
+      // stamps it from `p_exchange` inside the database (DBACC-02).
+      p_api_key_encrypted: encryptedColumns.api_key_encrypted,
+      p_api_secret_encrypted: encryptedColumns.api_secret_encrypted,
+      p_passphrase_encrypted: encryptedColumns.passphrase_encrypted,
+      p_dek_encrypted: encryptedColumns.dek_encrypted,
+      p_nonce: encryptedColumns.nonce,
+      p_kek_version: encryptedColumns.kek_version,
+      // 164.5.3-02 / 167.1.2 — see the `venueAccountId` derivation above.
+      // Phase 225: a key admitted over a failing holder carries NO identity
+      // here (the holder still has it, and the index allows one); the swap
+      // below stamps login and server in the same transaction that demotes
+      // the holder. Omitted rather than sent as null (create-with-key's rule:
+      // the function's DEFAULT NULL is the one source of "no identity").
+      ...(failingHolderId === null && venueAccountId !== null
+        ? { p_venue_account_id: venueAccountId }
+        : {}),
+      ...(failingHolderId === null && venueServer !== null
+        ? { p_venue_server: venueServer }
+        : {}),
+    });
 
-    if (insertError || typeof inserted?.id !== "string") {
+    if (insertError || typeof insertedKeyId !== "string") {
       // 164.5.3-02 / Pitfall 1 — the venue-identity unique index
       // (`api_keys_user_exchange_venue_account_uniq`, migration
       // 20260812083206) becomes reachable on THIS path for the first time now
@@ -1032,7 +1050,7 @@ async function legacyValidateAndEncryptHandler(args: {
       const swap = await swapAccountSlot(admin, {
         userId,
         exchange: exchangeNormalized,
-        newKeyId: inserted.id,
+        newKeyId: insertedKeyId,
         oldHolderId: failingHolderId,
         venueAccountId,
         venueServer,
@@ -1060,7 +1078,7 @@ async function legacyValidateAndEncryptHandler(args: {
         const { data: removedKeys, error: keyDeleteErr } = await admin
           .from("api_keys")
           .delete()
-          .eq("id", inserted.id)
+          .eq("id", insertedKeyId)
           .eq("user_id", userId)
           .is("venue_account_id", null)
           .select("id");
@@ -1102,7 +1120,7 @@ async function legacyValidateAndEncryptHandler(args: {
           const { data: stampedKey, error: stampReadErr } = await admin
             .from("api_keys")
             .select("venue_account_id")
-            .eq("id", inserted.id)
+            .eq("id", insertedKeyId)
             .eq("user_id", userId)
             .maybeSingle();
           if (stampReadErr) {
@@ -1121,7 +1139,7 @@ async function legacyValidateAndEncryptHandler(args: {
             await afterSlotSwap(admin, {
               userId,
               exchange: exchangeNormalized,
-              newKeyId: inserted.id,
+              newKeyId: insertedKeyId,
               oldHolderId: failingHolderId,
             });
           }
@@ -1156,7 +1174,7 @@ async function legacyValidateAndEncryptHandler(args: {
     // browser on this path entirely (threat T-160-08). NO_STORE_HEADERS is
     // kept regardless: `api_key_id` is per-tenant.
     return NextResponse.json(
-      { api_key_id: inserted.id, valid: true, read_only: true },
+      { api_key_id: insertedKeyId, valid: true, read_only: true },
       { headers: NO_STORE_HEADERS },
     );
   } catch (err) {

@@ -36,6 +36,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   seedTestAllocator,
   seedBridgeCandidate,
+  insertApiKeyViaRpc,
   type SeededAllocator,
   type SeededStrategy,
 } from "./helpers/seed-test-project";
@@ -132,8 +133,8 @@ test.describe(
       //    + match-decisions routes need a fully-seeded holdings universe
       //    (also out of scope for this spec). Instead we exercise the
       //    actual marker primitives end-to-end:
-      //      - INSERT api_keys → fires migration 084's
-      //        stamp_first_api_key_added trigger (real production code path)
+      //      - insert_api_key RPC → its INSERT fires migration 084's
+      //        stamp_first_api_key_added trigger (the production writer, DBACC-02)
       //      - rpc('stamp_first_sync_success') → real production code path
       //      - signup_emitted_at + first_bridge_surfaced_at + first_outcome_at
       //        are stamped via auth.admin.updateUserById (the production
@@ -147,17 +148,17 @@ test.describe(
       );
 
       // 5a. Insert a placeholder api_keys row to fire the migration 084
-      //     trigger that stamps first_api_key_added_at. This is the REAL
-      //     production code path — same trigger fires on every wizard
-      //     INSERT in production.
-      const { error: keyErr } = await admin.from("api_keys").insert({
-        user_id: allocator.userId,
+      //     trigger that stamps first_api_key_added_at. It goes through the
+      //     insert_api_key RPC, which is the production writer (the route and
+      //     every seed use it; the PR-C fence refuses any other insert), and
+      //     the same trigger fires on its INSERT. A failure throws.
+      await insertApiKeyViaRpc(admin, {
+        userId: allocator.userId,
         exchange: "binance",
         label: "E2E test key",
-        api_key_encrypted: "test-encrypted-key-stub",
-        api_secret_encrypted: "test-encrypted-secret-stub",
+        apiKeyEncrypted: "test-encrypted-key-stub",
+        apiSecretEncrypted: "test-encrypted-secret-stub",
       });
-      expect(keyErr).toBeNull();
 
       // 5b. Stamp first-sync via the production RPC (also migration 084).
       const { error: syncErr } = await admin.rpc(

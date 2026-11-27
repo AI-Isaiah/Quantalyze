@@ -53,6 +53,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
   createLiveAdminClient,
+  createTestApiKey,
   advertiseLiveDbSkipReason,
   LIVE_DB_URL,
 } from "@/lib/test-helpers/live-db";
@@ -161,20 +162,18 @@ describe("migration 083 — commit_scenario_batch race-safe M7 (live-DB)", () =>
         { onConflict: "strategy_id" },
       );
 
-    await admin.from("api_keys").upsert(
-      [
-        {
-          id: apiKeyAId,
-          user_id: allocatorAId,
-          exchange: "binance",
-          label: "Phase10 race-fix test (synthetic)",
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        },
-      ],
-      { onConflict: "id" },
-    );
+    // Phase 243 DBACC-02: seeded through the audited writer, keeping the fixed ids.
+    // ifAbsent keeps re-run idempotence without an upsert: the PR-C fence fires on
+    // INSERT ... ON CONFLICT before conflict resolution. is_active is the table default.
+    await createTestApiKey(admin, {
+      id: apiKeyAId,
+      userId: allocatorAId,
+      exchange: "binance",
+      label: "Phase10 race-fix test (synthetic)",
+      apiKeyEncrypted: "test-only:not-a-real-secret",
+      kekVersion: 1,
+      ifAbsent: true,
+    });
 
     const today = new Date().toISOString().slice(0, 10);
     const seedHoldings = await admin.from("allocator_holdings").upsert(

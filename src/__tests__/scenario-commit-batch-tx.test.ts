@@ -42,6 +42,7 @@ import {
   HAS_INTROSPECTION,
   createLiveAdminClient,
   runIntrospectionSql,
+  createTestApiKey,
   advertiseLiveDbSkipReason,
   LIVE_DB_URL,
 } from "@/lib/test-helpers/live-db";
@@ -186,29 +187,27 @@ describe("migration 082 — commit_scenario_batch SECURITY DEFINER RPC (live-DB)
     // performed in this test path.
     const apiKeyAId = "00000000-0000-0000-0000-000000001095";
     const apiKeyBId = "00000000-0000-0000-0000-000000001096";
-    await admin.from("api_keys").upsert(
-      [
-        {
-          id: apiKeyAId,
-          user_id: allocatorAId,
-          exchange: "binance",
-          label: "Phase10 RPC test (synthetic)",
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        },
-        {
-          id: apiKeyBId,
-          user_id: allocatorBId,
-          exchange: "okx",
-          label: "Phase10 RPC test B (synthetic)",
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        },
-      ],
-      { onConflict: "id" },
-    );
+    // Phase 243 DBACC-02: seeded through the audited writer, keeping the fixed ids.
+    // ifAbsent keeps re-run idempotence without an upsert: the PR-C fence fires on
+    // INSERT ... ON CONFLICT before conflict resolution. is_active is the table default.
+    await createTestApiKey(admin, {
+      id: apiKeyAId,
+      userId: allocatorAId,
+      exchange: "binance",
+      label: "Phase10 RPC test (synthetic)",
+      apiKeyEncrypted: "test-only:not-a-real-secret",
+      kekVersion: 1,
+      ifAbsent: true,
+    });
+    await createTestApiKey(admin, {
+      id: apiKeyBId,
+      userId: allocatorBId,
+      exchange: "okx",
+      label: "Phase10 RPC test B (synthetic)",
+      apiKeyEncrypted: "test-only:not-a-real-secret",
+      kekVersion: 1,
+      ifAbsent: true,
+    });
 
     // Seed allocator_holdings rows so the RPC's ownership probe (which JOINs against
     // (venue, symbol, holding_type) parsed from the diff's holding_ref via

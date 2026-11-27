@@ -157,7 +157,9 @@ vi.mock("@/lib/supabase/admin", () => ({
       update: () => ({ eq: async () => ({ error: null }) }),
       // 160-05 — the persist arm is the ONLY arm of keys/validate-and-encrypt
       // now that the legacy ciphertext arm is retired, so the API-2 lock case
-      // below reaches a real INSERT.
+      // below reaches a real write. Phase 243 (DBACC-02): that write is the
+      // `insert_api_key` RPC (answered below), not this direct insert, which is
+      // kept for the other routes this file drives.
       insert: () => ({
         select: () => ({
           single: async () => ({ data: { id: "persisted-key-id" }, error: null }),
@@ -165,7 +167,13 @@ vi.mock("@/lib/supabase/admin", () => ({
       }),
       upsert: async () => ({ error: null }),
     }),
-    rpc: async () => ({ data: null, error: null }),
+    // Phase 243 (DBACC-02): the validate-and-encrypt persist arm writes the key row
+    // through `insert_api_key`, which answers the new key's uuid. Every other rpc
+    // keeps its null answer.
+    rpc: async (name: string) =>
+      name === "insert_api_key"
+        ? { data: "persisted-key-id", error: null }
+        : { data: null, error: null },
   }),
 }));
 
