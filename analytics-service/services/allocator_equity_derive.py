@@ -1285,8 +1285,12 @@ EMPTIED_RESTART_FLOOR_USD = 100.0
 #     fetch (epoch 0 -> now, mt5_read.read_mt5_deal_ledger), stamped
 #     ``ledger_complete``. It has NO §5 inception gate of its own, so the zero-start
 #     check below is the only inception evidence an MT5 key gets.
-# Every other venue keeps the positional OUT_OF_WINDOW_FLOW rule unchanged: sfox is a
+# Every other venue keeps the positional OUT_OF_WINDOW_FLOW rule: sfox is a
 # sampled NAV, and the ccxt venues carry retention caps (OKX ~90d, Bybit ~365d).
+# 254 founder ruling 2026-11-26 ("Exempt it, book for v1.23"): since Phase 254 a deposit dated
+# exactly the day before a key's first return day is its opening deposit on every venue
+# (``replay_key_equity``, count flag ``opening_deposit_exempted``). This set is NOT widened for
+# that, because it also decides which keys get the D-13 zero-start check.
 FULL_HISTORY_VENUES: frozenset[str] = frozenset({"deribit", "mt5"})
 
 # 234 NOCAP-01: the venues whose stored realized terminal IS the live balance read, so the no-capital
@@ -1479,7 +1483,7 @@ def replay_key_equity(
     return day. Every other flow outside the return window — an earlier,
     non-adjacent one, or one after the last return day — stays
     ``OUT_OF_WINDOW_FLOW``, and so does every out-of-window flow on a venue without
-    full history (the default).
+    full history (the default), except the opening deposit (254, below).
 
     167.1.2.2 D-15 — DROPPED DAYS. The TWR writer leaves a day out of the stored
     returns when its prior capital cannot be a denominator (the funding day under
@@ -1550,6 +1554,22 @@ def replay_key_equity(
     a listed day inside the return window all keep today's behaviour. It applies to the event
     flows in the legacy roll and to the writer's composed flows in writer-basis mode (``fbd``
     holds whichever the replay runs on). ``None`` or empty behaves exactly as before.
+
+    254 founder ruling 2026-11-26 ("Exempt it, book for v1.23") — THE OPENING DEPOSIT ON EVERY
+    VENUE. When ``history_reaches_inception`` is False, a day whose net flow in ``fbd`` is
+    strictly positive and which is exactly the day before the first return day is the key's
+    opening deposit. It is not counted in ``out_of_window_flows``, and the count flag
+    ``opening_deposit_exempted`` (1, never True, so it never reaches the payload's flag tokens)
+    names it. It is not judged by the zero-start band. A withdrawal or net-negative day on that
+    day, any earlier flow and any flow after the last return day keep today's behaviour. On a
+    full-history key that day ends the D-13 opening run and is judged by the band exactly as
+    before. It applies to the event flows in the legacy roll and to the writer's composed flows
+    in writer-basis mode. No level changes (IN-02). Known limit, accepted by the ruling's
+    narrow scope: on a retention-capped venue a deposit on that day is exempted even when the
+    returns start at the retention edge rather than at the account's start. Known edge: a later
+    segment of a key split at an unpriced hole is replayed with ``history_reaches_inception``
+    False whatever its venue, so the day before that segment's first return day is exempted
+    the same way (such a segment never had the D-13 check, so no check is skipped).
 
     Structural refusals raise ``NavReconstructionError`` (permanent, mirroring
     ``nav_twr``): a return factor ``1 + r_t <= 0`` (an un-replayable ≤ −100% day)
@@ -1655,6 +1675,7 @@ def replay_key_equity(
     ret_days = sorted(r)
     out_of_window_flows = 0
     opening_run: list[str] = []
+    opening_deposit_exempted = False
     if ret_days:
         lo, hi = ret_days[0], ret_days[-1]
         if history_reaches_inception:
@@ -1666,6 +1687,16 @@ def replay_key_equity(
         out_of_window_flows = sum(
             1 for fd in fbd if fd < lo or (fd > hi and fd not in stated)
         ) - len(opening_run)
+        # 254 founder ruling 2026-11-26 ("Exempt it, book for v1.23"): on a key whose history
+        # does not reach the account's start, a deposit (the day's net flow strictly positive)
+        # dated exactly the day before the first return day is the key's opening deposit, not
+        # an out-of-window flow. A full-history key's same day ends the D-13 opening run and is
+        # judged by the zero-start band below. ``fbd`` holds whichever flows the replay runs on.
+        if not history_reaches_inception:
+            opening_eve = (date.fromisoformat(lo) - timedelta(days=1)).isoformat()
+            if fbd.get(opening_eve, 0.0) > 0.0:
+                opening_deposit_exempted = True
+                out_of_window_flows -= 1
 
     equity = [0.0] * n
     # CR-01: start from the writer's realized terminal when it is on the series' last
@@ -1841,6 +1872,9 @@ def replay_key_equity(
     if out_of_window_flows:
         flags["out_of_window_flows"] = out_of_window_flows
         reasons.add(DegradeReason.OUT_OF_WINDOW_FLOW)
+    if opening_deposit_exempted:
+        # A count (the int 1, never True): ``_bool_flag_tokens`` keeps it out of the payload.
+        flags["opening_deposit_exempted"] = 1
     if opening_run:
         # The capital the replay implies before the run's first flow. That day has
         # no return row (it precedes the first return day): its level is the capital

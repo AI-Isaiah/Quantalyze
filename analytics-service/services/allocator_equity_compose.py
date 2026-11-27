@@ -487,8 +487,10 @@ def compose_allocator_equity(
     ``full_history_keys`` (167.1.2.2 D-13) names the keys on a venue whose history
     reaches the account's start (``FULL_HISTORY_VENUES``). Only those get the
     opening-flow zero-start check in ``replay_key_equity``; every other key keeps the
-    positional ``OUT_OF_WINDOW_FLOW`` rule. The caller knows the venue, this pure
-    layer does not, so it is passed in rather than guessed.
+    positional ``OUT_OF_WINDOW_FLOW`` rule, except that a deposit dated exactly the day
+    before its first return day is its opening deposit (Phase 254, founder ruling
+    2026-11-26, "Exempt it, book for v1.23"; see ``replay_key_equity``). The caller knows
+    the venue, this pure layer does not, so it is passed in rather than guessed.
 
     ``dropped_day_pnl_by_key`` (167.1.2.2 D-15) maps a key to {ISO day: P&L in USD} for
     the days its TWR writer left out of the stored returns (the funding day, a day whose
