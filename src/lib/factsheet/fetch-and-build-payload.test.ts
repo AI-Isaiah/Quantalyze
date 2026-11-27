@@ -153,6 +153,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { withPublishedOrOwner } from "@/lib/visibility";
 import { FIGURE_DEFS_VERSION, gateAnnualized } from "@/lib/figure-gate";
 import { CVAR_MIN_OBS } from "@/lib/figure-conventions";
+import { PINNED_BY_BASIS_ALIAS_NAMES, byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 // Synthetic, UUID-shaped ids: `withPublishedOrOwner` fails closed on a non-UUID.
 const OWNER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -194,15 +195,20 @@ function strategyRow(analytics: Row): Row {
   };
 }
 
+// DBACC-01 (Phase 243 plan 03): the builder reads `metrics_json_by_basis` only as 21 named
+// aliases. A seed may still say `metrics_json_by_basis: {...}` in its readable writer shape; it is
+// translated here, once, into the alias fields PostgREST would answer, and the key is dropped so
+// the builder can never be handed the whole column.
 function analyticsRow(over: Row): Row {
+  const { metrics_json_by_basis, ...rest } = over;
   return {
     daily_returns: null,
     returns_series: null,
     computed_at: "2024-03-01T00:00:00Z",
     data_quality_flags: null,
-    metrics_json_by_basis: null,
     computation_status: "complete",
-    ...over,
+    ...byBasisAliasRow(metrics_json_by_basis),
+    ...rest,
   };
 }
 
@@ -1685,8 +1691,27 @@ describe("194 plan 04 - stored figures and the figure record through fetchAndBui
     ]) {
       expect(select).toContain(token);
     }
-    // The payload reaches anonymous viewers: no `metrics_json` that is not `_by_basis` or an arrow path.
-    expect(select).not.toMatch(/metrics_json(?!_by_basis|->)/);
+    // The payload reaches anonymous viewers: no `metrics_json` or `metrics_json_by_basis` that is not an arrow path.
+    expect(select).not.toMatch(/metrics_json(?!->|_by_basis->)/);
+  });
+
+  it("the strategies select carries exactly the 21 pinned by-basis aliases: it fails on an extra or a missing key", async () => {
+    seed(single({ daily_returns: points(30), ...SEVEN }));
+    await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    const select = fake.strategySelects.join(" ");
+    const names = [...select.matchAll(/([a-z_]+):metrics_json_by_basis->([a-z_]+)->([a-z_]+)/g)].map((m) => {
+      // Each alias name must say the path it reads.
+      expect(m[1]).toBe(`by_basis_${m[2]}_${m[3]}`);
+      return m[1];
+    });
+    expect(names).toEqual([...PINNED_BY_BASIS_ALIAS_NAMES]);
+    // Every occurrence of the column, not only the three-level ones the matcher above collects: a
+    // whole-basis projection (`x:metrics_json_by_basis->cash_settlement`) or the whole column must fail.
+    const tokens = select.match(/metrics_json_by_basis[^,)\s]*/g) ?? [];
+    expect(tokens).toHaveLength(PINNED_BY_BASIS_ALIAS_NAMES.length);
+    for (const t of tokens) expect(t).toMatch(/^metrics_json_by_basis->[a-z_]+->[a-z_]+$/);
+    // jsonb arrows only: a text arrow would turn every KPI into NaN.
+    expect(select).not.toContain("metrics_json_by_basis->>");
   });
 
   it("a stored row with the marker: p6m, p3m, var95 and cvar95 equal the stored values, not compute()'s", async () => {
@@ -1802,7 +1827,12 @@ describe("236 plan 11 - the stored CAGR span through fetchAndBuildPayload", () =
     const select = fake.strategySelects.join(" ");
     expect(select).toContain("cagr_start:metrics_json->cagr_start");
     expect(select).toContain("cagr_end:metrics_json->cagr_end");
-    expect(select).not.toMatch(/metrics_json(?!_by_basis|->)/);
+    expect(select).not.toMatch(/metrics_json(?!->|_by_basis->)/);
+    // The ban above exempts every `metrics_json_by_basis->` prefix, so count each occurrence and
+    // require the exact `->{basis}->{key}` shape: a whole-basis projection or the whole column fails.
+    const tokens = select.match(/metrics_json_by_basis[^,)\s]*/g) ?? [];
+    expect(tokens).toHaveLength(PINNED_BY_BASIS_ALIAS_NAMES.length);
+    for (const t of tokens) expect(t).toMatch(/^metrics_json_by_basis->[a-z_]+->[a-z_]+$/);
   });
 
   it("a row with the stored keys: the payload carries them verbatim", async () => {

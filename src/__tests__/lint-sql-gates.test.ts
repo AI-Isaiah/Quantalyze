@@ -1182,7 +1182,9 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): 112 -> 119, the seven phase gate files (migrations 20261124120000 to 20261124120600). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 119 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): 120 -> 121, the server-aware identity gate file (test_commit_scenario_batch_venue_server_identity.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 121 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): 121 -> 122, the MT5 terminal lease gate file (test_mt5_terminal_lease.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 122 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
-    expect(res.out).toMatch(/scanned 123 file/);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): 123 -> 124, `node scripts/lint-sql-gates.mjs` printed `scanned 124 file(s); 0 finding(s)` with the client-role statement_timeout gate in the corpus.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): 124 -> 126, `node scripts/lint-sql-gates.mjs` printed `scanned 126 file(s); 0 finding(s)` with the two DBACC-02 gates (test_insert_api_key_rpc.sql, test_api_keys_user_id_immutable.sql) in the corpus.
+    expect(res.out).toMatch(/scanned 126 file/);
     expect(res.status, res.out).toBe(0);
   });
 

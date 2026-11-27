@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 import { render } from "@testing-library/react";
 import type { DailyReturn } from "@/lib/factsheet/types";
 import { recordFromScalars, type RecordScalarRow } from "@/lib/figure-record-scalars";
@@ -65,6 +66,22 @@ vi.mock("@/lib/supabase/server", () => ({
       return builder;
     },
   }),
+}));
+
+// Phase 243 DBACC-01: the card's cash-basis question is answered by a second, admin-client read of
+// the 21 pinned aliases. Without this mock createAdminClient throws (no service key) and every
+// card takes the failure path. The default answer is a row whose embed holds 21 null aliases, the
+// same as a strategy with no stored by-basis values (a missing row is a failure, never this);
+// route.test.tsx pins the projection and the failure arms.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    const builder = {
+      select: () => builder,
+      eq: () => builder,
+      maybeSingle: async () => ({ data: { strategy_analytics: byBasisAliasRow(null) }, error: null }),
+    };
+    return { from: () => builder };
+  },
 }));
 
 const lsStore = new Map<string, string>();
@@ -220,7 +237,6 @@ async function renderOgCard(
         volatility: 0.1,
         sortino: 0.2,
         calmar: 0.3,
-        metrics_json_by_basis: null,
         data_quality_flags: flags,
         ...scalars,
         ...analyticsOverride,

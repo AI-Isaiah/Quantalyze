@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { PINNED_BY_BASIS_ALIAS_NAMES, byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 /**
  * Phase 147 / SCEN-01 — GET /api/og/factsheet/[id] (the dynamic OG card)
@@ -52,10 +53,18 @@ const STATE = vi.hoisted(() => ({
   clientThrows: false,
   /** When true, computeOgHeadline throws — the compute fail-soft arm (SFH-02). */
   computeThrows: false,
+  /** Phase 243 DBACC-01: what the admin alias read answers (beforeEach default: an embed of 21 null aliases). */
+  adminRow: { data: null, error: null } as {
+    data: Record<string, unknown> | null;
+    error: { code: string; message: string } | null;
+  },
   observed: {
     select: null as string | null,
     filters: [] as Array<[string, unknown]>,
     tables: [] as string[],
+    /** The admin read's select string, and its `.eq` arguments. */
+    adminSelect: null as string | null,
+    adminFilters: [] as Array<[string, unknown]>,
   },
 }));
 
@@ -148,6 +157,28 @@ vi.mock("@/lib/supabase/server", () => ({
       },
     };
   },
+}));
+
+// Phase 243 DBACC-01: the card's cash-basis question is answered by a second, admin-client read of
+// the 21 pinned aliases. This recording fake answers STATE.adminRow, and records the select string
+// and every filter, so the projection and the published-only predicate are observable.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: () => {
+      const builder = {
+        select: (cols: string) => {
+          STATE.observed.adminSelect = cols;
+          return builder;
+        },
+        eq: (col: string, val: unknown) => {
+          STATE.observed.adminFilters.push([col, val]);
+          return builder;
+        },
+        maybeSingle: async () => STATE.adminRow,
+      };
+      return builder;
+    },
+  }),
 }));
 
 function ctx(id: string): { params: Promise<{ id: string }> } {
@@ -244,7 +275,8 @@ beforeEach(async () => {
   STATE.readError = null;
   STATE.clientThrows = false;
   STATE.computeThrows = false;
-  STATE.observed = { select: null, filters: [], tables: [] };
+  STATE.adminRow = { data: { strategy_analytics: byBasisAliasRow(null) }, error: null };
+  STATE.observed = { select: null, filters: [], tables: [], adminSelect: null, adminFilters: [] };
   ogCalls.length = 0;
   headlineCalls.length = 0;
 });
@@ -421,7 +453,6 @@ describe("GET /api/og/factsheet/[id]", () => {
         volatility: 0.12,
         sortino: 2.1,
         calmar: 3,
-        metrics_json_by_basis: null,
         data_quality_flags: { twr_chain_broken: true, headline_since: "2024-06-01" },
       },
     ];
@@ -477,14 +508,31 @@ describe("GET /api/og/factsheet/[id]", () => {
         volatility: 0.12,
         sortino: 2.1,
         calmar: 3,
-        metrics_json_by_basis: { cash_settlement: { sharpe: 9 } },
         data_quality_flags: { twr_chain_broken: true, headline_since: "2024-06-01" },
       },
     ];
+    // Phase 243 DBACC-01: the stored cash_settlement object arrives through the admin alias read.
+    STATE.adminRow = {
+      data: { strategy_analytics: byBasisAliasRow({ cash_settlement: { sharpe: 9 } }) },
+      error: null,
+    };
     const { GET } = await import("./route");
     await GET(makeRequest(), ctx(PUBLISHED_ID));
 
-    expect(STATE.observed.select).toMatch(/\bmetrics_json_by_basis\b/);
+    // The session select names no form of the column (a revoked anon column privilege covers every
+    // `->` over it), and the admin projection is EXACTLY the 21 pinned aliases: this fails on an
+    // extra or a missing key.
+    expect(STATE.observed.select).not.toMatch(/metrics_json_by_basis/);
+    const adminAliasNames = [...(STATE.observed.adminSelect ?? "").matchAll(/(by_basis_[a-z_]+):metrics_json_by_basis->/g)].map(
+      (m) => m[1],
+    );
+    expect(adminAliasNames).toEqual([...PINNED_BY_BASIS_ALIAS_NAMES]);
+    // ...and nothing else rides along (a differently-shaped entry would not match the name regex).
+    expect((STATE.observed.adminSelect ?? "").split(",")).toHaveLength(PINNED_BY_BASIS_ALIAS_NAMES.length);
+    expect(STATE.observed.adminFilters).toEqual([
+      ["id", PUBLISHED_ID],
+      ["status", "published"],
+    ]);
     const strings = latestCardStrings();
     expect(strings).not.toContain("2.34");
     expect(strings).not.toContain("+56.7%");
@@ -591,6 +639,76 @@ describe("GET /api/og/factsheet/[id] — failure paths are reported and never ca
     expect(latestCardStrings()).toContain("Strategy");
     consoleSpy.mockRestore();
   });
+
+  it("F1b — Phase 243 T-243-11: a failed ADMIN alias read takes the failure path (reported, no-store, generic card), never a card that treats the cash basis as absent", async () => {
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        sharpe: 2.34,
+        cagr: 0.567,
+        max_drawdown: -0.089,
+      },
+    ];
+    STATE.adminRow = { data: null, error: { code: "42501", message: "permission denied for table strategy_analytics" } };
+    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { GET } = await import("./route");
+    const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const { captureToSentry } = await import("@/lib/sentry-capture");
+    expect(captureToSentry).toHaveBeenCalledWith(
+      STATE.adminRow.error,
+      expect.objectContaining({
+        tags: expect.objectContaining({ route: "api/og/factsheet", stage: "read" }),
+        extra: expect.objectContaining({ strategy_id: PUBLISHED_ID }),
+      }),
+    );
+    // The generic card, and no headline was ever computed from a row missing its cash basis.
+    expect(latestCardStrings()).toContain("Strategy");
+    expect(latestCardStrings()).not.toContain("Helios Momentum");
+    expect(headlineCalls).toHaveLength(0);
+    consoleSpy.mockRestore();
+  });
+
+  it.each([
+    ["no row", { data: null, error: null }],
+    ["no analytics embed", { data: { strategy_analytics: null }, error: null }],
+    ["an empty analytics embed", { data: { strategy_analytics: [] }, error: null }],
+  ] as const)(
+    "F1c — Phase 243 WR-03: an admin alias read with %s and no error fails CLOSED (reported, no-store, generic card), never a card that treats the cash basis as absent",
+    async (_label, adminRow) => {
+      STATE.strategyRow!.strategy_analytics = [
+        {
+          daily_returns: null,
+          returns_series: LONG_WEALTH_INDEX,
+          computation_status: "complete",
+          sharpe: 2.34,
+          cagr: 0.567,
+          max_drawdown: -0.089,
+        },
+      ];
+      STATE.adminRow = adminRow as typeof STATE.adminRow;
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { GET } = await import("./route");
+      const res = (await GET(makeRequest(), ctx(PUBLISHED_ID))) as unknown as { headers: Headers };
+
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      const { captureToSentry } = await import("@/lib/sentry-capture");
+      expect(captureToSentry).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "og: admin alias read returned no analytics row" }),
+        expect.objectContaining({
+          tags: expect.objectContaining({ route: "api/og/factsheet", stage: "read" }),
+          extra: expect.objectContaining({ strategy_id: PUBLISHED_ID }),
+        }),
+      );
+      expect(latestCardStrings()).toContain("Strategy");
+      expect(latestCardStrings()).not.toContain("Helios Momentum");
+      expect(headlineCalls).toHaveLength(0);
+      consoleSpy.mockRestore();
+    },
+  );
 
   it("F2 — CACHE-01: a genuine not-found (no row, no error) is sent no-store and reports nothing", async () => {
     STATE.strategyRow = null;

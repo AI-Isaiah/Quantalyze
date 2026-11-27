@@ -51,6 +51,7 @@ import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 // --- Fixtures ---------------------------------------------------------------
 
@@ -116,7 +117,7 @@ function strategyRow(metricsJsonByBasis: unknown) {
       returns_series: null,
       computed_at: "2026-07-01T00:00:00.000Z",
       data_quality_flags: {},
-      metrics_json_by_basis: metricsJsonByBasis,
+      ...byBasisAliasRow(metricsJsonByBasis),
       computation_status: "complete",
     },
   };

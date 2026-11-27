@@ -79,6 +79,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
 import { captureToSentry } from "@/lib/sentry-capture";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 const STRATEGY_ID = "51a10001-0000-4000-8000-0000000000e7";
 const T0 = "2026-09-01T00:00:00.000Z";
@@ -126,7 +127,7 @@ const COMPOSITE_ROW = {
     daily_returns: null,
     returns_series: null,
     data_quality_flags: { composite: true },
-    metrics_json_by_basis: { cash_settlement: FULL_CASH },
+    ...byBasisAliasRow({ cash_settlement: FULL_CASH }),
   },
 };
 
@@ -354,7 +355,7 @@ describe("169 WR-05 — a single-key MTM series read outage is not cached for it
       daily_returns: CSV_ROWS.map((r) => ({ date: r.date, value: r.daily_return })),
       returns_series: null,
       data_quality_flags: {},
-      metrics_json_by_basis: { mark_to_market: FULL_CASH },
+      ...byBasisAliasRow({ mark_to_market: FULL_CASH }),
       ...FULL_CASH,
     },
   };

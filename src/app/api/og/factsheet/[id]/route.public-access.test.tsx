@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 /**
  * Phase 170.3 OGPUBLIC (D-02, D-03) — GET /api/og/factsheet/[id] for a caller
@@ -43,6 +44,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
  *   P6 — a malformed hit does not spend the og-factsheet:read Sentry slot: a valid-uuid
  *        read error in the same window still captures once (Phase 209, D-11)
  *   P7 — a valid-uuid read error keeps no-store and exactly one capture (D-11)
+ *   P8 — Phase 243 T-243-10: the admin alias read (the card's by-basis question, BYPASSRLS) is
+ *        NEVER reached for an unpublished, unknown or malformed id; a published id reaches it
+ *        once, keyed by the row's id and published-only (non-vacuity)
  */
 
 vi.mock("server-only", () => ({}));
@@ -60,11 +64,17 @@ const STATE = vi.hoisted(() => ({
   strategyRow: null as Record<string, unknown> | null,
   /** When true, the fake answers every read with `{ data: null, error: null }`. */
   returnNothing: false,
+  /** When set, the admin alias read answers this instead of an embed of 21 null aliases. */
+  adminRow: null as { data: unknown; error: unknown } | null,
   /** Phase 209 D-11: when set, the fake answers a uuid-filtered read with this error. */
   readError: null as { code: string; message: string } | null,
   observed: {
     filters: [] as Array<[string, unknown]>,
     tables: [] as string[],
+    /** Phase 243: createAdminClient() calls, and every admin select / filter the route issued. */
+    adminFactoryCalls: 0,
+    adminSelects: [] as string[],
+    adminFilters: [] as Array<[string, unknown]>,
   },
 }));
 
@@ -141,6 +151,31 @@ vi.mock("@/lib/supabase/server", () => ({
       return builder;
     },
   }),
+}));
+
+// Phase 243 DBACC-01: the admin alias read. A recording fake; it answers STATE.adminRow, by default
+// a row whose embed holds 21 null aliases, the same as a strategy with no stored by-basis values.
+// What matters here is WHETHER it is reached and how.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    STATE.observed.adminFactoryCalls += 1;
+    return {
+      from: () => {
+        const builder = {
+          select: (cols: string) => {
+            STATE.observed.adminSelects.push(cols);
+            return builder;
+          },
+          eq: (col: string, val: unknown) => {
+            STATE.observed.adminFilters.push([col, val]);
+            return builder;
+          },
+          maybeSingle: async () => STATE.adminRow ?? { data: { strategy_analytics: byBasisAliasRow(null) }, error: null },
+        };
+        return builder;
+      },
+    };
+  },
 }));
 
 /** The long cache a rendered terminal card carries (Phase 237 CACHE-01: a not-found or
@@ -256,8 +291,15 @@ beforeEach(async () => {
   __resetCaptureThrottleForTests();
   STATE.strategyRow = null;
   STATE.returnNothing = false;
+  STATE.adminRow = null;
   STATE.readError = null;
-  STATE.observed = { filters: [], tables: [] };
+  STATE.observed = {
+    filters: [],
+    tables: [],
+    adminFactoryCalls: 0,
+    adminSelects: [],
+    adminFilters: [],
+  };
   ogCalls.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "info").mockImplementation(() => undefined);
@@ -389,4 +431,35 @@ describe("GET /api/og/factsheet/[id] — signed-out caller (OGPUBLIC)", () => {
       expect(STATE.observed.filters).toContainEqual(["id", id]);
     },
   );
+
+  it.each([
+    ["unpublished", PUBLISHED_ID, "draft"],
+    ["unknown", UNKNOWN_ID, "published"],
+    ["malformed", MALFORMED_ID, "published"],
+  ] as const)(
+    "P8 - T-243-10: the admin alias read is never reached for a %s id (no row from the published-only session read)",
+    async (_label, id, status) => {
+      STATE.strategyRow = makeRow(status);
+      const { GET } = await import("./route");
+      await GET(makeRequest(id), ctx(id));
+
+      expect(STATE.observed.adminFactoryCalls).toBe(0);
+      expect(STATE.observed.adminSelects).toEqual([]);
+      expectGenericCard();
+    },
+  );
+
+  it("P8b - non-vacuity: a published id reaches the admin alias read once, keyed by the row id and published-only", async () => {
+    STATE.strategyRow = makeRow("published");
+    const { GET } = await import("./route");
+    await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+
+    expect(STATE.observed.adminFactoryCalls).toBe(1);
+    expect(STATE.observed.adminSelects).toHaveLength(1);
+    expect(STATE.observed.adminSelects[0]).toMatch(/^strategy_analytics \(/);
+    expect(STATE.observed.adminFilters).toEqual([
+      ["id", PUBLISHED_ID],
+      ["status", "published"],
+    ]);
+  });
 });

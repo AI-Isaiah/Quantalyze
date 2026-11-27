@@ -58,6 +58,7 @@ import {
   readSingleKeyBasisOpts,
   readCashConventions,
 } from "./composite-read-path";
+import { BY_BASIS_ALIASES, rebuildMetricsJsonByBasis } from "./by-basis-projection";
 import { resolveDailyReturnSeries } from "./allocator-portfolio-payload";
 import { STORED_CURVE_MAX_POINTS } from "./resolve-series";
 import { curveMethodFromFlags, curveRecordStart } from "./resolve-series";
@@ -318,7 +319,7 @@ async function resolveFactsheetInputs(
        max_capacity, avg_daily_turnover, start_date, benchmark, asset_class,
        returns_denominator_config, source,
        api_keys!strategies_api_key_id_fkey ( exchange ),
-       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, metrics_json_by_basis, computation_status,
+       strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, ${BY_BASIS_ALIASES}, computation_status,
          cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance,
          six_month_return, figure_defs_version:metrics_json->figure_defs_version, three_month:metrics_json->three_month,
          var_1d_95:metrics_json->var_1d_95, cvar:metrics_json->cvar, record_observations:metrics_json->record_observations,
@@ -376,6 +377,10 @@ async function resolveFactsheetInputs(
   const analytics = Array.isArray(strategy.strategy_analytics)
     ? strategy.strategy_analytics[0]
     : strategy.strategy_analytics;
+  // DBACC-01 (Phase 243 plan 03): the embed carries `metrics_json_by_basis` only as the 21 pinned
+  // `->` aliases (`BY_BASIS_ALIASES`), never the whole column. The writer-shaped per-basis
+  // object the readers below expect is rebuilt from them once, here.
+  const metricsJsonByBasis = rebuildMetricsJsonByBasis(analytics);
 
   // STALE-01 — THE SIDE DOOR. `computation_status` was already on this embed
   // (:95) and already read here, but only as an argument to
@@ -529,7 +534,7 @@ async function resolveFactsheetInputs(
       composite = await readCompositeFactsheet(supabase, {
         strategyId: id,
         dqf,
-        metricsJsonByBasis: analytics?.metrics_json_by_basis,
+        metricsJsonByBasis,
         returnsDenominatorConfig: strategy.returns_denominator_config,
       });
     } catch (err) {
@@ -660,7 +665,7 @@ async function resolveFactsheetInputs(
         () => supabase,
         id,
         dqf,
-        analytics?.metrics_json_by_basis,
+        metricsJsonByBasis,
         analytics?.computation_status,
         analytics,
         // SFH H-2 (review round 1): the config is the LAST tier of the method and

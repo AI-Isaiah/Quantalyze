@@ -1,12 +1,15 @@
 import { ImageResponse } from "next/og";
 import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { captureToSentry, shouldCaptureNow } from "@/lib/sentry-capture";
 import { withPublishedOnly } from "@/lib/visibility";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { isOptionsCashWalletBook, OPTIONS_CASH_WALLET_PHRASES } from "@/lib/factsheet/headline-basis";
 import { shortenOgDescription } from "@/lib/factsheet/og-description";
+// Phase 243 DBACC-01: the ONE 21-alias fragment and rebuild rule the factsheet builder uses.
+import { BY_BASIS_ALIASES, rebuildMetricsJsonByBasis } from "@/lib/factsheet/by-basis-projection";
 // Phase 237 FACT-02 / CACHE-01: the ONE held-re-run verdict every surface asks, and the copy the
 // card prints while a re-run is in flight (never an inlined sentence).
 import { analyticsHold, HELD_RERUN_CACHE_CONTROL } from "@/lib/analytics-hold";
@@ -85,8 +88,10 @@ function reportOgFailure(stage: "read" | "compute", id: string, err: unknown): v
  *  STALE-01 widened it by `computation_status` — see the gate at the compute.
  *  169.4.1 OGSHARPE widened it by the stored `cagr` / `sharpe` / `max_drawdown`,
  *  and review round 1 (CR-01) by `data_quality_flags`. Round 2 (SFH-R2-01) widened
- *  it by `metrics_json_by_basis` and the four stored scalars the page's headline
- *  also needs, so the card asks the page's own applicability question. */
+ *  it by the four stored scalars the page's headline also needs (and, then, by
+ *  `metrics_json_by_basis`), so the card asks the page's own applicability question.
+ *  Phase 243 DBACC-01: `metrics_json_by_basis` is no longer on this embed; the card's
+ *  cash-basis question is answered by the admin alias read in `GET`. */
 type AnalyticsEmbed = {
   daily_returns?: unknown;
   returns_series?: unknown;
@@ -98,7 +103,6 @@ type AnalyticsEmbed = {
   /** Phase 237: binds a `last_success_snapshot` to the success that stored the numbers
    *  (`effectiveDataQualityFlags`, `analyticsHold`). Never printed. */
   computed_at?: unknown;
-  metrics_json_by_basis?: unknown;
   cumulative_return?: unknown;
   volatility?: unknown;
   sortino?: unknown;
@@ -120,6 +124,11 @@ type OgStrategyRow = {
   strategy_analytics?: AnalyticsEmbed | AnalyticsEmbed[] | null;
 };
 
+/** The first `strategy_analytics` row of a to-one (object) or to-many (array) embed. */
+function embedOf<T>(embed: T | T[] | null | undefined): T | undefined {
+  return Array.isArray(embed) ? embed[0] : (embed ?? undefined);
+}
+
 export async function GET(
   _req: Request,
   ctx: { params: Promise<{ id: string }> },
@@ -128,6 +137,9 @@ export async function GET(
   let data: OgStrategyRow | null = null;
   // SFH-02: set on any failure path, so the card is sent no-store (see below).
   let failed = false;
+  // Phase 243 DBACC-01: the per-basis object rebuilt from the admin alias read below. Undefined
+  // when the row has no basis with a value (the same answer a null column gave).
+  let byBasis: ReturnType<typeof rebuildMetricsJsonByBasis>;
   // Phase 209 (D-10, TODOS `170.3-OG-MALFORMED-ID`): a malformed id is a not-found, not a
   // failure. It skips the read, logs nothing and never reaches `reportOgFailure` or its
   // throttled Sentry slot, so a scraper cannot spend the one capture a real read failure
@@ -167,12 +179,17 @@ export async function GET(
             // chain-broken row the stored `cagr` covers only the suffix after the
             // break, so computeOgHeadline hides it (see its docblock). Read-only;
             // the flags never leave the server (this response is a PNG).
-            // Round 2 (SFH-R2-01): `metrics_json_by_basis`, `cumulative_return`,
-            // `volatility`, `sortino` and `calmar` join the embed, so the card can
-            // ask the page's own question (is the stored cash headline applicable?)
-            // and withhold a chain-broken row the page withholds. Same published-
-            // gated read of the same row; the columns are already public on the
+            // Round 2 (SFH-R2-01): `cumulative_return`, `volatility`, `sortino` and
+            // `calmar` join the embed (with `metrics_json_by_basis`, until Phase 243), so
+            // the card can ask the page's own question (is the stored cash headline
+            // applicable?) and withhold a chain-broken row the page withholds. Same
+            // published-gated read of the same row; the columns are already public on the
             // factsheet page and never leave the server (this response is a PNG).
+            // Phase 243 DBACC-01: `metrics_json_by_basis` is NOT in this select. After the
+            // column revoke `anon` holds no SELECT on it, and a column privilege covers every
+            // `->` expression over the column, so even a named alias here would answer 42501
+            // for a signed-out crawler. The cash-basis question is answered by the admin read
+            // below, which runs only once this published-only read returned the row.
             // Phase 194.1 plan 06 (B3, D-15): the four record scalar aliases join the embed (the
             // factsheet's own `RECORD_SCALAR_ALIASES`; `returns_series` and `metrics_json` are
             // never projected whole by them), so the card judges the strategy's TOTAL record, not
@@ -183,7 +200,7 @@ export async function GET(
             // `last_success_snapshot` to the success that stored the numbers, which the hold
             // (`analyticsHold`) and the effective flags need. Read-only; it never leaves the
             // server (this response is a PNG).
-            "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, computed_at, metrics_json_by_basis, " +
+            "id, name, codename, description, asset_class, strategy_analytics ( daily_returns, returns_series, computation_status, cumulative_return, volatility, cagr, sharpe, sortino, calmar, max_drawdown, data_quality_flags, computed_at, " +
               RECORD_SCALAR_ALIASES +
               " )",
           )
@@ -199,10 +216,51 @@ export async function GET(
         reportOgFailure("read", id, res.error);
       }
       data = (res.data ?? null) as unknown as OgStrategyRow | null;
+      // Phase 243 DBACC-01: the card's one by-basis question (is there a stored `cash_settlement`
+      // object?) is answered from the 21 pinned aliases (`BY_BASIS_ALIASES`, the same fragment the
+      // factsheet builder reads) through the ADMIN client, because only the admin role keeps the
+      // column grant once anon's SELECT on `metrics_json_by_basis` is revoked.
+      // Why it is safe to run BYPASSRLS inside a public endpoint:
+      //   - it runs only AFTER the published-only session read above returned a row with an
+      //     analytics embed, so an unpublished or unknown id never reaches it;
+      //   - it is keyed by that row's own id, never by a second reading of the URL;
+      //   - it is still `withPublishedOnly` (defence in depth, the predicate the session read uses);
+      //   - it projects only the 21 numeric aliases, never the column (series arrays stay private).
+      // Why a failure fails CLOSED: with the cash basis silently treated as absent, a lingering
+      // composite -> single row (a raw `cash_settlement` object) would show a stale headline. An
+      // error or throw takes the route's existing failure path: reported, no-store, generic card.
+      if (data && embedOf(data.strategy_analytics)) {
+        const adminRes = await withPublishedOnly(
+          createAdminClient()
+            .from("strategies")
+            .select("strategy_analytics ( " + BY_BASIS_ALIASES + " )")
+            .eq("id", data.id ?? id),
+        ).maybeSingle();
+        // A real published row with analytics always answers an embed (its 21 aliases may be
+        // null), so a missing row or embed means the row went away between the two reads: fail
+        // closed, the same as an error.
+        const adminEmbed = embedOf(
+          (adminRes.data as {
+            strategy_analytics?: Record<string, unknown> | Record<string, unknown>[] | null;
+          } | null)?.strategy_analytics,
+        );
+        if (adminRes.error || !adminEmbed) {
+          failed = true;
+          reportOgFailure(
+            "read",
+            id,
+            adminRes.error ?? new Error("og: admin alias read returned no analytics row"),
+          );
+          data = null;
+        } else {
+          byBasis = rebuildMetricsJsonByBasis(adminEmbed);
+        }
+      }
     } catch (err) {
       // OG image still renders with the fallback.
       // (deliberately doesn't throw — broken OG image must not 500 the deploy)
       failed = true;
+      data = null;
       reportOgFailure("read", id, err);
     }
   }
@@ -328,7 +386,13 @@ export async function GET(
       // undefined-valued as a picked literal would make it.
       // Phase 237: `hold.updating` is the fourth argument, so the three inner gates read the
       // stored result of a held re-run exactly as the factsheet's resolve stage does.
-      ({ sharpe, cagr, maxDd } = computeOgHeadline(rows, data?.asset_class, analytics, hold.updating));
+      // Phase 243 DBACC-01: `metrics_json_by_basis` is the admin alias rebuild, never an anon column read.
+      ({ sharpe, cagr, maxDd } = computeOgHeadline(
+        rows,
+        data?.asset_class,
+        analytics ? { ...analytics, metrics_json_by_basis: byBasis } : analytics,
+        hold.updating,
+      ));
       figuresRendered = true;
       // Phase 194.1 plan 06 (B3; 194 D-04 as superseded by D-15, D-13, 2026-11-08): the verdict is
       // the strategy's TOTAL record, from the stored alias scalars and never `rows.length` (the

@@ -101,6 +101,7 @@ import {
   probeFactsheetBuildable,
 } from "./fetch-and-build-payload";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { byBasisAliasRow } from "@/lib/test-helpers/by-basis-alias-row";
 
 const STRATEGY_ID = "00000000-0000-4000-8000-0000000000d4";
 const publicVisibility = <Q,>(q: Q): Q => q;
@@ -145,7 +146,7 @@ function seedStrategy(config: unknown, cumulativeReturn: number = SUM) {
         returns_series: null,
         computed_at: "2024-08-01T00:00:00Z",
         data_quality_flags: null,
-        metrics_json_by_basis: null,
+        ...byBasisAliasRow(null),
         computation_status: "complete",
         // The seven persisted headline scalars (BASIS_KPI_MAP), so the stored
         // headline is overlaid as it is in production (D-10).
@@ -355,7 +356,7 @@ describe("169.1 SFH HIGH-1: the composite arm marks and captures a failed conven
       ...(row.strategy_analytics as Row),
       daily_returns: null,
       data_quality_flags: { composite: true },
-      metrics_json_by_basis: {
+      ...byBasisAliasRow({
         cash_settlement: {
           cumulative_return: SUM,
           cagr: 0.7,
@@ -365,7 +366,7 @@ describe("169.1 SFH HIGH-1: the composite arm marks and captures a failed conven
           calmar: 7,
           max_drawdown: -0.1,
         },
-      },
+      }),
     };
     fake.conventionsError = { message: "upstream timeout", code: "57014" };
   }
