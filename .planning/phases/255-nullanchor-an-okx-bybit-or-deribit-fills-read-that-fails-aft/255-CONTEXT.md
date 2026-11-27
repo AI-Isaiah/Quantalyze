@@ -77,3 +77,11 @@ Out of scope: `cron_sync` / `/fetch-trades` themselves, MT5 (no fills read by de
 - Rewording the bound table's catalog COMMENTs, unless a migration is needed for another reason.
 
 </deferred>
+
+## Decisions addendum 2026-11-27 (founder rulings at the Phase 255 close)
+
+Asked through AskUserQuestion after Phase 255 shipped as v0.133.104.0 (#1395). Answers are verbatim.
+
+- **`[255-OKX-PAGER-BACKFILL]`: "Re-read now (Recommended)".** The affected OKX strategies' full available history is re-read promptly through the product's own path, then stored fill counts are compared against the gate in the `TODOS.md` entry. It runs outside this phase's plans and its results are added in a later commit on the records branch. Older fills than the OKX `fills-history` 3-month reach still need the archive endpoint.
+- **`[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`: "Fix both in a follow-up (Recommended)".** Both are owned by Phase 257 SEEDHOLD, booked in v1.23 HARDEN the same day. The `TODOS.md` entries' owner lines point at it.
+- **`[255-OKX-BEGIN-REACH-PROBE]` has no ruling yet** and stays booked in `TODOS.md` with its owner unchanged ("the next phase that touches `_fetch_raw_trades_okx`").

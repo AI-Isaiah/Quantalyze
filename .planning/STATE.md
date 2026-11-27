@@ -8,7 +8,7 @@ status: executing
 stopped_at: Records PR: 236 FIGUREMATH closed (verification passed, FIG-05 fleet re-derive PASSED 2026-11-27); 225 and 228 stay human_needed
 last_updated: "2026-11-27T09:29:29.441Z"
 last_activity: 2026-11-27
-last_activity_desc: "Records PR: 244 ACCESSGUARDS closed (verification passed, SC-1 met as narrowed); 236 closed, verification passed (FIG-05 strategy and allocator gates PASSED 2026-11-27); phases run in parallel"
+last_activity_desc: "Records PR: 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed, SC-1 met as narrowed); 236 closed, verification passed (FIG-05 strategy and allocator gates PASSED 2026-11-27); phases run in parallel"
 state_head: 45d7b4e5c701f5f924979b571021000b9550d7bb
 progress:
   total_phases: 23
@@ -183,7 +183,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 236 (FIGUREMATH) closed 2026-11-27 (FIG-05 passed); v1.22 phases run in parallel
 Plan: 7 of 7
 Status: Phases complete; 225 (ONEACCOUNTONCE) closed 2026-11-27 with verification passed (plan 18 control passed 2026-11-26, plan 21 post-deploy poll read passed 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stays human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
-Last activity: 2026-11-27 — records PR: 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
+Last activity: 2026-11-27 — records PR: 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
 Progress: [████████░░] 83%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -744,6 +744,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 254 added (2026-11-26, /gsd-phase add, founder ruling 2026-11-26 "Exempt it, book for v1.23"): OPENINGDEPOSIT, a deposit dated exactly the day before a key's first return is that key's opening deposit on every venue, by a narrow opening-run exemption in `replay_key_equity`, not by widening `FULL_HISTORY_VENUES` (shared with the D-13 zero-start checks). Source: an allocator book's `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return. The handler appended it to v1.22 with `Depends on: Phase 253`, a placeholder goal and a TBD stub, and churned `state.json` statuses; the section, bullet and Progress row were moved to v1.23 HARDEN by hand, the goal written, and `state.json` reverted.
 - Phase 255 added (2026-11-26, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 was; founder ruling 2026-11-26 "Keep it on, fix records"): NULLANCHOR, the v1.23 owner of `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today on OKX, Bybit and Deribit because `USE_RAW_TRADE_INGESTION` is on in PROD
 - Phase 256 added (2026-11-27, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 and 255 were; founder ruling 2026-11-27 "USD before 11-15, BTC after"): OKXUNITSWITCH, an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover. Reverses part of 232-03's VREAD-06.
+- Phase 257 added (2026-11-27, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 to 256 were; founder ruling 2026-11-27 "Fix both in a follow-up (Recommended)", raised by the Phase 255 close): SEEDHOLD, the v1.23 owner of `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`. While the bound RPC is down the cron cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records a read-through mark (last complete 7-day window) so the next run continues from there.
 
 ### Decisions
 

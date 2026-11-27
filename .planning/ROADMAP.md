@@ -7,7 +7,7 @@
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256, 257 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -100,7 +100,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"). Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"), and 257 SEEDHOLD the same day (founder: "Fix both in a follow-up (Recommended)"). Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -996,8 +996,9 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 248: SQLGATES2 — SQL gate censuses fail when an axis drifts, and apply-test tells a seeded ledger row from an applied migration** - Derived census axes, enforced exemptions, provenance gate twins, the apply-test fix before the forward comment correction
 - [ ] **Phase 249: TESTLANES — every live-DB lane test executes, a fence timeout fails, lint agrees cold and warm, and the PROD image crash risk is measured** - Ledger to zero with no assertion weakened, no green skips, cache-proof lint, supautils measured locally on the PROD image version
 - [ ] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
-- [ ] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD
+- [x] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD (completed 2026-11-27)
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
+- [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1291,10 +1292,19 @@ Plans:
 2. Binance's Phase 253 behaviour and `advance_sync_cursor`'s callers do not regress, and a test pins that.
 3. The `TODOS.md` entry `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` is deleted in the ship PR and named in its CHANGELOG entry.
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 255-01-PLAN.md — the gate before the fix: the SC-1 two-run matrix for OKX, Bybit and Deribit (30 arms) measured RED at HEAD, and the SC-2 pin on `advance_sync_cursor` and the Binance-only flags
+- [x] 255-02-PLAN.md — the fix: the Phase 253 per-strategy re-read bound extended to OKX, Bybit and Deribit inside `run_sync_trades_job`, no migration
+- [x] 255-03-PLAN.md — PROOF-01 neuters N1 to N10 (each named arm RED, restored from a byte backup, GREEN) and the SC-3 ship hand-over
+
+⭐ **Shipped 2026-11-27 as v0.133.104.0 (#1395).** `255-VERIFICATION.md` is `passed`: SC-1, SC-2 and SC-4 verified, SC-3 met at ship (the `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` entry is deleted from `TODOS.md` and named in the v0.133.104.0 CHANGELOG entry). `255-SECURITY.md`: 0 open threats. Recorded deviation from SC-1's wording: four arms (`okx/bybit/deribit-null-plain`, `okx-null-trunc`) were already GREEN on unmodified code through the Phase 232 bootstrap anchor and are kept as regression pins.
+⭐ **FOUNDER DECISIONS 2026-11-27 (AskUserQuestion at the Phase 255 close; recorded here and in `255-CONTEXT.md`), verbatim:**
+- For `[255-OKX-PAGER-BACKFILL]`: **"Re-read now (Recommended)"**. The affected OKX strategies' full available history is re-read now through the product's own path. The backfill is done outside this phase, and its result is recorded in a later commit on the records branch.
+- For `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`: **"Fix both in a follow-up (Recommended)"**. Both are owned by Phase 257 SEEDHOLD.
+- `[255-OKX-BEGIN-REACH-PROBE]` has no ruling yet and stays booked in `TODOS.md`.
+
 
 ### Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover
 
@@ -1320,6 +1330,25 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read
+
+**Goal:** Two survivors of Phase 255 NULLANCHOR's review are fixed together, because both leave the next run's seed past (or back at) a span the bound does not record:
+- **Hold the seed while the bound RPC is down.** While `set_strategy_fills_reread_bound` is unavailable, `cron_sync` (`routers/cron.py`) and `/fetch-trades` (`routers/exchange.py`) can still store daily rows past an unread span, so the next run seeds at `min(column, daily high-water)` past it. The cron must not move a strategy's seed past a span no bound records. This is `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`, reachable today on OKX, Bybit and Deribit keys (PROD holds all three) during an outage of the RPC. Phase 255 research rated the worker-only fail-closed fix not small, because refusing Phase 2 in the worker does not stop `cron_sync` moving the daily high-water.
+- **A Bybit deadline records what it read.** A Bybit fills read that hits its deadline (`BybitTradeWindowIncomplete("deadline")`) records a read-through mark the way Binance does, at the last complete 7-day window, so the next run continues from there instead of re-reading the same span from the same seed. This is `[255-BYBIT-DEADLINE-NO-PROGRESS]`: today each refusal also lowers the bound by the 1 h overlap.
+- **Founder ruling 2026-11-27 (AskUserQuestion), verbatim: "Fix both in a follow-up (Recommended)".** Booked with `/gsd-phase` add and placed in v1.23 HARDEN by hand, as 254 to 256 were.
+**Requirements**: none mapped (routed review survivors from Phase 255: `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`, `[255-BYBIT-DEADLINE-NO-PROGRESS]`)
+**Depends on:** Phase 255 NULLANCHOR (shipped as v0.133.104.0; its bound extension, `_bound_read` gating and Bybit remaining-budget deadline are what this phase corrects). Plans list their write scope by symbol, because `run_sync_trades_job` is shared with other phases.
+**Success Criteria** (what must be TRUE):
+1. A two-run arm in which a cron-stored daily row lands between a run whose bound write failed and a run after the RPC recovered: run 2's walk start is at or before run 1's seed, for each of Binance, OKX, Bybit and Deribit. The arm is RED on `origin/main` today.
+2. A two-run arm in which a deadline-stopped Bybit read advances the next run's walk start past the windows it completed, and the bound does not creep down by the overlap on each refusal. RED on `origin/main` today.
+3. Binance's read-through behaviour, Phase 255's SC-1 matrix and `advance_sync_cursor`'s callers do not regress, and a test pins that.
+4. The `TODOS.md` entries `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]` are deleted in the ship PR and named in its CHANGELOG entry.
+5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1337,8 +1366,9 @@ Plans:
 | 248. SQLGATES2 | 0/? | Planned for v1.23 | - |
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
 | 254. OPENINGDEPOSIT | 0/? | Planned for v1.23 | - |
-| 255. NULLANCHOR | 0/? | Planned for v1.23 | - |
+| 255. NULLANCHOR | 3/3 | Complete (shipped v0.133.104.0, #1395; verification passed, SC-3 met at ship; SECURITY 0 open; founder rulings 2026-11-27: "Re-read now (Recommended)" for the OKX backfill, "Fix both in a follow-up (Recommended)" for 257 SEEDHOLD) | 2026-11-27 |
 | 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
+| 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
 
 ---
 
