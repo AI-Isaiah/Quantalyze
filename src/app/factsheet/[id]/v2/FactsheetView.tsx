@@ -71,6 +71,7 @@ import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { Term, PlainTerms } from "@/components/ui/Term";
 import type { TermKey } from "@/lib/glossary";
 import { SMOOTHED_MTM_UI_ENABLED } from "@/lib/closed-sets";
+import { HEADLINE_BASIS_SMOOTHED } from "@/lib/factsheet/headline-basis";
 import { ComparatorPicker } from "./ComparatorPicker";
 import { TimeSeriesChart } from "./TimeSeriesChart";
 import { HistogramChart } from "./HistogramChart";
@@ -522,9 +523,11 @@ export function FactsheetBody({
     // Phase 90 (FS-03): BasisProvider wraps the tree so useBasis() resolves in
     // KpiStrip + ControlBar. It renders children only (no DOM) → transparent to
     // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
+    // Phase 252 G252-MTM-PROMOTION: a promoted composite opens on the basis its stored headline is
+    // measured on (`payload.headlineBasis`, set only by the composite read path); every other row opens on cash.
     <LeverageProvider>
     <UsdViewLeverageHold>
-    <BasisProvider>
+    <BasisProvider initialBasis={payload.headlineBasis ?? "cash_settlement"}>
       <article
         id="factsheet-main"
         tabIndex={-1}
@@ -3243,12 +3246,15 @@ function ControlBar({
               // persisted smoothed basis is available; honest-disabled otherwise.
               //
               // Phase 134 kill-switch: the segment is HIDDEN (not rendered at all,
-              // never merely disabled) unless SMOOTHED_MTM_UI_ENABLED is on. With the
-              // dark default the worker never persists a smoothed basis, so the segment
-              // would only ever be honest-disabled — omitting it keeps the control
-              // byte-identical to the pre-v1.14 two-segment cash/MTM toggle. cash/MTM
-              // segments are untouched by the flag.
-              ...(SMOOTHED_MTM_UI_ENABLED
+              // never merely disabled) unless SMOOTHED_MTM_UI_ENABLED is on, so the dark
+              // default keeps the control byte-identical to the pre-v1.14 two-segment
+              // cash/MTM toggle. cash/MTM segments are untouched by the flag.
+              //
+              // Phase 252 G252-MTM-PROMOTION: the flag no longer decides this for a PROMOTED row.
+              // Its worker stored the smoothed basis AS the headline, so hiding the segment would
+              // hide the very basis the page opens on (the provider seed reads this same payload's
+              // `headlineBasis`). The segment stays hidden for every other row while the flag is off.
+              ...(SMOOTHED_MTM_UI_ENABLED || gatePayload.headlineBasis === HEADLINE_BASIS_SMOOTHED
                 ? [
                     {
                       id: "smoothed_mtm",
