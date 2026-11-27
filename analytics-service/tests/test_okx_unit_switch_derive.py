@@ -33,6 +33,7 @@ import pandas as pd
 import pytest
 
 from services.broker_dailies import combine_realized_and_funding
+from services import job_worker
 from services.job_worker import DispatchOutcome, _unit_segment_points
 from services.nav_marks import StoredMark
 from services.nav_marks_apply import AppliedMark, apply_marks
@@ -541,7 +542,7 @@ class TestAStoredRecordBelongsToTheKeyItWasDerivedFrom:
         cal = Calendar.now()
         first = await run_switched_derive(cal=cal)
         stored = first.prestamp["unit_segments"]
-        stored["key_binding"] = hashlib.sha256(b"key-other").hexdigest()
+        stored["key_binding"] = job_worker._key_binding("key-other", "strat-sw")
         usdt_only = [
             {"symbol": "USDT", "value_usd": "100000", "asof": cal.day(back), "holding_type": "spot"}
             for back in range(20, 0, -1)
@@ -586,7 +587,18 @@ class TestAStoredRecordBelongsToTheKeyItWasDerivedFrom:
             stored = run.prestamp["unit_segments"]
         assert "key-sw" not in json.dumps(stored)
         assert "api_key_id" not in stored
-        assert stored["key_binding"] == hashlib.sha256(b"key-sw").hexdigest()
+        # Security review of R3-01: an unkeyed digest of the key id is the same on every strategy,
+        # so a visitor could match one key across strategies. The digest is salted with the
+        # record's own scope, so it is never the bare key digest.
+        assert stored["key_binding"] != hashlib.sha256(b"key-sw").hexdigest()
+        assert len(stored["key_binding"]) == 64
+
+
+def test_the_key_binding_differs_per_strategy_for_the_same_key() -> None:
+    """Security review of R3-01: the same key bound on two strategies gives two digests, so the
+    anon-readable column cannot be used to tell that two strategies share an exchange key."""
+    assert job_worker._key_binding("key-sw", "strat-a") != job_worker._key_binding("key-sw", "strat-b")
+    assert job_worker._key_binding("key-sw", "strat-a") == job_worker._key_binding("key-sw", "strat-a")
 
 
 class TestRefusalsKeepTodaysNamedFailure:

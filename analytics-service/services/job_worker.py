@@ -6179,12 +6179,14 @@ def _fresh_coin_start(switched: SwitchedSeries) -> str:
     return (date.fromisoformat(switched.coin_base_day) + timedelta(days=1)).isoformat()
 
 
-def _key_binding(key_id: str) -> str:
+def _key_binding(key_id: str, scope: str) -> str:
     """R3-01: the one-way digest a stored ``unit_segments`` record binds itself to its key by. The
     record sits in ``strategy_analytics``, which anon can read for a published strategy, and a key id
     is the handle that targets an exchange key (Phase 170.6.1.1 ANONKEYID), so the id itself is never
-    stored there. A key id is a random UUID, so its unsalted SHA-256 cannot be walked back to it."""
-    return hashlib.sha256(key_id.encode("utf-8")).hexdigest()
+    stored there. The digest is salted with the record's own scope (the strategy id, or the allocator
+    id in key mode), so the same key gives a different digest on every strategy and cannot be matched
+    across strategies; a key id is a random UUID, so the digest cannot be walked back to it."""
+    return hashlib.sha256(f"{scope}:{key_id}".encode("utf-8")).hexdigest()
 
 
 def _unit_segments_payload(
@@ -6195,6 +6197,7 @@ def _unit_segments_payload(
     stored_usd_rows: "list[dict[str, Any]] | None" = None,
     *,
     api_key_id: str,
+    binding_scope: str,
 ) -> dict[str, Any]:
     """The stored ``strategy_analytics.unit_segments`` object of a switched strategy (Phase 256
     plan 02 header): the USD segment is the FINAL headline (after the marks) through the last USD
@@ -6267,7 +6270,7 @@ def _unit_segments_payload(
         "version": 1,
         # R2-05: the key the switch was derived from. A strategy can be re-pointed to another key,
         # and a record is evidence about its own key only. R3-01: bound by digest, never by the id.
-        "key_binding": _key_binding(api_key_id),
+        "key_binding": _key_binding(api_key_id, binding_scope),
         "segments": [
             {
                 "unit": "USD",
@@ -6734,7 +6737,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 sorted(str(k) for k in stored) if isinstance(stored, dict) else [],
             )
             return _UNIT_SWITCH_STORED_MALFORMED
-        if stored.get("key_binding") != _key_binding(ctx.key_row["id"]):
+        if stored.get("key_binding") != _key_binding(
+            ctx.key_row["id"], allocator_id if is_key_mode else strategy_id
+        ):
             # R2-05: the strategy was re-pointed to another key, so the record says nothing about
             # this one: the switch is derived from scratch, with no refusal.
             return None
@@ -11871,7 +11876,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # the FINAL ``returns`` (after the marks), the USD segment through S.
             _key_inputs_payload["unit_segments"] = _unit_segments_payload(
                 _unit_switch, _switched, returns, _stored_segments, _stored_usd_rows,
-                api_key_id=api_key_id,
+                api_key_id=api_key_id, binding_scope=allocator_id,
             )
         if _realized_terminal is not None:
             # CR-01: the writer's own terminal, on its own day. The compose rolls the
@@ -12852,7 +12857,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     _unit_segments_record = (
         _unit_segments_payload(
             _unit_switch, _switched, returns, _stored_segments, _stored_usd_rows,
-            api_key_id=ctx.key_row["id"],
+            api_key_id=ctx.key_row["id"], binding_scope=strategy_id,
         )
         if _unit_switch is not None and _switched is not None
         else None
