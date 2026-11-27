@@ -855,3 +855,63 @@ def test_main_refuses_without_a_strategy_id(capsys: Any) -> None:
         nb.main([])
     assert exc.value.code != 0
     assert asyncio.iscoroutinefunction(nb.run)
+
+
+# ---------------------------------------------------------------------------
+# Phase 252 plan 07 (gap G252-PROBE-M3): the three smoothed-only refusals join the build-error
+# allow-list. Red means a PROD navbreach or smoothed-probe reading names them ``other`` again.
+# ---------------------------------------------------------------------------
+
+
+def _real_refusal(which: str) -> BaseException:
+    """The REAL exception, with its real message, from the function that raises it."""
+    from services.deribit_txn import option_mtm_daily, replay_option_positions
+
+    instr = "BTC-17JAN26-50000-P"
+    opening = {
+        "type": "trade", "instrument_name": instr, "currency": "BTC", "change": -0.04,
+        "commission": 0.01, "position": 1.0, "timestamp": 1768435200000, "id": 11,
+    }
+    closing = {
+        "type": "expiry", "instrument_name": instr, "currency": "BTC", "change": 0.0,
+        "timestamp": 1768640000000, "id": 12,
+    }
+    try:
+        if which == "hole":
+            positions = {
+                instr: {
+                    "currency": "BTC", "first_day": "2026-01-15", "last_day": "2026-01-17",
+                    "positions": {"2026-01-15": 1.0, "2026-01-17": 0.0},
+                }
+            }
+            option_mtm_daily(positions, {})
+        elif which == "exercise":
+            replay_option_positions([opening, {**closing, "type": "exercise"}])
+        elif which == "expiry-position":
+            replay_option_positions([opening, {**closing, "position": -1.0}])
+        else:
+            replay_option_positions([opening, {**closing, "change": 0.002}])
+    except Exception as exc:  # noqa: BLE001 - returned, the caller asserts its class
+        return exc
+    raise AssertionError("the refusal did not fire")
+
+
+@pytest.mark.parametrize(
+    ("which", "cls_name", "detail"),
+    [
+        ("hole", "OptionMarkHoleError", "OptionMarkHoleError:position"),
+        ("exercise", "OptionExerciseRowError", "OptionExerciseRowError:position"),
+        ("expiry-position", "OptionExpiryRowError", "OptionExpiryRowError:position"),
+        ("expiry-cash", "OptionExpiryRowError", "OptionExpiryRowError"),
+    ],
+)
+async def test_each_smoothed_only_refusal_emits_its_own_class(
+    monkeypatch: Any, which: str, cls_name: str, detail: str
+) -> None:
+    exc = _real_refusal(which)
+    assert type(exc).__name__ == cls_name
+    rec = await _live_record_with_build_error(monkeypatch, exc)
+    assert rec["ledger"] == f"build-error:{cls_name}"
+    assert rec["ledger_error_detail"] == detail
+    assert rec["gate_today"] == "not-run"
+    nb.emit_record(rec)  # the class and the detail pass the emitter's own whitelist

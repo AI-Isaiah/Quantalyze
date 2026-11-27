@@ -1310,3 +1310,242 @@ def test_acceptance_D_sparse_mark_hole_fails_loud_naming_instrument_day(
         )
     msg = str(exc.value)
     assert _D_INSTR in msg and "2026-01-16" in msg
+
+
+# ===========================================================================
+# Phase 252 plan 07 (gap G252-PROBE-M3) — the three smoothed-only refusals each raise their
+# own LedgerValuationError subclass with closed attributes, and NO consumer moves.
+#
+# Why these pins exist (Rule 9): the subclasses are a diagnostic. The founder decision of
+# 2026-11-26 forbids changing what refuses, so every case below is either a characterization
+# of an unchanged byte (message, hierarchy, which basis can reach the class) or a rule of the
+# new words. Each was seen red under a neutered copy (PROOF-01 in the plan-07 SUMMARY).
+# ===========================================================================
+
+from datetime import date as _date, timedelta as _timedelta  # noqa: E402
+
+from services.deribit_txn import (  # noqa: E402 - appended after the plan-07 comment block
+    HOLE_VS_MARKS_WORDS,
+    HOLE_VS_RETENTION_WORDS,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
+    OptionMarkHoleError,
+    OptionRowFieldMissingError,
+    option_mtm_daily,
+    replay_option_positions,
+)
+
+_NEW_REFUSALS = (OptionMarkHoleError, OptionExerciseRowError, OptionExpiryRowError)
+_HOLE_I = "BTC-30JUN23-30000-C"
+
+
+def _shift_day(day: str, n: int) -> str:
+    return (_date.fromisoformat(day) + _timedelta(days=n)).isoformat()
+
+
+def _hand_positions() -> dict[str, dict[str, Any]]:
+    """One BTC option held 06-20 .. 06-22 and flat from 06-23."""
+    return {
+        _HOLE_I: {
+            "currency": "BTC",
+            "first_day": "2023-06-20",
+            "last_day": "2023-06-23",
+            "positions": {"2023-06-20": 1.0, "2023-06-23": 0.0},
+        }
+    }
+
+
+def _hole_message(day: str) -> str:
+    return (
+        f"option daily-MTM hole: instrument={_HOLE_I} carries a nonzero "
+        f"position on {day} but has NO daily mark (bar) — refusing to "
+        "interpolate or fall back to the session lump (D-07: a missing "
+        "bar inside a listed instrument's life is structural, fail loud)"
+    )
+
+
+# side -> (marks, the earliest missing day the guard names)
+_HOLE_SIDES: dict[str, tuple[dict[str, float], str]] = {
+    "no-marks": ({}, "2023-06-20"),
+    "before-first-bar": ({"2023-06-22": 0.02}, "2023-06-20"),
+    "between-bars": ({"2023-06-20": 0.01, "2023-06-22": 0.02}, "2023-06-21"),
+    "after-last-bar": ({"2023-06-20": 0.01, "2023-06-21": 0.02}, "2023-06-22"),
+}
+
+
+@pytest.mark.parametrize("side", sorted(_HOLE_SIDES))
+@pytest.mark.parametrize(
+    "cutoff_offset,expected",
+    [(None, "unknown"), (1, "older"), (0, "not-older"), (-1, "not-older")],
+    ids=["no-cutoff", "cutoff-after-day", "cutoff-equals-day", "cutoff-before-day"],
+)
+def test_hole_words_by_side_and_strict_earlier_retention(
+    side: str, cutoff_offset: int | None, expected: str
+) -> None:
+    """The side rule and the strict-earlier retention rule, on hand-built marks. The cutoff
+    EQUAL to the missing day must read ``not-older`` (strictly earlier only): a ``<=`` would
+    call a day on the horizon a straddler and send the founder a wrong question. The message
+    is the unchanged D-07 text in every case."""
+    marks, day = _HOLE_SIDES[side]
+    cutoff = None if cutoff_offset is None else _shift_day(day, cutoff_offset)
+    with pytest.raises(OptionMarkHoleError) as caught:
+        option_mtm_daily(
+            _hand_positions(), {_HOLE_I: marks} if marks else {}, retention_cutoff=cutoff
+        )
+    exc = caught.value
+    assert (exc.vs_marks, exc.vs_retention) == (side, expected)
+    assert exc.vs_marks in HOLE_VS_MARKS_WORDS and exc.vs_retention in HOLE_VS_RETENTION_WORDS
+    assert str(exc) == _hole_message(day)
+    assert exc.args == (_hole_message(day),)
+
+
+def _straddler_rows(*, first_mark_day: str) -> tuple[list[dict[str, Any]], dict[str, dict[str, float]]]:
+    rows = [
+        _opt_row(instrument=_PRE_RET_INSTR, day="2023-06-20", change=-0.01, position=1.0, id=1),
+        _opt_row(
+            instrument=_PRE_RET_INSTR, day="2023-06-22", change=0.0, position=0.0, id=2,
+            type="delivery",
+        ),
+    ]
+    return rows, {_PRE_RET_INSTR: {first_mark_day: 0.02}}
+
+
+@pytest.mark.parametrize(
+    "retention_days,expected", [("1", "older"), ("100000", "not-older")]
+)
+def test_the_ingest_hands_its_own_hard_cutoff_to_the_hole_guard(
+    monkeypatch: Any, retention_days: str, expected: str
+) -> None:
+    """``_build_smoothed_option_mtm`` passes the hard retention cutoff it computes, so a
+    straddler's head hole reads ``older`` and the same rows with the horizon pushed back read
+    ``not-older``, whatever today's date is. Red (``unknown``) means the cutoff stopped
+    travelling and a PROD reading can no longer separate a straddler from another hole."""
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", retention_days)
+    rows, charts = _straddler_rows(first_mark_day="2023-06-21")  # 06-20 is the head hole
+    with pytest.raises(OptionMarkHoleError) as caught:
+        _run_options_ledger(
+            monkeypatch,
+            btc_rows=rows,
+            summaries=[{"currency": "BTC", "equity": -0.01, "session_upl": 0.0, "options_value": 0.0}],
+            charts=charts,
+            pnl_basis="smoothed_mtm",
+        )
+    assert (caught.value.vs_marks, caught.value.vs_retention) == ("before-first-bar", expected)
+
+
+@pytest.mark.parametrize("cls", _NEW_REFUSALS)
+def test_the_new_refusals_are_ledger_valuation_errors_but_not_field_missing_errors(
+    cls: type[Exception],
+) -> None:
+    """Subclassing ``OptionRowFieldMissingError`` would flip the mark_to_market second pass's
+    degrade reason to ``mtm_option_row_field_missing`` for a hole or a D-09 row. Subclassing
+    ``LedgerValuationError`` keeps every ``except LedgerValuationError`` and every
+    permanent-ledger-error tuple catching them."""
+    assert issubclass(cls, LedgerValuationError)
+    assert not issubclass(cls, OptionRowFieldMissingError)
+    assert cls.__mro__[1] is LedgerValuationError  # a DIRECT subclass, no intermediate base
+
+
+def _expiry(**overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "type": "expiry", "instrument_name": _HOLE_I, "currency": "BTC",
+        "change": 0.0, "timestamp": _mk_ms("2023-06-23", 8), "id": 2,
+    }
+    row.update(overrides)
+    return row
+
+
+def _long_open() -> dict[str, Any]:
+    return _opt_row(instrument=_HOLE_I, day="2023-06-20", change=-0.01, position=1.0, id=1)
+
+
+_EXERCISE_MSG = (
+    "option Deribit row id=2 type='exercise': the exercise row shape is unmeasured "
+    "(no census), so the smoothed option book cannot tell whether it closes the position; "
+    "refusing to guess (D-09)"
+)
+_EXPIRY_CASH_MSG = (
+    "option Deribit row id=2: expiry row carries nonzero cash — the documented "
+    "out-of-the-money expiry is zero-cash, so this shape is unobserved; refusing to guess (D-09)"
+)
+_EXPIRY_POSITION_MSG = (
+    "option Deribit row id=2: expiry row carries a nonzero position — an expired option is "
+    "no longer held, so this shape is unobserved; refusing to guess (D-09)"
+)
+_EXPIRY_NON_NUMERIC_MSG = "Deribit row id=2 type='expiry' has a non-numeric position 'abc'"
+
+
+@pytest.mark.parametrize(
+    "extra,cls,message",
+    [
+        ({"type": "exercise"}, OptionExerciseRowError, _EXERCISE_MSG),
+        ({"change": 0.002}, OptionExpiryRowError, _EXPIRY_CASH_MSG),
+        ({"position": -1.0}, OptionExpiryRowError, _EXPIRY_POSITION_MSG),
+        ({"position": "abc"}, OptionExpiryRowError, _EXPIRY_NON_NUMERIC_MSG),
+    ],
+    ids=["exercise", "expiry-cash", "expiry-position", "expiry-non-numeric"],
+)
+def test_the_row_refusals_keep_their_exact_message_bytes(
+    extra: dict[str, Any], cls: type[Exception], message: str
+) -> None:
+    """The job worker stores ``scrub_freeform_string(str(exc))`` as the strategy's error detail
+    and the composite arm stamps it as the member failure, so these bytes are a stored string.
+    Red means a stored detail changed under a diagnostic-only plan."""
+    with pytest.raises(cls) as caught:
+        replay_option_positions([_long_open(), _expiry(**extra)])
+    assert str(caught.value) == message
+    assert caught.value.args == (message,)
+
+
+def test_the_hole_keeps_its_exact_message_bytes_through_the_real_build(monkeypatch: Any) -> None:
+    rows, charts = _straddler_rows(first_mark_day="2023-06-21")
+    with pytest.raises(OptionMarkHoleError) as caught:
+        _run_options_ledger(
+            monkeypatch, btc_rows=rows,
+            summaries=[{"currency": "BTC", "equity": -0.01, "session_upl": 0.0, "options_value": 0.0}],
+            charts=charts, pnl_basis="smoothed_mtm",
+        )
+    assert str(caught.value) == _hole_message("2023-06-20").replace(_HOLE_I, _PRE_RET_INSTR)
+
+
+def _cross_basis_cases() -> dict[str, tuple[list[dict[str, Any]], dict[str, dict[str, float]], type[Exception]]]:
+    straddler, straddler_charts = _straddler_rows(first_mark_day="2023-06-21")
+    return {
+        "hole": (straddler, straddler_charts, OptionMarkHoleError),
+        "exercise": ([_long_open(), _expiry(type="exercise")], {}, OptionExerciseRowError),
+        "expiry": ([_long_open(), _expiry(position=-1.0)], {}, OptionExpiryRowError),
+    }
+
+
+@pytest.mark.parametrize("case", ["hole", "exercise", "expiry"])
+@pytest.mark.parametrize("basis", ["cash_settlement", "mark_to_market"])
+def test_only_the_smoothed_basis_can_raise_the_new_refusals(
+    monkeypatch: Any, case: str, basis: str
+) -> None:
+    """The consumers keyed on a class NAME (``refusal_class`` stored by the job worker's
+    permanent arm, ``nav_twin_error`` on the report) run on the cash and mark_to_market bases.
+    What keeps the three classes off those paths is the ``pnl_basis == smoothed`` gate in
+    ``_assemble_deribit_native_ledger``. Each of these row sets either builds or raises
+    something that is NOT one of the three; the smoothed control (next test) proves the same
+    rows DO raise the class, so this cannot pass because the fixture never reached the guard."""
+    rows, charts, _expected = _cross_basis_cases()[case]
+    summaries = [{"currency": "BTC", "equity": -0.01, "session_upl": 0.0, "options_value": 0.0}]
+    try:
+        _run_options_ledger(
+            monkeypatch, btc_rows=rows, summaries=summaries, charts=charts, pnl_basis=basis
+        )
+    except Exception as exc:  # noqa: BLE001 - the TYPE is the assertion
+        assert not isinstance(exc, _NEW_REFUSALS), type(exc).__name__
+
+
+@pytest.mark.parametrize("case", ["hole", "exercise", "expiry"])
+def test_the_smoothed_control_raises_each_new_refusal_on_the_same_rows(
+    monkeypatch: Any, case: str
+) -> None:
+    rows, charts, expected = _cross_basis_cases()[case]
+    summaries = [{"currency": "BTC", "equity": -0.01, "session_upl": 0.0, "options_value": 0.0}]
+    with pytest.raises(expected):
+        _run_options_ledger(
+            monkeypatch, btc_rows=rows, summaries=summaries, charts=charts,
+            pnl_basis="smoothed_mtm",
+        )
