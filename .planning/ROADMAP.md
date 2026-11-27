@@ -986,7 +986,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, the retired compute_analytics enqueue and kind rows, and inert plumbing, with a migration; the poll_positions enqueue stays live (F-8)
 - [ ] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
 - [ ] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
-- [ ] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
+- [x] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
 - [ ] **Phase 245: ALERTPAGE — an MT5 outage pages once, recovers once and closes once, and every paging failure is loud** - Python paging path: episode lifecycle on a fake clock, honest Sentry credit, inline close budget, ERROR-level failures
 - [ ] **Phase 246: ALERTREADERS — every alert reader sees every row, reports its own delivery failure and pages per account** - S5 readers re-based on the narrowed body: pg_net delivery, scrub reader, per-account sync paging, match-engine cron signal
 - [ ] **Phase 247: SENTRYHELD — a failing anonymous read reports exactly once, and the landing page at most once per window** - Caller-only; ordered after SENTRYSCRUB2
@@ -1302,7 +1302,7 @@ Plans:
 | 224. DEADLEFTOVERS | 0/? | Planned for v1.23 | - |
 | 242. SECRETSHYGIENE | 0/? | Planned for v1.23 | - |
 | 243. DBBACKSTOP | 0/? | Planned for v1.23 | - |
-| 244. ACCESSGUARDS | 0/? | Planned for v1.23 | - |
+| 244. ACCESSGUARDS | 4/4 | Complete (shipped v0.133.102.0, #1391; verification passed, SC-1 met as narrowed by founder decision 2026-11-27; SECURITY 0 open) | 2026-11-27 |
 | 245. ALERTPAGE | 0/? | Planned for v1.23 | - |
 | 246. ALERTREADERS | 0/? | Planned for v1.23 | - |
 | 247. SENTRYHELD | 0/? | Planned for v1.23 | - |

@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.103.1] - 2026-11-27 — records: Phase 244 ACCESSGUARDS closed, verification passed, SC-1 met as narrowed by founder decision
+
+This is a records PR. It has no source, test, workflow or migration change.
+
+### Changed
+- Phase 244 ACCESSGUARDS closes with `244-VERIFICATION.md` at `passed` (4/4, SC-1 by founder override). It carries `verified_at_sha` and `drift_subjects`, and neither `covered_digest` nor `covered_files`. `244-SECURITY.md` has 0 open threats.
+- The phase directory lands on `main` for the first time: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, the four PLANs and SUMMARYs, REVIEW, SECURITY and VERIFICATION.
+- ROADMAP ticks Phase 244 (4/4) and carries both founder rulings: SC-1 "Accept as narrowed" (2026-11-27) and the DBACC-05 exemption ruling "Approve as proposed" (2026-11-26). REQUIREMENTS marks DBACC-04 to DBACC-06 complete, with DBACC-04 annotated as met as narrowed.
+- `phase complete 244` was run and its output reverted: it only reads the current milestone, so it rewrote STATE's Current Position to another phase and flipped unrelated `state.json` statuses, and it left the v1.23 ROADMAP rows untouched. The close is hand-edited instead.
+
+### Notes
+- **Correction to v0.133.102.0, which says "SC-1 is met as narrowed, pending the founder's ruling."** The founder ruled on 2026-11-27, "Accept as narrowed". SC-1 is met as narrowed: the compile guard (a public row cannot pass as `Strategy`) plus the blocking CI source-scan pin and its cast-site census. Owner reads typed by casts are held by the pin, not by the compiler. The shared StrategyTable/StrategyGrid optional-key remainder stays on `TODOS.md` `170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD`. The v0.133.102.0 entry is left as written.
+- No `TODOS.md` entry was closed by this PR, so none is deleted.
 ## [0.133.103.0] - 2026-11-27 — Phase 221 SENTRYSCRUB2: no Sentry event carries PostgREST details or hint, and browser captures actually report
 
 ### Why
