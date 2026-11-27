@@ -34,6 +34,18 @@ drift_subjects:
   - analytics-service/scripts/deribit_options_smoothed_probe.py
   - analytics-service/tests/test_deribit_options_smoothed_probe.py
 gaps:
+  - id: G252-MTM-PROMOTION
+    truth: "Wave 2 promotion: once the read-only probe passes (it did, 2026-11-27 18:36Z, verdict pass, 3/3 members), the headline of the evidence composite switches to market-price valuation (the smoothed mark-to-market basis), per the 2026-11-25 founder ruling 'Then measure market-price valuation and switch the headline to it only if it actually works for these keys.' A composite whose smoothed basis does not compute keeps the named withhold."
+    status: failed
+    reason: "The probe pass is recorded, but no code path yet makes the smoothed basis the composite's headline. On PROD the composite smoothed third pass is dark behind SMOOTHED_MTM_ENABLED and has never stored a smoothed_mtm row; the composite stamps mtm_gated_reason unsmoothed_options_book and every surface withholds the headline."
+    artifacts:
+      - analytics-service/services/job_worker.py (run_stitch_composite_job, smoothed third pass 6b)
+      - analytics-service/services/stitch_composite.py (mark_to_market_available, smoothed_mtm_available, MTM_REASON_OPTIONS)
+      - src/lib/factsheet/headline-basis.ts (isOptionsCashWalletBook, headlineVerdict)
+    missing:
+      - "The composite stitch persists the smoothed mark-to-market series and scalars as the composite's headline when every options member's smoothed build computes, and the row says so in a stored marker the read path can check; otherwise the cash headline stays withheld under the existing named reason."
+      - "Every surface that honours the wave-1 withhold reads the promoted headline for a promoted row and keeps withholding an unpromoted one."
+      - "After deploy, the two flagged composites are re-stitched through the product's own job (never a backfill UPDATE), and the moved figures are listed in the CHANGELOG (SC-5)."
   - id: G252-PROBE-M3
     truth: "Wave 2: the smoothed mark-to-market reconstruction computes for every Deribit member of the evidence composite, so the read-only probe reads verdict pass (founder decision 2026-11-26: fix inside 252, keep 252 open until the probe passes)."
     status: closed
