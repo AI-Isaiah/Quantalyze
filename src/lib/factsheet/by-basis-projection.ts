@@ -2,7 +2,7 @@
  * Phase 243 (DBBACKSTOP) plan 03, DBACC-01 half (a) - the factsheet builder reads
  * `strategy_analytics.metrics_json_by_basis` as 21 NAMED `->` aliases, never as the whole column.
  *
- * Why (DBACC-01 / TODOS RANK-SPLAT-01): a basis object in that column carries whole series
+ * Why (DBACC-01; its TODOS entry RANK-SPLAT-01 was closed and deleted by Phase 243): a basis object in that column carries whole series
  * arrays, and the only values any reader of the factsheet payload needs are the seven headline
  * scalars per basis (`BASIS_KPI_MAP` in `basis-metrics.ts`) for each of the three bases. Reading
  * the column whole would hand every key the analytics writer ever adds to every signed-out

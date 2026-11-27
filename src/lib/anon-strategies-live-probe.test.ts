@@ -37,10 +37,12 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { STRATEGY_PUBLIC_COLUMNS } from "./constants";
 import { withPublishedOnly } from "./visibility";
+import { BY_BASIS_ALIASES } from "./factsheet/by-basis-projection";
 import {
   HAS_LIVE_DB,
   LIVE_DB_URL,
   createLiveAdminClient,
+  createTestApiKey,
   createTestUser,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
@@ -150,19 +152,14 @@ describe("anon strategies live probe - the real public readers as a signed-out v
     const admin = createLiveAdminClient();
     seeded.userId = await createTestUser(admin, `anonkeyid-${stamp}@test.sec`);
 
-    const { data: key, error: keyErr } = await admin
-      .from("api_keys")
-      .insert({
-        user_id: seeded.userId,
-        exchange: "binance",
-        label: "anonkeyid-probe",
-        api_key_encrypted: "ANONKEYID_PROBE_CIPHERTEXT",
-        dek_encrypted: "ANONKEYID_PROBE_DEK",
-      })
-      .select("id")
-      .single();
-    if (keyErr || !key) throw new Error(`seed api_keys: ${keyErr?.message}`);
-    seeded.apiKeyId = key.id;
+    // Phase 243 plan 09: the api_keys seed goes through the audited insert_api_key writer.
+    seeded.apiKeyId = await createTestApiKey(admin, {
+      userId: seeded.userId,
+      exchange: "binance",
+      label: "anonkeyid-probe",
+      apiKeyEncrypted: "ANONKEYID_PROBE_CIPHERTEXT",
+      dekEncrypted: "ANONKEYID_PROBE_DEK",
+    });
 
     const { data: cat, error: catErr } = await admin
       .from("discovery_categories")
@@ -218,6 +215,11 @@ describe("anon strategies live probe - the real public readers as a signed-out v
       max_drawdown: -(0.1 + i * 0.01),
       volatility: 0.2 + i * 0.01,
       cumulative_return: 0.3 + i * 0.05,
+      // Phase 243 plan 09: the primary row carries a NON-NULL metrics_json_by_basis, so an
+      // anon refusal of the column cannot pass for an empty read. (Peers keep it null.)
+      ...(i === 0
+        ? { metrics_json_by_basis: { cash_settlement: { sharpe: 1.5, cumulative_return: 0.31 } } }
+        : {}),
     }));
     const { error: analyticsErr } = await admin.from("strategy_analytics").insert(analyticsRows);
     if (analyticsErr) throw new Error(`seed strategy_analytics: ${analyticsErr.message}`);
@@ -453,6 +455,55 @@ describe("anon strategies live probe - the real public readers as a signed-out v
         .eq("name", `AnonKeyId Write ${stamp}`);
       expect(countErr).toBeNull();
       expect(count, "the anon INSERT arm must not have created a row").toBe(0);
+    },
+  );
+
+  // ---- Phase 243 DBBACKSTOP plan 09 (DBACC-01 half (b)): anon is refused
+  // strategy_analytics.metrics_json_by_basis and still reads every other column. ------
+  // The primary row's by_basis column is non-null (beforeAll), so a refusal cannot pass
+  // for an empty read. KNOWN LIMIT, deferred in CONTEXT `## Deferred Ideas`, not tested
+  // here: an AUTHENTICATED non-owner still reads the whole column of a published
+  // strategy, because authenticated keeps table-level SELECT.
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(r) anon selecting metrics_json_by_basis is refused by the GRANT layer (42501, permission denied for table strategy_analytics)",
+    async () => {
+      const { data, error } = await anonClient()
+        .from("strategy_analytics")
+        .select("metrics_json_by_basis")
+        .eq("strategy_id", seeded.strategyId!);
+      expect(error, "anon must be refused the whole column; data was returned").not.toBeNull();
+      expect(error!.code).toBe("42501");
+      expect(error!.message).toMatch(/permission denied for table strategy_analytics/);
+      expect(data).toBeNull();
+    },
+  );
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(s) anon selecting the payload builder's exact BY_BASIS_ALIASES projection is refused the same way",
+    async () => {
+      const { data, error } = await anonClient()
+        .from("strategy_analytics")
+        .select(BY_BASIS_ALIASES)
+        .eq("strategy_id", seeded.strategyId!);
+      expect(error, "anon must be refused the alias projection; data was returned").not.toBeNull();
+      expect(error!.code).toBe("42501");
+      expect(error!.message).toMatch(/permission denied for table strategy_analytics/);
+      expect(data).toBeNull();
+    },
+  );
+
+  it.skipIf(!HAS_ANON_PROBE)(
+    "(t) anon still reads the other strategy_analytics columns of the published strategy",
+    async () => {
+      const { data, error } = await anonClient()
+        .from("strategy_analytics")
+        .select("strategy_id, sharpe, computed_at")
+        .eq("strategy_id", seeded.strategyId!);
+      expect(error, `anon read of the granted columns errored: ${error?.code} ${error?.message}`).toBeNull();
+      expect(data).toHaveLength(1);
+      expect(data![0].strategy_id).toBe(seeded.strategyId);
+      expect(data![0].sharpe).toBe(1);
     },
   );
 

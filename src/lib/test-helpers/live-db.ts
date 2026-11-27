@@ -66,6 +66,125 @@ export async function createTestUser(
   return data.user.id;
 }
 
+/** Options for {@link createTestApiKey}. Every `p_`-named writer argument is exposed. */
+export interface CreateTestApiKeyOptions {
+  /** Owner of the key (required). Immutable once written (DBACC-02). */
+  userId: string;
+  /** Default `"binance"`. */
+  exchange?: string;
+  /** Default `live-key-<epoch>`. */
+  label?: string;
+  /** Default a placeholder ciphertext literal. Never pass a real credential. */
+  apiKeyEncrypted?: string;
+  apiSecretEncrypted?: string;
+  dekEncrypted?: string;
+  kekVersion?: number;
+  venueAccountId?: string;
+  venueServer?: string;
+  /** Caller-chosen key id (the writer's `p_id`). */
+  id?: string;
+  /**
+   * Idempotent re-seed of `id`: when a row with that id already exists, skip the
+   * insert. Replaces `.upsert(..., { onConflict: "id" })`, which the PR-C
+   * BEFORE INSERT fence would refuse, because it fires on INSERT ... ON CONFLICT
+   * before conflict resolution. Requires `id`.
+   */
+  ifAbsent?: boolean;
+  /**
+   * Columns the writer does not take (`is_active`, `created_at`,
+   * `disconnected_at`, `sync_status`, `last_sync_at`, `account_balance_usdt`,
+   * ...), applied by a follow-up admin UPDATE. May not name `user_id` or `id`.
+   */
+  extras?: Record<string, unknown>;
+}
+
+/**
+ * Seed an `api_keys` row through the audited writer `insert_api_key` and return
+ * its id. Throws on failure, naming the step.
+ *
+ * Why (DBACC-02, founder decision 2026-11-26): the PR-C fence refuses any
+ * `api_keys` insert that is not the audited writer, `ON CONFLICT` upserts
+ * included, and `api_keys.user_id` is immutable. Live tests therefore seed
+ * through this one helper and never `.from("api_keys").insert` / `.upsert`.
+ *
+ * `insert_api_key` stamps `attested_venue = exchange`; a seed that needs it NULL
+ * passes `extras: { attested_venue: null }` (the fence guards INSERT only).
+ * Only call this inside an `it.skipIf(!HAS_LIVE_DB)` block with a client from
+ * {@link createLiveAdminClient}.
+ */
+export async function createTestApiKey(
+  admin: SupabaseClient,
+  opts: CreateTestApiKeyOptions,
+): Promise<string> {
+  const { extras } = opts;
+  if (extras && ("user_id" in extras || "id" in extras)) {
+    throw new Error(
+      "[createTestApiKey] extras may not set user_id or id (user_id is immutable, DBACC-02)",
+    );
+  }
+  if (opts.ifAbsent && !opts.id) {
+    throw new Error("[createTestApiKey] ifAbsent requires an id");
+  }
+
+  let id: string | undefined;
+  if (opts.ifAbsent) {
+    const { data: existing, error: lookupErr } = await admin
+      .from("api_keys")
+      .select("id, user_id")
+      .eq("id", opts.id!)
+      .maybeSingle();
+    if (lookupErr) {
+      throw new Error(
+        `[createTestApiKey] ifAbsent lookup of ${opts.id} failed: ${lookupErr.message}`,
+      );
+    }
+    if (existing) {
+      if (existing.user_id !== opts.userId) {
+        throw new Error(
+          `[createTestApiKey] api_keys ${opts.id} already exists under another user_id; ` +
+            "refusing to reuse it (user_id is immutable, DBACC-02)",
+        );
+      }
+      id = existing.id as string;
+    }
+  }
+
+  if (!id) {
+    const args: Record<string, unknown> = {
+      p_user_id: opts.userId,
+      p_exchange: opts.exchange ?? "binance",
+      p_label: opts.label ?? `live-key-${Date.now()}`,
+      p_api_key_encrypted: opts.apiKeyEncrypted ?? "test-encrypted-placeholder",
+      p_api_secret_encrypted: opts.apiSecretEncrypted,
+      p_dek_encrypted: opts.dekEncrypted,
+      p_kek_version: opts.kekVersion,
+      p_venue_account_id: opts.venueAccountId,
+      p_venue_server: opts.venueServer,
+      p_id: opts.id,
+    };
+    for (const k of Object.keys(args)) {
+      if (args[k] === undefined) delete args[k];
+    }
+    const { data, error } = await admin.rpc("insert_api_key", args);
+    if (error || !data) {
+      throw new Error(
+        `[createTestApiKey] insert_api_key RPC failed: ${error?.message ?? "no id returned"}`,
+      );
+    }
+    id = data as string;
+  }
+
+  if (extras && Object.keys(extras).length > 0) {
+    const { error } = await admin.from("api_keys").update(extras).eq("id", id);
+    if (error) {
+      throw new Error(
+        `[createTestApiKey] extras UPDATE of api_keys ${id} failed: ${error.message}`,
+      );
+    }
+  }
+  return id;
+}
+
 /**
  * Single live-DB test password convention (H-0038). Every live-DB test that
  * creates a user + signs in via `signInAsTestUser` shares this one constant

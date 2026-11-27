@@ -47,6 +47,7 @@ import {
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
@@ -316,20 +317,15 @@ describe("C39 / NEW-C39-01 — live-DB runtime: done_pending_children coexistenc
       // revoked/rate_limited — the previous `"ok"` was a third defect in the
       // same payload, invisible to the static census (a CHECK is not a column)
       // and a guaranteed 23514 the first time this insert ever executed.
-      const { data: apiKey, error: akErr } = await admin
-        .from("api_keys")
-        .insert({
-          user_id: userId,
-          exchange: "okx",
-          label: `c39test${ts}`,
-          api_key_encrypted: "test-encrypted-placeholder",
-          is_active: true,
-          sync_status: "idle",
-        })
-        .select("id")
-        .single<{ id: string }>();
-      expect(akErr, `insert api_key: ${akErr?.message}`).toBeNull();
-      const apiKeyId = apiKey!.id;
+      // Phase 243 DBACC-02: seeded through the audited writer. `is_active` is the
+      // table default (true); `sync_status` is not a writer argument, so it goes
+      // through the helper's follow-up UPDATE.
+      const apiKeyId = await createTestApiKey(admin, {
+        userId,
+        exchange: "okx",
+        label: `c39test${ts}`,
+        extras: { sync_status: "idle" },
+      });
       cleanupApiKeyIds.push(apiKeyId);
 
       // Seed the done_pending_children row for (kind=poll_allocator_positions, api_key_id).

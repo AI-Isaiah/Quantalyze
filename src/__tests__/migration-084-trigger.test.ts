@@ -45,6 +45,7 @@ import {
   HAS_INTROSPECTION,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   runIntrospectionSql,
   advertiseLiveDbSkipReason,
@@ -61,21 +62,13 @@ async function insertApiKey(
   userId: string,
   label: string,
 ): Promise<string> {
-  const { data, error } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: userId,
-      exchange: "binance",
-      label,
-      api_key_encrypted: "placeholder-key",
-      api_secret_encrypted: "placeholder-secret",
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`Failed to insert api_keys row (${label}): ${error?.message}`);
-  }
-  return data.id as string;
+  return createTestApiKey(admin, {
+    userId,
+    exchange: "binance",
+    label,
+    apiKeyEncrypted: "placeholder-key",
+    apiSecretEncrypted: "placeholder-secret",
+  });
 }
 
 // Read auth.users.raw_user_meta_data via the admin API. Returns the

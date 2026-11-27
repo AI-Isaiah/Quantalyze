@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.133.110.0] - 2026-11-27 — Phase 243 DBBACKSTOP PR-B: every api_keys writer goes through insert_api_key, and anon loses metrics_json_by_basis
+
+### Changed
+- **Key connect writes through the audited writer (DBACC-02, founder decision 2026-11-26).** `POST /api/keys/validate-and-encrypt`, the only production direct inserter of `api_keys`, now calls `admin.rpc("insert_api_key", ...)` (the service_role-only SECURITY DEFINER writer from PR-A, migration `20261127120100`). The owner is the `withAuth` session user, never a body value. Every encrypted column is passed as its `p_<column>` argument; the venue login and server are omitted (not sent as null) when the key is admitted over a failing holder. The route sends no attestation: the writer stamps `attested_venue` from `p_exchange`. The swap, the compensating delete and the success body use the uuid the writer returns. The 23505 venue-identity path still answers "already connected", because the writer has no exception handler and the constraint name survives PostgREST.
+- `insert_api_key` joins `MUTATING_RPC_NAMES` in `src/__tests__/audit-coverage.test.ts`, so the route's `@audit-skip: key connect` pragma is enforced; `src/lib/database.types.ts` gets the hand-kept `insert_api_key` entry.
+- **Every test and seed writer of `api_keys` moves to the same RPC**, so the PR-C INSERT fence breaks nothing:
+  - live-DB vitest: new `createTestApiKey` in `src/lib/test-helpers/live-db.ts` (extras through a follow-up UPDATE that refuses `user_id`/`id`, `p_id`, `ifAbsent`); fourteen live files migrated;
+  - e2e: new `insertApiKeyViaRpc` in `e2e/helpers/seed-test-project.ts` (all eight helper sites) plus `axe-app-wide`, `onboarding-funnel` and `reflow-sweep-authed`; the thrown error keeps PostgREST `code`/`details` so the sfox/mt5 23514 probes still work;
+  - `scripts/seed-full-app-demo.ts` (its `SEED_CONFIRM_STAGING` interlock and project-ref allowlist untouched), `tests/integration/mig-128-*` and `mig-129-*`, and four analytics-service live suites (`test_compute_jobs_fencing`, `test_flow_price_store_live`, `test_nav_marks_writer_live`, `test_trade_read_store_live`);
+  - `tests/integration/process-key-thin-adapters.test.ts`'s admin mock answers `insert_api_key`.
+  - Every seeded key is now attested (`attested_venue = exchange`), which is the production shape; `extras: { attested_venue: null }` is the opt-out, and no seed needed it.
+
+### Security
+- **anon loses SELECT on `strategy_analytics.metrics_json_by_basis` (DBACC-01 half (b)).** Migration `20261127220000_strategy_analytics_anon_column_revoke.sql` revokes anon's table-level SELECT, INSERT, UPDATE and DELETE and grants column SELECT on every other column, in one catalogue-only `DO` block that aborts the apply if the column is still readable, if anon lost any other column, or if authenticated/service_role privileges moved. Plan-level decision: anon's unused INSERT/UPDATE/DELETE are revoked in the same block. Ordering (O-1): PR-A moved the one anon reader (the OG route) to an admin read of the 21 named aliases and was confirmed live in Production (deployment `success`) before this migration was written. Manual rollback in `supabase/migrations/down/20261127220000-rollback.sql`.
+- New gate `supabase/tests/test_strategy_analytics_anon_grants.sql`, 7 twinned arms (column refused whole and by path, no table SELECT, every other column readable, no anon writes, authenticated/service_role kept), with pg-lane fixture `45-fixture-strategy-analytics-by-basis.sql` giving the lane PROD's table-level grants. `src/lib/anon-strategies-live-probe.test.ts` adds arms (r), (s), (t) as a signed-out visitor, and its `api_keys` seed moves to `createTestApiKey`.
+
+### Removed
+- `TODOS.md` `RANK-SPLAT-01` (the anon metrics surface was unbounded by construction) is closed and deleted: the column is now unreadable by anon and the factsheet reads named aliases. The comment in `src/lib/factsheet/by-basis-projection.ts` that pointed at it now says so.
+
+### Tests
+- `src/lib/insert-api-key-rpc-live.test.ts` (new, live lane): the writer returns a uuid and stamps `attested_venue`, normalises `venue_server`, answers 23505 naming `api_keys_user_exchange_venue_account_uniq`, refuses an authenticated caller, and honours `p_id`. The live-lane corpus is 51 files.
+- `route.test.ts`: all 65 recorded-insert assertions move to the writer's arguments with no weaker oracle, plus an arm that fails if a direct `api_keys` insert comes back (shown RED under a re-added insert, then restored by byte copy).
+- Censuses moved with dated CURRENCY comments, measured: on the tree merged with Phase 256's `unit_segments` gate: `FILES_FLOOR` 100 -> 101, `ARMS_FLOOR` 1119 -> 1126, `WAIVED_CEILING` 0; `ci.yml` `SENTINEL_FLOOR` 41 -> 42 and `ARMS_FLOOR` 620 -> 627; `--parse-only` `coverage: files 101/128`, `arms: 0/1126/0`; the gate's runner `arms: 7/7/0`, `biting: 7`.
+
+### Notes
+- Known limit, deferred in CONTEXT: an authenticated non-owner can still read the whole `metrics_json_by_basis` of a published strategy.
+- Cost recorded at decision time: a later migration that adds a `strategy_analytics` column must grant it to anon or list it in the gate's exemptions; GRANT 3 goes red otherwise.
+- Review: gsd-code-reviewer and silent-failure-hunter (two rounds), migration-reviewer and rls-policy-auditor found 0 MEDIUM+ code findings except one test-only MEDIUM (`createTestApiKey`'s `ifAbsent` reuse checks only `user_id`), booked in the phase review: the branch is unreachable today because every caller creates a fresh owner on a private lane.
+- Not proven by the lanes: `scripts/seed-full-app-demo.ts` was not run end to end (its allowlist refuses non-hosted URLs), the three e2e specs ran through the helper's lane proof rather than as browser specs, and `scenario-commit-rls`'s live arms skip without a dev server, as before.
+- Pre-existing and not fixed: `src/lib/factsheet/compute.conventions.test.ts` fixtures B and C fail identically on the base commit (frozen skew snapshot at the 13th-15th significant digit).
+- The migration was re-timed twice before merge to sort after the PROD ledger tip: planned `20261127120200`, then `20261127150000`, shipped `20261127220000` (after Phase 256's `20261127200000`, which adds `strategy_analytics.unit_segments`). Because the column grant is derived from `pg_attribute` at apply time, `unit_segments` stays anon-readable, which Phase 256's own gate arm 6 asserts; both gates pass on the local-stack lane with the two migrations in order.
+- PR-C (the `api_keys` INSERT fence, a `current_user` allow-list) follows once this PR is deployed.
+
 ## [0.133.109.2] - 2026-11-27 — BASELINE: automated re-dump (composed as 0.133.108.2, re-based onto main 90bde12a by hand) after the PROD apply of 588d8869
 
 ### Changed

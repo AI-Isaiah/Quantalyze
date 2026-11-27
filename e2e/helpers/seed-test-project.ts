@@ -63,6 +63,97 @@ function getAdmin(): SupabaseClient {
   });
 }
 
+/**
+ * Options for {@link insertApiKeyViaRpc}. The five required fields make every call
+ * site state its placeholder ciphertext, as the direct inserts it replaced did.
+ */
+export interface InsertApiKeyViaRpcOpts {
+  userId: string;
+  exchange: string;
+  label: string;
+  apiKeyEncrypted: string;
+  apiSecretEncrypted?: string;
+  venueAccountId?: string;
+  venueServer?: string;
+  kekVersion?: number;
+  /**
+   * Columns the writer does not take (`is_active`, `disconnected_at`, `sync_status`,
+   * `sync_error`, or `attested_venue: null` to keep a key unattested). Applied by a
+   * follow-up admin UPDATE. `id` and `user_id` are refused: a key never changes
+   * identity or owner.
+   */
+  extras?: Record<string, unknown>;
+}
+
+/**
+ * The one e2e seed path for an `api_keys` row (Phase 243 DBACC-02). The PR-C insert
+ * fence refuses every service_role INSERT that does not come through the audited
+ * writer `insert_api_key`, so no seed or spec may write the table directly.
+ *
+ * The writer stamps `attested_venue = exchange`; a direct insert left it NULL. A seed
+ * that must stay unattested passes `extras: { attested_venue: null }` (the fence guards
+ * INSERT only, and no trigger locks `attested_venue` on UPDATE).
+ *
+ * The client is a parameter, never built here: callers pass `getAdmin()`,
+ * `getCleanupAdmin()` or their own admin, so the not-prod URL and service-key asserts
+ * those carry run before any write.
+ *
+ * @returns the new key's id.
+ */
+export async function insertApiKeyViaRpc(
+  admin: SupabaseClient,
+  opts: InsertApiKeyViaRpcOpts,
+): Promise<string> {
+  if (opts.extras && ("user_id" in opts.extras || "id" in opts.extras)) {
+    throw new Error(
+      "[seed-test-project] insertApiKeyViaRpc: extras may not name user_id or id",
+    );
+  }
+  const params: Record<string, unknown> = {
+    p_user_id: opts.userId,
+    p_exchange: opts.exchange,
+    p_label: opts.label,
+    p_api_key_encrypted: opts.apiKeyEncrypted,
+  };
+  if (opts.apiSecretEncrypted !== undefined) params.p_api_secret_encrypted = opts.apiSecretEncrypted;
+  if (opts.venueAccountId !== undefined) params.p_venue_account_id = opts.venueAccountId;
+  if (opts.venueServer !== undefined) params.p_venue_server = opts.venueServer;
+  if (opts.kekVersion !== undefined) params.p_kek_version = opts.kekVersion;
+
+  const { data, error } = await admin.rpc("insert_api_key", params);
+  if (error) {
+    // Carry the PostgREST `code` and `details` on the thrown Error: the sfox and mt5
+    // seeds read them to tell a missing boundary-widen migration (23514) from any
+    // other failure.
+    throw Object.assign(
+      new Error(
+        `[seed-test-project] insertApiKeyViaRpc: insert_api_key failed: ${error.message}`,
+      ),
+      { code: error.code, details: error.details },
+    );
+  }
+  if (typeof data !== "string" || data.length === 0) {
+    throw new Error(
+      "[seed-test-project] insertApiKeyViaRpc: insert_api_key failed: no id returned",
+    );
+  }
+  if (opts.extras && Object.keys(opts.extras).length > 0) {
+    const { error: uErr } = await admin
+      .from("api_keys")
+      .update(opts.extras)
+      .eq("id", data);
+    if (uErr) {
+      // The caller never receives the id of a failed seed, so a half-applied row
+      // would leak: remove it (best effort) before throwing.
+      await admin.from("api_keys").delete().eq("id", data);
+      throw new Error(
+        `[seed-test-project] insertApiKeyViaRpc: extras update failed: ${uErr.message}`,
+      );
+    }
+  }
+  return data;
+}
+
 export interface SeededAllocator {
   userId: string;
   email: string;
@@ -452,20 +543,12 @@ export async function seedWizardDraft(opts: {
 
   // The key first — the draft references it. Same placeholder-ciphertext idiom
   // as seedAllocatorBook:645-652; no real credential is ever seeded.
-  const { data: key, error: kErr } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: opts.ownerUserId,
-      exchange: "binance",
-      label: `${prefix}key-${uniqueSuffix(6)}`,
-      api_key_encrypted: "e2e-placeholder-ciphertext",
-      is_active: true,
-    })
-    .select("id")
-    .single();
-  if (kErr || !key) {
-    throw new Error(`[seed] seedWizardDraft (api_key) failed: ${kErr?.message}`);
-  }
+  const keyId = await insertApiKeyViaRpc(admin, {
+    userId: opts.ownerUserId,
+    exchange: "binance",
+    label: `${prefix}key-${uniqueSuffix(6)}`,
+    apiKeyEncrypted: "e2e-placeholder-ciphertext",
+  });
 
   const name = `${prefix}${uniqueSuffix(6)}`;
   const { data: strategy, error: sErr } = await admin
@@ -475,7 +558,7 @@ export async function seedWizardDraft(opts: {
       name,
       status: "draft",
       source: "wizard",
-      api_key_id: key.id,
+      api_key_id: keyId,
       benchmark: "BTC",
       supported_exchanges: ["binance"],
       strategy_types: ["spot"],
@@ -490,7 +573,7 @@ export async function seedWizardDraft(opts: {
 
   return {
     strategyId: strategy.id as string,
-    apiKeyId: key.id as string,
+    apiKeyId: keyId,
     name,
   };
 }
@@ -876,28 +959,20 @@ export async function seedAllocatorBook(opts: {
   // 1. Active api_key (placeholder ciphertext — no DB-level validation trigger).
   // venue_account_id is set so plan 11's readiness does not hold the book in
   // account_identity_pending. The scrub trigger keeps a service-role value.
-  const { data: key, error: kErr } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: opts.allocatorUserId,
-      exchange: "binance",
-      label: `e2e-equitychart-book-${uniqueSuffix(6)}`,
-      api_key_encrypted: "e2e-placeholder-ciphertext",
-      is_active: true,
-      venue_account_id: `e2e-${uniqueSuffix(8)}`,
-    })
-    .select("id")
-    .single();
-  if (kErr || !key) {
-    throw new Error(`seedAllocatorBook (api_key) failed: ${kErr?.message}`);
-  }
+  const keyId = await insertApiKeyViaRpc(admin, {
+    userId: opts.allocatorUserId,
+    exchange: "binance",
+    label: `e2e-equitychart-book-${uniqueSuffix(6)}`,
+    apiKeyEncrypted: "e2e-placeholder-ciphertext",
+    venueAccountId: `e2e-${uniqueSuffix(8)}`,
+  });
 
   // 2. One spot holding so holdingsEmpty === false (clears the EmptyState gate).
   //    allocator_id MUST equal api_keys.user_id (owner-coherence trigger).
   const asofToday = new Date().toISOString().slice(0, 10);
   const { error: hErr } = await admin.from("allocator_holdings").insert({
     allocator_id: opts.allocatorUserId,
-    api_key_id: key.id,
+    api_key_id: keyId,
     venue: "binance",
     symbol: "BTC",
     asof: asofToday,
@@ -927,7 +1002,7 @@ export async function seedAllocatorBook(opts: {
       "WRAPPEDCHAINLINKLIQUIDSTAKINGYIELDVAULTRESERVESHARETOKENX4",
     ].map((symbol, i) => ({
       allocator_id: opts.allocatorUserId,
-      api_key_id: key.id,
+      api_key_id: keyId,
       venue: "binance",
       symbol,
       asof: asofToday,
@@ -944,7 +1019,7 @@ export async function seedAllocatorBook(opts: {
       ["AVAXUSDT250926P000045QUARTERLYFUTURESCONTRACTSHARETOKENRESERVEX4", "short"],
     ].map(([symbol, side], i) => ({
       allocator_id: opts.allocatorUserId,
-      api_key_id: key.id,
+      api_key_id: keyId,
       venue: "binance",
       symbol,
       asof: asofToday,
@@ -1015,7 +1090,7 @@ export async function seedAllocatorBook(opts: {
     );
   }
 
-  return { apiKeyId: key.id };
+  return { apiKeyId: keyId };
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,21 +1310,17 @@ export async function seedCompositeStrategy(opts?: {
   const memberLabels: string[] = [];
   for (const w of COMPOSITE_WINDOWS) {
     const label = `e2e-composite-key-${w.seq}-${uniqueSuffix(6)}`;
-    const { data: key, error: kErr } = await admin
-      .from("api_keys")
-      .insert({
-        user_id: ownerUserId,
-        exchange: "deribit",
-        label,
-        api_key_encrypted: "e2e-placeholder-ciphertext",
-        is_active: true,
-      })
-      .select("id")
-      .single();
-    if (kErr || !key) {
-      throw new Error(`[seed] seedCompositeStrategy (api_key seq ${w.seq}) failed: ${kErr?.message}`);
-    }
-    memberApiKeyIds.push(key.id as string);
+    const keyId = await insertApiKeyViaRpc(admin, {
+      userId: ownerUserId,
+      exchange: "deribit",
+      label,
+      apiKeyEncrypted: "e2e-placeholder-ciphertext",
+    }).catch((e: unknown) => {
+      throw new Error(
+        `[seed] seedCompositeStrategy (api_key seq ${w.seq}) failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    });
+    memberApiKeyIds.push(keyId);
     memberLabels.push(label);
   }
 
@@ -1578,24 +1649,20 @@ export async function seedSfoxVerifiedStrategy(opts?: {
   //    INSERT trigger rejects it; see seedAllocatorBook:600-610). Fail loud on
   //    the SFOX-04 miss (api_keys_exchange_check).
   const apiKeyLabel = `e2e-sfox-key-${uniqueSuffix(6)}`;
-  const { data: key, error: kErr } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: owner.userId,
-      exchange: "sfox",
-      label: apiKeyLabel,
-      api_key_encrypted: "e2e-placeholder-ciphertext",
-      is_active: true,
-    })
-    .select("id")
-    .single();
-  if (kErr || !key) {
+  // The helper's thrown Error carries the PostgREST code and details, so the
+  // boundary probe below sees what it saw on the direct insert.
+  const apiKeyId = await insertApiKeyViaRpc(admin, {
+    userId: owner.userId,
+    exchange: "sfox",
+    label: apiKeyLabel,
+    apiKeyEncrypted: "e2e-placeholder-ciphertext",
+  }).catch((e: unknown) => {
+    const kErr = e as { code?: string; message?: string; details?: string };
     if (isSfoxBoundaryViolation(kErr)) {
       throwSfoxPreconditionError("api_keys.exchange", kErr);
     }
-    throw new Error(`[seed] seedSfoxVerifiedStrategy (api_key) failed: ${kErr?.message}`);
-  }
-  const apiKeyId = key.id as string;
+    throw new Error(`[seed] seedSfoxVerifiedStrategy (api_key) failed: ${kErr.message}`);
+  });
 
   // 3. Published strategy owned by the owner, linked to the sfox key,
   //    source='sfox'. Deterministic 120d date window so the factsheet analytics
@@ -1776,24 +1843,18 @@ export async function seedMt5VerifiedStrategy(opts?: {
   // 2. mt5 api_keys row owned by the owner (placeholder ciphertext). Fail loud
   //    on the mt5 boundary-widen miss (api_keys_exchange_check).
   const apiKeyLabel = `e2e-mt5-key-${uniqueSuffix(6)}`;
-  const { data: key, error: kErr } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: owner.userId,
-      exchange: "mt5",
-      label: apiKeyLabel,
-      api_key_encrypted: "e2e-placeholder-ciphertext",
-      is_active: true,
-    })
-    .select("id")
-    .single();
-  if (kErr || !key) {
+  const apiKeyId = await insertApiKeyViaRpc(admin, {
+    userId: owner.userId,
+    exchange: "mt5",
+    label: apiKeyLabel,
+    apiKeyEncrypted: "e2e-placeholder-ciphertext",
+  }).catch((e: unknown) => {
+    const kErr = e as { code?: string; message?: string; details?: string };
     if (isMt5BoundaryViolation(kErr)) {
       throwMt5PreconditionError("api_keys.exchange", kErr);
     }
-    throw new Error(`[seed] seedMt5VerifiedStrategy (api_key) failed: ${kErr?.message}`);
-  }
-  const apiKeyId = key.id as string;
+    throw new Error(`[seed] seedMt5VerifiedStrategy (api_key) failed: ${kErr.message}`);
+  });
 
   // 3. Published strategy owned by the owner, linked to the mt5 key,
   //    source='mt5'. Deterministic 120d date window so the factsheet analytics
@@ -1954,47 +2015,38 @@ export async function seedManagerKeyPanel(opts?: {
   const createdKeyIds: string[] = [];
   let createdStrategyId: string | undefined;
   try {
-    const { data: linked, error: lErr } = await admin
-      .from("api_keys")
-      .insert({
-        user_id: manager.userId,
-        exchange: "binance",
-        label: linkedLabel,
-        api_key_encrypted: "e2e-placeholder-ciphertext",
-        is_active: true,
-        ...(opts?.linkedSyncStatus !== undefined
-          ? { sync_status: opts.linkedSyncStatus }
-          : {}),
-        ...(opts?.linkedSyncError !== undefined
-          ? { sync_error: opts.linkedSyncError }
-          : {}),
-      })
-      .select("id")
-      .single();
-    if (lErr || !linked) {
+    const linkedExtras: Record<string, unknown> = {
+      ...(opts?.linkedSyncStatus !== undefined
+        ? { sync_status: opts.linkedSyncStatus }
+        : {}),
+      ...(opts?.linkedSyncError !== undefined
+        ? { sync_error: opts.linkedSyncError }
+        : {}),
+    };
+    const linkedId = await insertApiKeyViaRpc(admin, {
+      userId: manager.userId,
+      exchange: "binance",
+      label: linkedLabel,
+      apiKeyEncrypted: "e2e-placeholder-ciphertext",
+      extras: linkedExtras,
+    }).catch((e: unknown) => {
       throw new Error(
-        `[seed] seedManagerKeyPanel (linked api_key) failed: ${lErr?.message ?? "no row"}`,
+        `[seed] seedManagerKeyPanel (linked api_key) failed: ${e instanceof Error ? e.message : String(e)}`,
       );
-    }
-    createdKeyIds.push(linked.id as string);
+    });
+    createdKeyIds.push(linkedId);
 
-    const { data: spare, error: spErr } = await admin
-      .from("api_keys")
-      .insert({
-        user_id: manager.userId,
-        exchange: "okx",
-        label: spareLabel,
-        api_key_encrypted: "e2e-placeholder-ciphertext",
-        is_active: true,
-      })
-      .select("id")
-      .single();
-    if (spErr || !spare) {
+    const spareId = await insertApiKeyViaRpc(admin, {
+      userId: manager.userId,
+      exchange: "okx",
+      label: spareLabel,
+      apiKeyEncrypted: "e2e-placeholder-ciphertext",
+    }).catch((e: unknown) => {
       throw new Error(
-        `[seed] seedManagerKeyPanel (spare api_key) failed: ${spErr?.message ?? "no row"}`,
+        `[seed] seedManagerKeyPanel (spare api_key) failed: ${e instanceof Error ? e.message : String(e)}`,
       );
-    }
-    createdKeyIds.push(spare.id as string);
+    });
+    createdKeyIds.push(spareId);
 
     const { data: strategy, error: sErr } = await admin
       .from("strategies")
@@ -2003,7 +2055,7 @@ export async function seedManagerKeyPanel(opts?: {
         name: strategyName,
         status: "private",
         source: "wizard",
-        api_key_id: linked.id,
+        api_key_id: linkedId,
         benchmark: "BTC",
         supported_exchanges: ["binance"],
         strategy_types: ["spot"],
@@ -2021,33 +2073,30 @@ export async function seedManagerKeyPanel(opts?: {
 
     let disconnectedKey: { id: string; label: string } | undefined;
     if (opts?.disconnectedLabel) {
-      const { data: gone, error: dErr } = await admin
-        .from("api_keys")
-        .insert({
-          user_id: manager.userId,
-          exchange: "bybit",
-          label: opts.disconnectedLabel,
-          api_key_encrypted: "e2e-placeholder-ciphertext",
+      const goneId = await insertApiKeyViaRpc(admin, {
+        userId: manager.userId,
+        exchange: "bybit",
+        label: opts.disconnectedLabel,
+        apiKeyEncrypted: "e2e-placeholder-ciphertext",
+        extras: {
           is_active: false,
           disconnected_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        })
-        .select("id")
-        .single();
-      if (dErr || !gone) {
+        },
+      }).catch((e: unknown) => {
         throw new Error(
-          `[seed] seedManagerKeyPanel (disconnected api_key) failed: ${dErr?.message ?? "no row"}`,
+          `[seed] seedManagerKeyPanel (disconnected api_key) failed: ${e instanceof Error ? e.message : String(e)}`,
         );
-      }
-      createdKeyIds.push(gone.id as string);
-      disconnectedKey = { id: gone.id as string, label: opts.disconnectedLabel };
+      });
+      createdKeyIds.push(goneId);
+      disconnectedKey = { id: goneId, label: opts.disconnectedLabel };
     }
 
     return {
       manager,
       strategyId: strategy.id as string,
       strategyName,
-      linkedKey: { id: linked.id as string, label: linkedLabel },
-      spareKey: { id: spare.id as string, label: spareLabel },
+      linkedKey: { id: linkedId, label: linkedLabel },
+      spareKey: { id: spareId, label: spareLabel },
       ...(disconnectedKey ? { disconnectedKey } : {}),
     };
   } catch (seedError) {

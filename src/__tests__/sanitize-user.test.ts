@@ -30,6 +30,7 @@ import {
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
@@ -49,21 +50,13 @@ async function seedApiKey(
   userId: string,
   label: string,
 ): Promise<string> {
-  const { data, error } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: userId,
-      exchange: "binance",
-      label,
-      api_key_encrypted: "ct",
-      dek_encrypted: "dct",
-    })
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`seedApiKey failed: ${error?.message}`);
-  }
-  return data.id;
+  return createTestApiKey(admin, {
+    userId,
+    exchange: "binance",
+    label,
+    apiKeyEncrypted: "ct",
+    dekEncrypted: "dct",
+  });
 }
 
 async function seedAuditRow(

@@ -64,6 +64,7 @@ import {
   HAS_INTROSPECTION,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   runIntrospectionSql,
   advertiseLiveDbSkipReason,
@@ -341,23 +342,17 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
         const ninetyOneDaysAgo = new Date(
           Date.now() - 91 * 24 * 60 * 60 * 1000,
         ).toISOString();
-        const { data: keyRow, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "rotation-probe",
-            api_key_encrypted: "ct",
-            dek_encrypted: "dct",
-            is_active: true,
-            created_at: ninetyOneDaysAgo,
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyRow) {
-          throw new Error(`api_keys seed: ${keyErr?.message}`);
-        }
-        cleanup.apiKeyIds.push(keyRow.id);
+        // is_active is the table default (true); the backdated created_at is not a
+        // writer argument, so it goes through the helper's follow-up UPDATE.
+        const keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "rotation-probe",
+          apiKeyEncrypted: "ct",
+          dekEncrypted: "dct",
+          extras: { created_at: ninetyOneDaysAgo },
+        });
+        cleanup.apiKeyIds.push(keyId);
 
         // Ensure the profile has an email (the cron joins on p.email).
         // createTestUser populates display_name; set email explicitly so
@@ -384,7 +379,7 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
             status: "queued",
             metadata: {
               user_id: userId,
-              api_key_id: keyRow.id,
+              api_key_id: keyId,
               exchange: "binance",
               created_at: ninetyOneDaysAgo,
             },
@@ -411,7 +406,7 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
         expect(row.recipient_email).toBe(userEmail);
         const meta = row.metadata as Record<string, unknown>;
         expect(meta.user_id).toBe(userId);
-        expect(meta.api_key_id).toBe(keyRow.id);
+        expect(meta.api_key_id).toBe(keyId);
         expect(meta.exchange).toBe("binance");
       } finally {
         for (const id of cleanup.dispatchIds) {
@@ -457,21 +452,17 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
         const ninetyOneDaysAgo = new Date(
           Date.now() - 91 * 24 * 60 * 60 * 1000,
         ).toISOString();
-        const { data: keyRow, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "rotation-dedup-probe",
-            api_key_encrypted: "ct",
-            dek_encrypted: "dct",
-            is_active: true,
-            created_at: ninetyOneDaysAgo,
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyRow) throw new Error(`api_keys: ${keyErr?.message}`);
-        cleanup.apiKeyIds.push(keyRow.id);
+        // is_active is the table default (true); the backdated created_at is not a
+        // writer argument, so it goes through the helper's follow-up UPDATE.
+        const keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "rotation-dedup-probe",
+          apiKeyEncrypted: "ct",
+          dekEncrypted: "dct",
+          extras: { created_at: ninetyOneDaysAgo },
+        });
+        cleanup.apiKeyIds.push(keyId);
 
         // Seed a reminder dispatch that is 5 days old — within the 60d
         // dedup window.
@@ -582,21 +573,17 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
         const ninetyOneDaysAgo = new Date(
           Date.now() - 91 * 24 * 60 * 60 * 1000,
         ).toISOString();
-        const { data: keyRow, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "rotation-fire-probe",
-            api_key_encrypted: "ct",
-            dek_encrypted: "dct",
-            is_active: true,
-            created_at: ninetyOneDaysAgo,
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyRow) throw new Error(`api_keys: ${keyErr?.message}`);
-        cleanup.apiKeyIds.push(keyRow.id);
+        // is_active is the table default (true); the backdated created_at is not a
+        // writer argument, so it goes through the helper's follow-up UPDATE.
+        const keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "rotation-fire-probe",
+          apiKeyEncrypted: "ct",
+          dekEncrypted: "dct",
+          extras: { created_at: ninetyOneDaysAgo },
+        });
+        cleanup.apiKeyIds.push(keyId);
 
         const body = await fetchRegisteredCommand("api_key_rotation_reminder");
         if (body === null) {
@@ -679,21 +666,17 @@ describe("Migration 056 — api_key_rotation_reminder capture semantics", () => 
         const ninetyOneDaysAgo = new Date(
           Date.now() - 91 * 24 * 60 * 60 * 1000,
         ).toISOString();
-        const { data: keyRow, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "rotation-dedup-fire-probe",
-            api_key_encrypted: "ct",
-            dek_encrypted: "dct",
-            is_active: true,
-            created_at: ninetyOneDaysAgo,
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyRow) throw new Error(`api_keys: ${keyErr?.message}`);
-        cleanup.apiKeyIds.push(keyRow.id);
+        // is_active is the table default (true); the backdated created_at is not a
+        // writer argument, so it goes through the helper's follow-up UPDATE.
+        const keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "rotation-dedup-fire-probe",
+          apiKeyEncrypted: "ct",
+          dekEncrypted: "dct",
+          extras: { created_at: ninetyOneDaysAgo },
+        });
+        cleanup.apiKeyIds.push(keyId);
 
         // Seed ONE reminder 5 days ago — inside the 60d dedup window.
         const fiveDaysAgo = new Date(

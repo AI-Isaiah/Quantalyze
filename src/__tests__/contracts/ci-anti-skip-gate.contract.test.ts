@@ -333,7 +333,12 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     // test_enqueue_poll_positions_cohort.sql gained arms P8 and P9 and now declares `ALL 9 ARMS
     // EXECUTED`, so only test_sync_status_curated_sentence_survives.sql still prints the "ALL 7"
     // text. MEASURED: this arm read `expected 1 to be 2` once the cohort gate gained its arms.
-    expect(okCount).toBe(1);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09): a SECOND checked file now shares the text,
+    // test_strategy_analytics_anon_grants.sql (`ALL 7 ARMS EXECUTED`, an ordinary sql-tests gate: anon cannot
+    // read strategy_analytics.metrics_json_by_basis, migration 20261127220000), so the sharers are it and
+    // test_sync_status_curated_sentence_survives.sql. MEASURED: this arm read `expected 2 to be 1` once the
+    // new gate joined the derivation table.
+    expect(okCount).toBe(2);
     expect(out).toContain(
       "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
     );
