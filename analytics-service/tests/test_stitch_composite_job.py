@@ -5515,8 +5515,28 @@ async def _g252_transient_read_build(exchange: Any, *, account_state: Any, pnl_b
     return (_stub_ledger(), _G252_OPT_REPORT)
 
 
+async def _g252_network_error_build(exchange: Any, *, account_state: Any, pnl_basis: str,
+                                    exclude_spot_extraction: bool,
+                                    nav_twin: bool = False) -> Any:
+    """The smoothed pass raises a raw ccxt.RequestTimeout (a NetworkError that is not a
+    RateLimitExceeded) that _reconstruct_all re-raises bare, as it does for a ccxt
+    member's smoothed re-crawl."""
+    import ccxt
+
+    if pnl_basis == "smoothed_mtm":
+        raise ccxt.RequestTimeout("smoothed re-crawl timed out")
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+_G252_LAST_ATTEMPT_BUILDS = {
+    "transient_dispatch_result": _g252_transient_build,
+    "escaping_transient_read": _g252_transient_read_build,
+    "escaping_ccxt_network_error": _g252_network_error_build,
+}
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exit_", ["transient_dispatch_result", "escaping_transient_read"])
+@pytest.mark.parametrize("exit_", list(_G252_LAST_ATTEMPT_BUILDS))
 async def test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_composite(
     exit_: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5524,16 +5544,13 @@ async def test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_compos
     additive (GLB-3), so on the job's LAST attempt a transient in its pass (a returned
     transient DispatchResult, or a DeribitTransientReadError escaping the marks fetch)
     DEGRADES: the cash composite ships DONE with the named withhold and no headline_basis,
-    instead of the job ending failed_final over a healthy cash headline. Earlier attempts
-    keep retrying (the T-252-27 test and the next one). If this goes red a rate-limit or a
+    instead of the job ending failed_final over a healthy cash headline. R2-WR-01 adds the
+    third exit: a raw ccxt.NetworkError (RequestTimeout) escaping a ccxt member's smoothed
+    re-crawl. Earlier attempts keep retrying (the T-252-27 test and the next one). If this goes red a rate-limit or a
     marks blip in the extra crawl stamps a healthy cash composite failed."""
-    build = (
-        _g252_transient_build if exit_ == "transient_dispatch_result"
-        else _g252_transient_read_build
-    )
     fake, result, _ = await _g252_run(
         monkeypatch,
-        build_side_effect=build,
+        build_side_effect=_G252_LAST_ATTEMPT_BUILDS[exit_],
         job_extra={"attempts": 3, "max_attempts": 3},
         extra_patches=[patch("services.job_worker._stamp_429", new=AsyncMock())],
     )
@@ -5562,6 +5579,99 @@ async def test_g252_escaping_transient_read_before_the_last_attempt_still_retrie
             build_side_effect=_g252_transient_read_build,
             job_extra={"attempts": 1, "max_attempts": 3},
         )
+
+
+@pytest.mark.asyncio
+async def test_g252_ccxt_network_error_before_the_last_attempt_still_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R2-WR-01: the widened degrade arm is last-attempt only. A raw ccxt.RequestTimeout
+    from the smoothed pass on attempt 1 of 3 still escapes so the worker retries. If this
+    goes red the arm swallows a network blip on every attempt."""
+    import ccxt
+
+    with pytest.raises(ccxt.RequestTimeout):
+        await _g252_run(
+            monkeypatch,
+            build_side_effect=_g252_network_error_build,
+            job_extra={"attempts": 1, "max_attempts": 3},
+        )
+
+
+async def _g252_run_divergent_member_sets(
+    job_extra: dict[str, Any],
+) -> tuple[_FakeSupabase, Any]:
+    """The smoothed pass degrades a different ccxt member set than the cash pass: seq 2
+    degrades in the cash pass and reconstructs in the smoothed re-crawl (same seam as
+    test_smoothed_cash_degraded_member_divergence_fails_transient)."""
+    from services.ccxt_flows import ccxt_rows_to_dated_flows as _real_flows
+
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    _flows_calls = {"n": 0}
+
+    def _flows_side_effect(rows: Any, *, venue: str, price_index: Any, **kw: Any) -> Any:
+        _flows_calls["n"] += 1
+        if _flows_calls["n"] == 1:
+            raise NavReconstructionError("cash-pass transient unpriceable flow")
+        return _real_flows(rows, venue=venue, price_index=price_index, **kw)
+
+    patches = _deribit_patches(
+        fake,
+        combine_returns=[(m1, {})],
+        has_option_activity=True,
+        preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+    ) + _ccxt_fetch_patches(
+        realized=_CCXT_REALIZED,
+        funding=_CCXT_FUNDING,
+    ) + [
+        patch(
+            "services.ccxt_flows.ccxt_rows_to_dated_flows",
+            new=MagicMock(side_effect=_flows_side_effect),
+        ),
+    ]
+    with _apply(patches):
+        result = await run_stitch_composite_job(
+            {"strategy_id": _STRATEGY_ID, **job_extra}
+        )
+    assert _flows_calls["n"] == 2  # the divergence really happened
+    return fake, result
+
+
+@pytest.mark.asyncio
+async def test_g252_divergent_member_sets_on_the_last_attempt_ship_the_cash_composite() -> None:
+    """R2-WR-01: the degraded-member-set divergence is a live-read race in the additive
+    smoothed pass. On the job's LAST attempt it DEGRADES: the cash composite ships DONE
+    with the named withhold, no headline_basis and no smoothed_mtm key, instead of the job
+    returning transient into failed_final over a healthy cash headline. If this goes red a
+    rare ccxt race sinks a healthy cash composite on its final attempt."""
+    fake, result = await _g252_run_divergent_member_sets(
+        {"attempts": 3, "max_attempts": 3}
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "headline_basis" not in dq
+    assert dq["mtm_gated_reason"] == MTM_REASON_OPTIONS
+    assert "smoothed_mtm" not in headline["metrics_json_by_basis"]
+
+
+@pytest.mark.asyncio
+async def test_g252_divergent_member_sets_before_the_last_attempt_still_return_transient() -> None:
+    """R2-WR-01: the divergence degrade is last-attempt only. On attempt 1 of 3 the job
+    still returns transient and persists nothing (a retry re-crawls both passes). If this
+    goes red the degrade fires on every attempt."""
+    fake, result = await _g252_run_divergent_member_sets(
+        {"attempts": 1, "max_attempts": 3}
+    )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message is not None and "diverge" in result.error_message
+    assert _headline_row(fake) is None
 
 
 @pytest.mark.asyncio

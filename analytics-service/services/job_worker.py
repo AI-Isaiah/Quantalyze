@@ -15006,11 +15006,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "cash/MTM composite unaffected: %s",
                     strategy_id, scrub_freeform_string(str(_sm_exc)),
                 )
-            except DeribitTransientReadError as _sm_exc:
-                # WR-01: a transient marks read escaping the smoothed pass. Retry on
-                # every attempt but the last; on the last, DEGRADE (smoothed_result
-                # None → not promoted → the cash headline plus unsmoothed_options_book)
-                # instead of failing the healthy cash composite.
+            except (DeribitTransientReadError, ccxt.NetworkError) as _sm_exc:
+                # WR-01 / R2-WR-01: a transient marks read, or a raw ccxt network error
+                # from a ccxt member's smoothed re-crawl, escaping the smoothed pass.
+                # Retry on every attempt but the last; on the last, DEGRADE
+                # (smoothed_result None → not promoted → the cash headline plus
+                # unsmoothed_options_book) instead of failing the healthy cash composite.
                 if not _smoothed_final_attempt:
                     raise
                 smoothed_result = None
@@ -15038,6 +15039,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 # (and re-converges), a permanent config error fails loud, exactly as
                 # the cash pass would on the same condition.
                 return smoothed_result
+        if smoothed_result is not None and _smoothed_final_attempt:
+            # R2-WR-01: on the LAST attempt a degraded-member-set divergence (a
+            # live-read race) degrades the additive smoothed object instead of
+            # returning transient below. Earlier attempts still return and retry.
+            if {int(d["seq"]) for d in smoothed_result[4]} != {
+                int(d["seq"]) for d in degraded_members
+            }:
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm pass degraded-member set "
+                    "diverges from the cash pass on the last attempt for strategy %s "
+                    "— degrading the additive smoothed object, cash composite "
+                    "unaffected",
+                    strategy_id,
+                )
+                smoothed_result = None
+                smoothed_member_metas = []
         if smoothed_result is not None:
             clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
                 smoothed_result
