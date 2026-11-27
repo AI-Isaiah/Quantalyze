@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.106.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 1863fe80
+## [0.133.107.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 1863fe80
 
 ### Changed
 - `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46036945243`, after the PROD apply of merge `1863fe80`: sha256 `b45cb90a…` → `d2beb328…`.
@@ -12,6 +12,27 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46036945243` succeeded, and this entry was composed by the `redump-pr` job. Run `46036945243` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.107.0] - 2026-11-27 — Phase 252 DERIBITOPTIONS plan 08: the measured Deribit exercise row closes an option in the smoothed book
+
+### Fixed
+- `replay_option_positions` (`services/deribit_txn.py`) used to refuse every Deribit option `exercise` row (D-09, 2026-09-26: shape unmeasured). That stopped the smoothed mark-to-market build for the evidence composite's member m3, whose PROD probe of 2026-11-27 measured an `exercise` row with zero change and a present position of zero, on an instrument with 18 trades and no other close row.
+- **Founder decision 2026-11-27 (partial reversal of D-09), verbatim "Accept measured shape only (Recommended)":** an `exercise` row is now accepted ONLY in that measured shape. It closes the option position to 0 on its UTC day through the existing position read, the way an `expiry` row does.
+- Every other exercise shape still raises `OptionExerciseRowError` with byte-identical message, attributes and census: a nonzero, absent or non-numeric change, or an absent, non-numeric or nonzero position.
+
+### Root cause
+- The long side of an in-the-money option expiry is logged as `exercise`. Deribit documents a transaction-log row's `position` as the updated position size after the transaction, so a zero position on that row states that the option closed. D-09 refused it only because no census of the shape existed. Phase 252 plan 07 (v0.133.101.0) produced that census on PROD.
+
+### Notes
+- `exercise` stays out of every type set (cash-bearing, event, informational, close), so the cash_settlement and mark_to_market twins and the summary cross-check are unchanged. A zero-change exercise adds no cash, and a nonzero-change one still refuses through the unknown-type guard. Pinned by tests.
+- Not measured: where an in-the-money payout lands relative to the close day. Total P&L is unaffected, because cash is booked in full and the book telescopes; only intraday-to-day attribution could shift.
+- Next: the founder-gated PROD probe is re-run. Gap G252-PROBE-M3 closes only when it reads `pass`, because the probe names only the first refusal per member.
+- Review: gsd-code-reviewer and silent-failure-hunter found 0 MEDIUM or above. Their LOW and INFO items are recorded in the phase review and not fixed.
+- No `TODOS.md` entry is closed by this PR.
+
+### Tests
+- The replay closes the position to 0 and a later-day grid has no hole. The real smoothed build through the probe seam passes a member whose only close is a measured exercise, with an expiry-close control.
+- A nine-shape refusal matrix, a cash-twin pin and a type-set pin. Five PROOF-01 neuters, plus a type-set neuter, each RED by name, restored (`cmp` 0) and GREEN.
 
 ## [0.133.106.0] - 2026-11-27 — Phase 242 SECRETSHYGIENE: the full history is scanned on a schedule, and the cron service key goes only to exact named hosts
 
