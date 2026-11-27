@@ -254,7 +254,9 @@ function failRedProblems(text: string): string[] {
     problems.push("the coverage MEASURE_FAIL branch does not end in `exit 1`");
   }
   if (/^ {8}if:/m.test(step)) problems.push("the scan step has a step-level `if:`");
-  const afterRc = step.slice(step.indexOf("rc=$?") + "rc=$?".length);
+  const rcAt = step.indexOf("rc=$?");
+  if (rcAt === -1) return [...problems, "the scan step never captures `rc=$?`"];
+  const afterRc = step.slice(rcAt + "rc=$?".length);
   if (/^\s*rc=/m.test(afterRc)) problems.push("`rc` is reassigned after the gitleaks command");
   const exits = [...afterRc.matchAll(/^\s*exit\b.*$/gm)].map((m) => m[0].trim());
   if (exits.join("|") !== 'exit 1|exit "${rc}"') problems.push(`exits after the gitleaks command are [${exits.join(" | ")}], expected [exit 1 | exit "\${rc}"]`);
