@@ -1348,3 +1348,106 @@ def test_d09_smoothed_e2e_measured_shape_exercise_then_later_activity_ingests(
         expected, abs=1e-9
     )
     assert sum(got.values()) == pytest.approx(-0.04, abs=1e-9)
+
+
+# --- plan 08 task 2: every OTHER exercise shape still refuses, and nothing else moves ------
+
+from services.deribit_txn import (  # noqa: E402 - appended after the plan-08 task 1 cases
+    _OPTION_BOOK_CLOSE_TYPES,
+    INFORMATIONAL_TYPES,
+)
+
+_DROP = object()  # a field the fixture row must NOT carry (a missing key, not a None value)
+
+# The HEAD refusal text for row id=2, written out by hand. It is a stored string, so the
+# accepted shape must not have touched it.
+_EXERCISE_REFUSAL_MESSAGE = (
+    "option Deribit row id=2 type='exercise': the exercise row shape is unmeasured "
+    "(no census), so the smoothed option book cannot tell whether it closes the position; "
+    "refusing to guess (D-09)"
+)
+
+
+def _exercise_row(*, change: Any = 0.0, position: Any = 0.0) -> dict[str, Any]:
+    """An exercise row on the OTM put whose `change` and `position` are set exactly as given;
+    ``_DROP`` leaves the key out."""
+    row = _otm_expiry(type="exercise")
+    for field, value in (("change", change), ("position", position)):
+        if value is _DROP:
+            row.pop(field, None)
+        else:
+            row[field] = value
+    return row
+
+
+@pytest.mark.parametrize(
+    "change,position,change_shape,position_shape",
+    [
+        (0.002, 0.0, "nonzero", "zero"),
+        (_DROP, 0.0, "absent", "zero"),
+        (None, 0.0, "absent", "zero"),
+        ("abc", 0.0, "non-numeric", "zero"),
+        (0.0, _DROP, "zero", "absent"),
+        (0.0, None, "zero", "absent"),
+        (0.0, "  ", "zero", "absent"),
+        (0.0, "abc", "zero", "non-numeric"),
+        (0.0, 1.0, "zero", "nonzero"),
+    ],
+    ids=[
+        "nonzero_change", "change_omitted", "change_none", "change_non_numeric",
+        "position_omitted", "position_none", "position_blank", "position_non_numeric",
+        "nonzero_position",
+    ],
+)
+def test_d09_every_exercise_shape_but_the_measured_one_still_refuses_byte_identically(
+    change: Any, position: Any, change_shape: str, position_shape: str
+) -> None:
+    """Founder decision 2026-11-27 accepts `change` zero with a PRESENT `position` zero and
+    nothing else. Each of these nine shapes must keep raising `OptionExerciseRowError` with the
+    HEAD message bytes, the closed shape words and the same-instrument census. Red on the
+    change cases means a gate too wide would book an exercise whose cash was never booked
+    (an absent change is not a zero change); red on the position cases means a position the
+    log did not state, or did not zero, would be read as a closed option."""
+    with pytest.raises(OptionExerciseRowError) as caught:
+        replay_option_positions(
+            [_long_opening(), _exercise_row(change=change, position=position)]
+        )
+    exc = caught.value
+    assert str(exc) == _EXERCISE_REFUSAL_MESSAGE
+    assert exc.args == (str(exc),)
+    assert (exc.change_shape, exc.position_shape) == (change_shape, position_shape)
+    assert exc.siblings == {**_NO_SIBLINGS, "trade": 1, "exercise": 1}
+    assert not isinstance(exc, OptionRowFieldMissingError)
+
+
+@pytest.mark.parametrize("twin_name,twin", TWINS, ids=[t[0] for t in TWINS])
+def test_d09_both_twins_ignore_a_measured_shape_exercise_and_refuse_one_with_cash(
+    twin_name: str, twin: Callable[[list[dict[str, Any]]], Any]
+) -> None:
+    """The decision changes the smoothed option book only, never cash. A measured-shape
+    exercise (zero change) adds nothing on either twin, and one carrying cash still refuses
+    through the unknown-type guard. Red means the exercise type was moved into a cash-bearing
+    or informational set, and an exercise row's cash would be summed or dropped silently."""
+    opening = dict(_long_opening(), index_price=INDEX)
+    exercise = dict(_exercise_row(), index_price=INDEX)
+    alone = twin([opening])
+    assert twin([opening, exercise]) == alone, twin_name
+    with pytest.raises(
+        LedgerValuationError, match="unknown Deribit transaction-log type 'exercise'"
+    ):
+        twin([opening, dict(exercise, change=0.002)])
+
+
+def test_d09_exercise_is_in_none_of_the_cash_event_informational_or_close_sets() -> None:
+    """`exercise` stays out of every type set. In a cash-bearing or event set an exercise row
+    would be summed as cash or contest an option event (the measured row carries none); in
+    the informational set a nonzero change would be dropped silently; in the close set it would
+    inherit `_expiry_close`'s wider shapes (an absent change or position) and its error class.
+    Red means the type was added to one of them instead of gated in the replay."""
+    for name, members in (
+        ("CASH_BEARING_TYPES", CASH_BEARING_TYPES),
+        ("INFORMATIONAL_TYPES", INFORMATIONAL_TYPES),
+        ("_OPTION_BOOK_EVENT_TYPES", _OPTION_BOOK_EVENT_TYPES),
+        ("_OPTION_BOOK_CLOSE_TYPES", _OPTION_BOOK_CLOSE_TYPES),
+    ):
+        assert "exercise" not in members, name
