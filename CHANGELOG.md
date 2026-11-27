@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.133.106.0] - 2026-11-27 — Phase 242 SECRETSHYGIENE: the full history is scanned on a schedule, and the cron service key goes only to exact named hosts
+
+### Why
+- SECR-03: no scan ever looked at the whole history of `main`. A full-scope scan found 31 latent credential-shaped fixture findings (WINDOWS.md entry 61, half (c)), so the next full-scope scan anyone ran would go red on history.
+- SECR-04: four SECURITY DEFINER functions post the Vault `analytics_service_key` to `system_settings.analytics_service_url`, and both the CHECK and each body accepted any `https://<host>.up.railway.app`. An app-admin or any `service_role` holder could point the key at another Railway subdomain (`[167.1.2.2.2-CRON-TICK-RESIDUALS]` item 1). Items 2 and 3 of that entry (gate arm P1 never compared the posted header to the Vault secret; the blank-key guard trimmed spaces only) close in the same change.
+
+### Added
+- **`.github/workflows/secret-scan-full-history.yml`**, daily at 05:30 UTC and on dispatch, never on push or pull request. It checks out `main` at full depth, installs gitleaks 8.30.1 from a hard-coded sha256 (the same pin as `supabase-migrate.yml`), and runs `--log-opts="--remerge-diff HEAD" --redact`, so each merge commit's own diff is scanned too.
+  - A pre-scan self-test proves the pinned binary on a throwaway repo: a planted finding exits 2, a merge-only finding is found, a four-part fingerprint suppresses only its own commit, a three-part line suppresses every commit at that site, and an inline comment voids the line.
+  - The scan fails red (MEASURE_FAIL) on any gitleaks `ERR` line, and when the commits it scanned differ from the commits `git log` says have a changed line, so a scan that read nothing never reads clean.
+  - On red, a `report` job files or comments on one issue labelled for this scan. The issue carries a count and a run link only, never a file, line or fingerprint, because the repo is public.
+- **`.gitleaksignore`**: 31 commit-scoped four-part fingerprints (`commit:file:rule:line`), grouped under comments naming why each site is a fixture. No value is quoted and no global three-part line exists. Measured 2026-11-26: all 31 are test fixtures, canaries or `match_key` false positives.
+- **Migration `20261127130000_cron_destinations_exact.sql`** (and `down/20261127130000-rollback.sql`): the `system_settings_analytics_service_url_allowed` CHECK and the in-body guard of `match_engine_cron_tick`, `prod_prober_cadence_check`, `cron_sync_tick` and `ops_staleness_check` now compare by equality against exactly two origins, the PROD analytics origin and the `http://127.0.0.1:9` loopback discard literal. PROD and TEST stored values were read on 2026-11-26 and are each in the set.
+
+### Changed
+- Each of the four bodies is re-based on its latest definition and changes in three places only: the allow-list constant (`c_allowed_origins`), the guard (`NOT (v_url = ANY (...))`), and the blank-key trim (`btrim(v_key, E' \t\r\n')`, so a key of tabs or newlines is refused by name). The refusal message still never echoes the stored value; its tail now names the two allowed origins. SECURITY DEFINER, the pinned `search_path` and owner-only EXECUTE are unchanged and asserted by the migration's catalogue-only verify block.
+- Committed function snapshots and four `prod-body-ack` pragmas move with the bodies. The ops-staleness, prod-prober-cadence and match-engine runbooks check the exact set instead of the suffix pattern.
+
+### Tests
+- New arms, each with a `RED-UNDER-M` twin: W1 (a sibling `*.up.railway.app` host is refused) in all four gates, K1 (a whitespace-only key is refused) in all four, P2 (the posted `X-Service-Key` equals the Vault secret) in `test_cron_sync_tick.sql`, and U3 (the CHECK refuses a sibling host) in the analytics settings gate. Every existing edit twin in the four gates is repointed at the new migration.
+- `src/__tests__/secret-scan-full-history.test.ts` pins the workflow's triggers, checkout, binary pin, scan command, fail-red control flow, coverage check, self-test and count-only report, each predicate with calibration copies that must go red, and the ignore file's four-part shape.
+- Censuses: `ARMS_FLOOR` 1100 -> 1110, ci.yml's sentinel sum 610 -> 620 with the four per-file rows (cron_sync 11, prober 9, ops 16, analytics 16), and the parser and floors ratchets to measured values.
+- PROOF-01: every new gate went RED on a neutered byte copy with its named arm first, was restored (`cp`, `cmp` exit 0) and went GREEN, recorded in the plan SUMMARYs.
+
+### Fixed
+- Review round 1: the scan read clean when `git log` failed (WR-01), merge-commit diffs were never scanned (WR-03), the fail-red wiring was unpinned (WR-02), and the real-binary check never ran in CI (WR-04). Round 2: the expected-commit count would have gone permanently red after a rename-only, mode-only or empty-file commit (CR-01), the self-test could not tell a commit-scoped suppression from a file-scoped one, and the pins checked strings rather than control flow. All fixed; round 3 is clean.
+
+### Removed
+- `TODOS.md` entries `[167.1.2.2.2-CRON-TICK-RESIDUALS]` (items 1-3 closed here; item 4 closed in 164.6.8) and `[SECRETSCAN-FULLHISTORY-01]` are closed and deleted. The open entry for CI's own `workflow_dispatch` secret-scan carries a dated "narrowed, not closed" note.
+
+### Notes
+- **Expected reds on this PR, not to be fixed:** `baseline-content-drift` shows four DRIFT rows until the post-apply baseline re-dump merges, and VAC-08 (`test-db-drift`) may be red until `apply-test` runs.
+- **PROD applies on merge with no human gate.** A failed TEST apply blocks it. After merge: record the `apply-test` and `apply` run ids, read the four bodies and the CHECK on PROD (marker query first), merge the bot re-dump, and dispatch the new workflow on `main` and record its first green run (a workflow registers only from the default branch).
+- **Coupling accepted:** a red scheduled scan attaches a failing check to main's head SHA and can block a Railway redeploy of that SHA, the same coupling as `sql-mutation-nightly` (164.9.6 D-11).
+- **Residuals:** the vitest real-binary arm still skips on CI shards (the workflow self-test is the daily proof); CI's PR-range secret scan does not remerge-scan merge commits; WINDOWS.md entry 61 half (b), a working `workflow_dispatch` re-trigger for CI's secret scan, stays open. The loopback origin stays allowed on PROD, so an app-admin can still point every tick at a discard port (a mute, not a key leak; pre-existing).
+- Review: gsd-code-reviewer and silent-failure-hunter, three rounds, converged at 0 MEDIUM+. migration-reviewer and rls-policy-auditor: 0 findings. Security audit: 22 threats, `threats_open: 0`.
+
 ## [0.133.105.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 8e8c0753
 
 ### Changed
@@ -32,7 +69,7 @@
 - **DBACC-02 step 1: `api_keys.user_id` is immutable.** The BEFORE UPDATE trigger `api_keys_user_id_immutable` (function `enforce_api_keys_user_id_immutable()`, SECURITY INVOKER) refuses any change of `user_id` with 42501, for every role, including the table owner and BYPASSRLS `service_role`. It has no column list and sorts after the other `api_keys` BEFORE triggers, so it judges the final row. A rewriting BEFORE trigger cannot repoint a key either. `sanitize_user` still deletes a user's keys with the trigger present (measured on the local stack).
 - **DBACC-03: client-role timeouts are pinned in a migration (`20261127120000`).** `ALTER ROLE anon SET statement_timeout = '3s'` and `ALTER ROLE authenticated SET statement_timeout = '8s'` restate the platform values, followed by `NOTIFY pgrst` and a self-check that reads only the catalogue. `idle_in_transaction_session_timeout` is not pinned, because the measurement saw no idle window.
 - **Generated function dumps** `supabase/schema/functions/insert_api_key.sql` and `enforce_api_keys_user_id_immutable.sql`. Two dated `snapshot-only` rows go into `NAME_SET_RATCHET` in `scripts/dump-sql-functions.ts`, and `COMPARED_FLOOR` in `scripts/baseline-content-drift-check.mjs` moves 148 -> 150. Neither suppresses a finding.
-- **Manual rollbacks** `supabase/migrations/down/20261127120000-rollback.sql` and `20261127120100-rollback.sql`. The first restates the platform values and never RESETs a role. The second warns that it must never run after PR-B.
+- **Manual rollbacks** `supabase/migrations/down/20261127130000-rollback.sql` and `20261127120100-rollback.sql`. The first restates the platform values and never RESETs a role. The second warns that it must never run after PR-B.
 
 ### Fixed
 - **The OG route fails closed when the admin alias read returns no row** (review round 1, WR-03). A missing row or a missing embed now takes the same path as an error or a throw: it reports `reportOgFailure("read")`, sends `no-store` and renders the generic card. Before the fix, a missing row rendered a figure card with the cash basis silently missing.

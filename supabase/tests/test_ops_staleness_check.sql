@@ -5,10 +5,17 @@
 -- row per call either way.
 --
 -- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE: every edit-kind RED-UNDER-M twin in
--- this file names supabase/migrations/20261020120000_ops_staleness_check.sql,
--- the only migration that defines the function. A twin naming any other file
--- would mutate text that is not the live definition and the arm would report
--- `no-red`.
+-- this file names supabase/migrations/20261127130000_cron_destinations_exact.sql
+-- (Phase 242 SECRETSHYGIENE), the LAST migration of the setup list and so the
+-- one whose `CREATE OR REPLACE` is the live definition. It re-bases this
+-- function on the exact two-origin destination set and the four-character
+-- blank-key trim; supabase/migrations/20261020120000_ops_staleness_check.sql
+-- defined it before that and stays in the list as the base. A twin naming the
+-- older file would mutate text that is no longer the live definition and the arm
+-- would report `no-red`. The migration carries FOUR bodies, so a needle that
+-- occurs in more than one carries an `nth` selecting this function's, the
+-- FOURTH in that file's pinned order (match_engine_cron_tick,
+-- prod_prober_cadence_check, cron_sync_tick, ops_staleness_check).
 --
 -- Arms (LISTED and EXECUTED in this order; every arm resets the seed rows it
 -- planted before it plants its own, by id, so the order is for the reader, not
@@ -47,11 +54,20 @@
 --   S13 no echo         — S10's refusal message must not contain the stored url.
 --   S11 both stale      — both arms stale at once: TWO posts (cron_sync and
 --                         backfill), return value 2.
+--   W1  sibling host    — with the CHECK constraint dropped and the url pointed at
+--                         a host under the production origin's own Railway domain
+--                         that is not that origin, a stale arm REFUSES by name and
+--                         posts nothing. The destination is exactly two origins by
+--                         equality, not a suffix rule. Phase 242 / DEST-SET.
+--   K1  blank key       — a key made of a space, a tab, a carriage return and a
+--                         newline is refused by "analytics_service_key missing from
+--                         vault" and nothing is posted. Phase 242 / DEST-KEYGUARD.
 --   G1  grants          — catalogue read: SECURITY DEFINER, search_path pinned,
 --                         EXECUTE held by the owner alone. Runs last.
--- (The plan listed S1-S11 and G1; S12 and S13 are additions, so the arm count is
--- 14, not 12. S12 pins the watchdog-tick slack on a running job, which no other
--- arm could, and S13 keeps the no-echo property from sharing S10's identity.)
+-- (The plan listed S1-S11 and G1; S12 and S13 are additions, and Phase 242 added
+-- W1 and K1 between S11 and G1, so the arm count is 16. S12 pins the watchdog-tick
+-- slack on a running job, which no other arm could, and S13 keeps the no-echo
+-- property from sharing S10's identity.)
 --
 -- Every refusal arm also asserts ZERO new net._lane_posts rows, so a refusal that
 -- still posts is caught. Every arm asserts about the rows IT planted and the
@@ -62,7 +78,7 @@
 -- `sectionOfIdentity` in scripts/mutation-runner/run.mjs collapses a trailing
 -- `-SUFFIX` into its parent section only when a digit precedes it, so
 -- `S1-SETUP` is a sub-arm of `S1` and is covered by S1's own twin (likewise
--- `S6-SETUP`, `S10-SETUP`). The setup guards are vacuity guards ("the fixture
+-- `S6-SETUP`, `S10-SETUP`; likewise `W1-SETUP` and `K1-SETUP`). The setup guards are vacuity guards ("the fixture
 -- reached the state this arm is about"), not claims about the migration, so they
 -- carry no twin of their own.
 --
@@ -70,7 +86,7 @@
 -- failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- The final `ALL 14 ARMS EXECUTED (…)` notice at the foot of this file is the
+-- The final `ALL 16 ARMS EXECUTED (…)` notice at the foot of this file is the
 -- sentinel CI's loop reads the arm count off. If you add or remove an arm,
 -- update BOTH the integer and the roster on that line.
 --
@@ -92,7 +108,7 @@
 -- cron_runs stand-in. 20260907120000 and 20260911120000 seed system_settings'
 -- allow-listed analytics_service_url. The reader migration is applied LAST.
 -- LANE-ONLY: {"object":"net._lane_posts","fixture":"scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","job":"sql-mutation","reason":"Every arm in this file asserts against the pg-net stand-in that fixture 34's own header marks as never applied to TEST or PROD; shared TEST carries the real pg_net, so a version of this gate made to run there would issue genuine outbound HTTP from shared CI infrastructure on every run; this file's arms execute and are mutation-checked twin-by-twin on the pg-lane under sql-mutation."}
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","supabase/migrations/20260911120000_vault_tick_hardening.sql","supabase/migrations/20261020120000_ops_staleness_check.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/20-fixture-app-role-helper.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","scripts/pg-lane/fixtures/24-fixture-enqueue-compute-job-chain.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","supabase/migrations/20260513094906_enable_pg_cron.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260418194206_scoring_weight_overrides.sql","supabase/migrations/20260420073003_allocator_holdings.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","supabase/migrations/20260911120000_vault_tick_hardening.sql","supabase/migrations/20261020120000_ops_staleness_check.sql","supabase/migrations/20261127130000_cron_destinations_exact.sql"]}
 
 BEGIN;
 
@@ -191,7 +207,7 @@ BEGIN
   --            comparison against NULL yields NULL (treated as FALSE by every
   --            plpgsql IF) and the reader reports a sync that has NEVER run as
   --            healthy: the loudest possible signal read as the quietest.
-  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"IF v_cs_last IS NULL THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF v_cs_last IS NULL THEN","replace":"IF FALSE THEN","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S1): ops_staleness_check() RAISED with a usable key and an allow-listed url: %. It should have posted, not raised.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -247,7 +263,7 @@ BEGIN
   --            the reader returns 0 and posts nothing, and the daily trade sync
   --            can sit dead for 20 days with every other signal green — the
   --            outage this phase exists to end.
-  -- RED-UNDER-M: {"arm":"S2","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"c_cron_sync_ceiling CONSTANT INTERVAL := '2 days';","replace":"c_cron_sync_ceiling CONSTANT INTERVAL := '20 days';","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S2","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"c_cron_sync_ceiling CONSTANT INTERVAL := '2 days';","replace":"c_cron_sync_ceiling CONSTANT INTERVAL := '20 days';","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S2): ops_staleness_check() RAISED with a usable key, an allow-listed url and a stale heartbeat: %. It should have posted, not raised.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -312,7 +328,7 @@ BEGIN
   --            constant itself is left alone, so S1 and S2 (which read the
   --            ceiling text out of the post) stay GREEN and S3 is the first
   --            failure.
-  -- RED-UNDER-M: {"arm":"S3","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"ELSIF v_cs_last < now() - c_cron_sync_ceiling THEN","replace":"ELSIF v_cs_last < now() - INTERVAL '12 hours' THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S3","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"ELSIF v_cs_last < now() - c_cron_sync_ceiling THEN","replace":"ELSIF v_cs_last < now() - INTERVAL '12 hours' THEN","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S3): ops_staleness_check() RAISED on a healthy heartbeat: %. A healthy tick must not touch the Vault or the url at all.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -365,7 +381,7 @@ BEGIN
   --            reach 3 and the leg is dead: a sync that fails every day while
   --            still writing its heartbeat (fresh, so the age leg never fires)
   --            reaches no one.
-  -- RED-UNDER-M: {"arm":"S4","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"v_cs_errs >= 2","replace":"v_cs_errs >= 3","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S4","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"v_cs_errs >= 2","replace":"v_cs_errs >= 3","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S4): ops_staleness_check() RAISED: %. It should have posted, not raised.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -413,7 +429,7 @@ BEGIN
   --            is muted within a week, and the genuine two-in-a-row page rides
   --            the same muted channel. ⚠️ S4 stays GREEN under this mutation
   --            (two errors satisfy `>= 1` too), so S5 is the first failure.
-  -- RED-UNDER-M: {"arm":"S5","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"v_cs_errs >= 2","replace":"v_cs_errs >= 1","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S5","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"v_cs_errs >= 2","replace":"v_cs_errs >= 1","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S5): ops_staleness_check() RAISED on a heartbeat that is not stale: %.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -460,7 +476,7 @@ BEGIN
   --            becomes `>=`. A job that has waited two hours is then NOT counted
   --            as waiting (and one that became eligible a moment ago is), so a
   --            queue stuck behind a dead backfill worker is read as idle.
-  -- RED-UNDER-M: {"arm":"S6","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"AND j.next_attempt_at <= now() - c_backfill_ceiling","replace":"AND j.next_attempt_at >= now() - c_backfill_ceiling","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S6","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"AND j.next_attempt_at <= now() - c_backfill_ceiling","replace":"AND j.next_attempt_at >= now() - c_backfill_ceiling","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S6): ops_staleness_check() RAISED: %. It should have posted, not raised.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -505,7 +521,7 @@ BEGIN
   --            waiting job then pages, including the second job of a healthy
   --            crawl queue behind a worker that claimed 5 minutes ago. ⚠️ S6
   --            stays GREEN (it has no claim at all).
-  -- RED-UNDER-M: {"arm":"S7","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"\n     AND (v_bf_last_claim IS NULL OR v_bf_last_claim < now() - c_backfill_ceiling)","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S7","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"\n     AND (v_bf_last_claim IS NULL OR v_bf_last_claim < now() - c_backfill_ceiling)","replace":"","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S7): ops_staleness_check() RAISED: %.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -536,7 +552,7 @@ BEGIN
   --            becomes `AND FALSE`. A job the watchdog should have reclaimed
   --            half an hour ago but did not (the watchdog itself is down) is
   --            then invisible, and only the QUEUE leg watches the backfill.
-  -- RED-UNDER-M: {"arm":"S8","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"AND j.claimed_at < now() - (c_backfill_ceiling + c_watchdog_interval)","replace":"AND FALSE","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S8","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"AND j.claimed_at < now() - (c_backfill_ceiling + c_watchdog_interval)","replace":"AND FALSE","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S8): ops_staleness_check() RAISED: %.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -574,7 +590,7 @@ BEGIN
   --            tick past its threshold, which the watchdog is about to reclaim
   --            on its own, then pages. ⚠️ S8 stays GREEN (32 minutes is past
   --            both bounds).
-  -- RED-UNDER-M: {"arm":"S12","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"now() - (c_backfill_ceiling + c_watchdog_interval)","replace":"now() - c_backfill_ceiling","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S12","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"now() - (c_backfill_ceiling + c_watchdog_interval)","replace":"now() - c_backfill_ceiling","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S12): ops_staleness_check() RAISED: %.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -617,7 +633,7 @@ BEGIN
   --            worker is a different process with a different ceiling, and the
   --            parity test (which pins the list to main_worker.BACKFILL_KINDS)
   --            is the only other thing that would notice.
-  -- RED-UNDER-M: {"arm":"S9","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"ARRAY['derive_broker_dailies','derive_allocator_equity']","replace":"ARRAY['derive_broker_dailies','derive_allocator_equity','poll_allocator_positions']","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S9","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"ARRAY['derive_broker_dailies','derive_allocator_equity']","replace":"ARRAY['derive_broker_dailies','derive_allocator_equity','poll_allocator_positions']","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S9): ops_staleness_check() RAISED: %.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -674,7 +690,7 @@ BEGIN
   --            the control is zero layers deep and the reader posts the live
   --            service key to the attacker's host. ⚠️ Deliberately NOT a `sql`
   --            step dropping the constraint: this arm has already dropped it.
-  -- RED-UNDER-M: {"arm":"S10","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"IF v_url !~ c_url_allowed THEN","replace":"IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S10","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF NOT (v_url = ANY (c_allowed_origins)) THEN","replace":"IF FALSE THEN","occurrences":4,"nth":4}]}
   IF NOT v_raised OR v_msg !~ 'not an allowed destination' THEN
     RAISE EXCEPTION 'TEST FAILED (S10): with analytics_service_url set to a host outside the allow-list and the CHECK constraint dropped, ops_staleness_check() did not refuse by name — raised=%, message: %. net.http_post is fire-and-forget, so the Vault-held service key would leave in an X-Service-Key header and nothing downstream would ever report where it went.', v_raised, COALESCE(v_msg, 'NULL');
   END IF;
@@ -695,7 +711,7 @@ BEGIN
   --            that refused it (T-161.1-10). ⚠️ It leaves `not an allowed
   --            destination` in place, so S10 above stays GREEN and this arm is
   --            the first failure.
-  -- RED-UNDER-M: {"arm":"S13","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"read it with an admin session. Allowed: an https host under .up.railway.app';","replace":"read it with an admin session. Allowed: an https host under .up.railway.app (%)', v_url;","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S13","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');","replace":"read it with an admin session. Allowed: exactly % (%)', array_to_string(c_allowed_origins, ' or '), v_url;","occurrences":4,"nth":4}]}
   IF v_msg ~ 'collector\.attacker\.example' THEN
     RAISE EXCEPTION 'TEST FAILED (S13): the destination refusal ECHOED the url it refused — it reads: %. The value in that row is attacker-controlled by construction, and RAISE text is not a private channel. Name the SETTING, never its value; an operator who needs the value can SELECT it.', v_msg;
   END IF;
@@ -734,13 +750,130 @@ BEGIN
   --            where the sync is dead AND the backfill worker is dead pages
   --            once, naming only the first, and the second outage waits for the
   --            first to be fixed.
-  -- RED-UNDER-M: {"arm":"S11","apply":[{"kind":"edit","file":"supabase/migrations/20261020120000_ops_staleness_check.sql","find":"IF v_bf_cause IS NOT NULL THEN","replace":"IF v_bf_cause IS NOT NULL AND v_cs_cause IS NULL THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S11","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF v_bf_cause IS NOT NULL THEN","replace":"IF v_bf_cause IS NOT NULL AND v_cs_cause IS NULL THEN","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S11): ops_staleness_check() RAISED: %.', COALESCE(v_msg, 'NULL');
   END IF;
   SELECT array_agg(p.body ->> 'cron_name' ORDER BY p.body ->> 'cron_name') INTO v_names FROM net._lane_posts p;
   IF v_ret IS DISTINCT FROM 2 OR v_names IS DISTINCT FROM ARRAY['backfill', 'cron_sync']::TEXT[] THEN
     RAISE EXCEPTION 'TEST FAILED (S11): a dead sync AND a dead backfill worker produced return value % and posts for [%], expected 2 and [backfill,cron_sync] — one outage must not hide the other.', COALESCE(v_ret::text, 'NULL'), COALESCE(array_to_string(v_names, ','), 'NULL');
+  END IF;
+
+  -- ===== ARM W1 — a WILDCARD SIBLING ⇒ the reader REFUSES, posting nothing =====
+  -- The destination rule used to be a SUFFIX WILDCARD: any https host under the
+  -- Railway app domain. S10's foreign host (collector.attacker.example) is refused
+  -- by the old rule and the new one alike, so it cannot tell them apart. A
+  -- SIBLING under the same domain can: the old rule admitted it and the exact
+  -- two-origin rule does not. What is measured is the in-body re-test alone — the
+  -- CHECK constraint is dropped here again (IF EXISTS), so this arm does not
+  -- depend on S10 having done it.
+  -- ----- W1-SETUP: CHECK gone, sibling host stored, one STALE heartbeat -----
+  -- S11's leftovers would carry a cause too, but this arm plants its own stale
+  -- cron_sync row the way S2's setup does, so the reader reaches the guard by this
+  -- arm's own fixture and not by what S11 happened to leave behind.
+  DELETE FROM public.compute_jobs WHERE id = ANY (v_seed_cj);
+  DELETE FROM public.cron_runs WHERE id = ANY (v_seed_cr);
+  v_seed_cj := ARRAY[]::UUID[];
+  v_seed_cr := ARRAY[]::UUID[];
+  INSERT INTO public.cron_runs (cron_name, started_at, completed_at, status)
+  VALUES ('cron_sync', now() - interval '3 days', now() - interval '3 days', 'ok')
+  RETURNING id INTO v_id;
+  v_seed_cr := v_seed_cr || v_id;
+  v_setup := NULL;
+  BEGIN
+    ALTER TABLE public.system_settings
+      DROP CONSTRAINT IF EXISTS system_settings_analytics_service_url_allowed;
+    UPDATE public.system_settings
+       SET value = 'https://not-quantalyze.up.railway.app'
+     WHERE key = 'analytics_service_url';
+    GET DIAGNOSTICS v_cnt = ROW_COUNT;
+    IF v_cnt <> 1 THEN
+      RAISE EXCEPTION 'expected to repoint exactly one analytics_service_url row, repointed %', v_cnt;
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W1-SETUP): could not drop the destination CHECK constraint and point analytics_service_url at the sibling host (%), so W1 below would be asking its question of whatever url S11 left behind. Record what it says — do NOT weaken W1 to accommodate it.', v_setup;
+  END IF;
+  DELETE FROM net._lane_posts;
+
+  v_raised := false;
+  v_msg := NULL;
+  BEGIN
+    v_ret := public.ops_staleness_check();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: restore the destination guard to the old suffix rule — the equality
+  --            guard becomes a pattern match on any https host under the Railway
+  --            app domain. The sibling is then admitted and the live service key
+  --            goes to a host no one chose, in an async post the scheduler records
+  --            as a success. ⚠️ S10 and S13 stay GREEN under this mutation,
+  --            because their foreign host fails the old suffix rule too; W1 is the
+  --            first failure.
+  -- RED-UNDER-M: {"arm":"W1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF NOT (v_url = ANY (c_allowed_origins)) THEN","replace":"IF v_url !~ '^(https://[a-z0-9][a-z0-9.-]*\\.up\\.railway\\.app|http://127\\.0\\.0\\.1:9)$' THEN","occurrences":4,"nth":4}]}
+  IF NOT v_raised OR v_msg !~ 'not an allowed destination' THEN
+    RAISE EXCEPTION 'TEST FAILED (W1): with analytics_service_url set to a sibling host under the same Railway domain as the production origin, ops_staleness_check() did not refuse by name — raised=%, message: %. A suffix rule admits any subdomain anyone can register, so the Vault-held service key would leave in an X-Service-Key header to a host nobody chose.', v_raised, COALESCE(v_msg, 'NULL');
+  END IF;
+  SELECT count(*) INTO v_cnt FROM net._lane_posts;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W1): % outbound post(s) were recorded despite the sibling host being refused, expected ZERO — a refusal that still lets the request out is not a refusal.', v_cnt;
+  END IF;
+
+  -- Put the allow-listed url back (the constraint stays gone; the whole test
+  -- rolls back), so K1 below asks about the key and nothing else.
+  UPDATE public.system_settings SET value = v_orig_url WHERE key = 'analytics_service_url';
+
+  -- ===== ARM K1 — a key of ALL FOUR whitespace characters ⇒ REFUSED, by name ===
+  -- A guard that trims spaces only passes a space-only key to its refusal and a
+  -- tab, carriage-return or newline key straight through, so this arm stores all
+  -- four (space, tab, carriage return, newline). ⚠️ Built with an E'' literal,
+  -- never a pasted control character. W1's stale heartbeat is still in place, so
+  -- the reader reaches the key guard; the key is read BEFORE the url, so the url
+  -- is not what this arm measures.
+  -- ----- K1-SETUP: delete-then-create, so exactly one secret of that name -----
+  v_setup := NULL;
+  BEGIN
+    DELETE FROM vault.decrypted_secrets WHERE name = 'analytics_service_key';
+    PERFORM vault.create_secret(E' \t\r\n', 'analytics_service_key', 'phase 242 gate fixture');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (K1-SETUP): could not store a space, tab, carriage-return and newline analytics_service_key (%), so K1 below would be asking its question of a database holding either no secret or another one. Record what it says — do NOT weaken K1 to accommodate it.', v_setup;
+  END IF;
+  DELETE FROM net._lane_posts;
+
+  v_raised := false;
+  v_msg := NULL;
+  BEGIN
+    v_ret := public.ops_staleness_check();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: restore the key guard to the old spaces-only trim — the explicit
+  --            four-character set becomes a bare btrim. A tab, carriage return or
+  --            newline key is then neither NULL nor blank, and the reader carries
+  --            a useless header onward, answered 401 behind a green tick.
+  --            ⚠️ Every other arm's key is a real one or absent, so none of them
+  --            can see the difference; K1 is the first failure.
+  -- RED-UNDER-M: {"arm":"K1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF v_key IS NULL OR btrim(v_key, E' \\t\\r\\n') = '' THEN","replace":"IF v_key IS NULL OR btrim(v_key) = '' THEN","occurrences":4,"nth":4}]}
+  IF NOT v_raised THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): ops_staleness_check() RETURNED with an analytics_service_key made of a space, a tab, a carriage return and a newline. None of them is a usable key, and a guard that trims spaces only lets the rest through to a header the analytics service answers 401 to, asynchronously.';
+  END IF;
+  IF v_msg !~ 'analytics_service_key missing from vault' THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): the reader did raise with a whitespace-only secret present, but its message does not name analytics_service_key — it reads: %. This arm shares the absent-key RAISE text on purpose.', COALESCE(v_msg, 'NULL');
+  END IF;
+  SELECT count(*) INTO v_cnt FROM net._lane_posts;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): % outbound post(s) were recorded despite the whitespace-only key, expected ZERO.', v_cnt;
   END IF;
 
   -- ===== ARM G1 — EXECUTE on the reader is held by the OWNER ALONE ==========
@@ -791,7 +924,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (G1): ops_staleness_check is not SECURITY DEFINER with search_path pinned to public, pg_catalog — an unpinned path on a SECURITY DEFINER body is a privilege-escalation route.';
   END IF;
 
-  RAISE NOTICE 'ALL 14 ARMS EXECUTED (S1,S2,S3,S4,S5,S6,S7,S8,S12,S9,S10,S13,S11,G1): public.ops_staleness_check() posts one alert to the analytics service''s /api/prober-cadence-alert route, cron_name cron_sync, when no heartbeat ever ran (S1), when the newest is older than 2 days (S2: gap, key, body fields) and when the two newest rows are both error (S4); stays silent on a fresh ok heartbeat with an ok observer row (S3) and on one error beside an ok (S5); posts cron_name backfill when an eligible job waits unclaimed past the ceiling (S6) or a running job outlives the ceiling plus one watchdog tick (S8); stays silent beside a recent claim (S7), inside the extra tick (S12) and for a non-backfill kind (S9); refuses a destination outside the allow-list without echoing it and leaves no observer row (S10, S13); posts for both arms at once and returns 2 (S11); and EXECUTE is held by the owner alone on a SECURITY DEFINER body with a pinned search_path (G1). Phase 164.6.8 / plan 02 / D-10, D-11, mig 20261020120000.';
+  RAISE NOTICE 'ALL 16 ARMS EXECUTED (S1,S2,S3,S4,S5,S6,S7,S8,S12,S9,S10,S13,S11,W1,K1,G1): public.ops_staleness_check() posts one alert to the analytics service''s /api/prober-cadence-alert route, cron_name cron_sync, when no heartbeat ever ran (S1), when the newest is older than 2 days (S2: gap, key, body fields) and when the two newest rows are both error (S4); stays silent on a fresh ok heartbeat with an ok observer row (S3) and on one error beside an ok (S5); posts cron_name backfill when an eligible job waits unclaimed past the ceiling (S6) or a running job outlives the ceiling plus one watchdog tick (S8); stays silent beside a recent claim (S7), inside the extra tick (S12) and for a non-backfill kind (S9); refuses a destination outside the allow-list without echoing it and leaves no observer row (S10, S13); posts for both arms at once and returns 2 (S11); refuses a sibling host under the production origin''s own Railway domain by name, because the destination is exactly two origins and not a suffix rule (W1), and a key made of a space, a tab, a carriage return and a newline (K1), posting nothing in either case; and EXECUTE is held by the owner alone on a SECURITY DEFINER body with a pinned search_path (G1). Phase 164.6.8 / plan 02 / D-10, D-11, mig 20261020120000; re-based by Phase 242 / plan 03, mig 20261127120000.';
 END $$;
 
 ROLLBACK;

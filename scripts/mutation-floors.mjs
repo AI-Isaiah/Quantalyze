@@ -3588,7 +3588,10 @@ export const FILES_FLOOR = 99;
 // MEASURED: `--parse-only` printed `arms: 0/1099/0` and `coverage: files 99/126`; the DIAGNOSTIC runs of the two files printed `arms: 8/8/0   (executed/annotated/waived)`, `biting: 8` and `arms: 6/6/0`, `biting: 6`, `lane-invocations` equal to the arm count, every arm `RED (identity ok)`. CI `sql-mutation` FULL on the PR is the run that compares against a real biting count. WAIVED_CEILING stays 0 - no waiver was added.
 // RAISED 1099 -> 1100 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): +1 twinned arm, R9 in the existing test_insert_api_key_rpc.sql (every parameter lands in its own column; the twin swaps p_api_secret_encrypted and p_passphrase_encrypted in the INSERT's VALUES list). FILES_FLOOR stays 99, no file joined.
 // MEASURED: `--parse-only` printed `arms: 0/1100/0` and `coverage: files 99/126`; the DIAGNOSTIC run of the file printed `arms: 9/9/0   (executed/annotated/waived)`, `biting: 9`, `lane-invocations: 9`, every arm `RED (identity ok)`. WAIVED_CEILING stays 0. CI `sql-mutation` FULL on the PR is the run that compares against a real biting count.
-export const ARMS_FLOOR = 1100;
+// RAISED 1100 -> 1110 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05; migration 20261127130000_cron_destinations_exact.sql): +10 twinned arms in four files that already counted toward FILES_FLOOR:
+// test_cron_sync_tick.sql 8 -> 11 (W1, P2, K1), test_prod_prober_cadence.sql 7 -> 9 (W1, K1), test_ops_staleness_check.sql 14 -> 16 (W1, K1) and test_analytics_service_settings_and_vault_tick.sql 14 -> 17 (U3, W1, K1).
+// FILES_FLOOR stays 99 (no new gate file). Static annotated-unwaived count (1100 at origin/main plus the 10), an upper bound on biting; CI `sql-mutation` FULL on the PR head SHA compares it with a real biting count. WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 1110;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

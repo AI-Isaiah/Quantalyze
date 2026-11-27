@@ -1789,6 +1789,13 @@ full scan. State it that way; "the gate only scans one commit" overstates it.
 but it is NOT in 164.6's ROADMAP scope as written. Adding it is a founder scope call, not an
 agent one.
 
+⭐ **2026-11-27 (Phase 242 SECRETSHYGIENE) — narrowed, NOT closed.** The phase added a repo-root
+commit-scoped `.gitleaksignore` that suppresses the findings on main's history, and a daily scan of
+main's history (`.github/workflows/secret-scan-full-history.yml`). CI's own scan reads the same
+file, but a `workflow_dispatch` still scans every ref, and other refs carry findings this phase did
+not suppress, so a dispatch can still go red. This entry stays open as `.planning/WINDOWS.md`
+entry 61 half (b), the missing working re-trigger for CI's `secret-scan` job.
+
 ### `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` on `secret-scan` is now a no-op (raised 2026-08-23, PR #705 review)
 
 **Priority:** P4 — dead config, zero behavioral risk.
@@ -2719,49 +2726,6 @@ Confidence 5, below the fix bar.
 number, with a test that fails first.
 ⛔ **Not a close:** inferring the unit from the symbol.
 
-### [167.1.2.2.2-CRON-TICK-RESIDUALS] — four MEDIUM residuals of `public.cron_sync_tick()` that the plan 01 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 01 Task 3) (owned by Phase 242 SECRETSHYGIENE, v1.23; REQUIREMENTS.md SECR-04; tagged 2026-11-23)
-
-**Why it is open.** The three reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter)
-reported the tick migration CLEAN with no CRITICAL or HIGH. The worst finding was MEDIUM, so under the
-review rule no fixer round ran. Four of those MEDIUMs are carried here rather than lost:
-
-1. **The destination allow-list is a suffix wildcard.** The allow-list is `https://<host>.up.railway.app`
-   for any host. An app-admin, or any `service_role` holder (every Next.js `createAdminClient()` route and
-   the Python analytics service write `system_settings`), can point `system_settings.analytics_service_url`
-   at another Railway subdomain, and the Vault service key is then posted there. The tick inherits this
-   from `match_engine_cron_tick` and from the `system_settings` CHECK constraint, and so does
-   `prod_prober_cadence_check`: three spellings of one rule. The exact-origin tightening of all three
-   (CHECK constraint, and each in-body re-test) belongs to a later forward migration, not to this tick.
-2. **Gate arm P1 never compares the posted key to the Vault secret.** It asserts the `X-Service-Key`
-   header is non-blank, not that it equals the secret the Vault holds, so a body that posted some other
-   non-blank string would pass.
-3. **The blank-key guard trims spaces only.** `btrim(v_key) = ''` leaves a key of tabs or newlines
-   through, and the analytics service answers it 401. Already recorded as a comment in the sibling
-   `match_engine_cron_tick`; widening it is a decision with its own evidence and touches the sibling too.
-
-Not in the list because it is a runbook item and not a migration edit: the 180000 ms timeout is a plan
-figure, not a measurement. The go-live rehearsal (plans 14 and 17, the PGNET-TOO-SLOW and KEY-TIMEOUT
-verdicts) measures it.
-
-**Owner:** unrouted; THE FOUNDER routes it. Items 1 and 3 ride one forward migration that tightens the
-tick, the cadence check and the match-engine tick together; item 2 rides the next edit of
-`supabase/tests/test_cron_sync_tick.sql`; item 4 rides Phase 164.6.8 (OUTAGEALERT) if the founder routes it
-there, and otherwise stays the by-hand read in the go-live runbook.
-**Trigger:** the first of (a) any migration that touches `system_settings.analytics_service_url` or its
-CHECK constraint, or re-bases `match_engine_cron_tick` or `prod_prober_cadence_check`, (b) the first
-scheduled `cron-sync-trades` run whose `cron.job_run_details` row reads green while `/api/cron-sync` did
-not sync, (c) the start of 164.6.8 planning. Booked 2026-10-09.
-**Gate (what closes it):** per item. (1) the CHECK and all three in-body re-tests accept one exact origin,
-proven by a gate arm that fails first when a different `*.up.railway.app` host is stored. (2) a P1
-assertion that the recorded header equals the Vault secret, observed RED under a mutant posting a fixed
-string. (3) a key of a tab or a newline is refused by name, observed RED under the old guard. (4) a
-failed or timed-out tick reaches a human without anyone running a query, with a test that fails first when
-the reader is removed.
-⛔ **Not a close:** the review round's CLEAN verdicts, or a rehearsal that happened to read green once.
-
-- **Shipped in v0.131.5.0 (Phase 164.6.8 OUTAGEALERT, 2026-10-14), live check pending in plan 09, NOT closed.** Item 4 (nothing reads the run) is answered in code by the `cron_sync` heartbeat arm of `public.ops_staleness_check()`. Items 1-3 are untouched. Item 4 closes with `167.1.2.2.2-TRADESYNC-STALENESS-ALARM`, on plan 09's live check.
-- ✅ **Item 4 CLOSED 2026-10-14 by Phase 164.6.8 OUTAGEALERT plan 09, with `167.1.2.2.2-TRADESYNC-STALENESS-ALARM`.** The pending line above is kept as lineage. The `cron_sync` heartbeat arm of `public.ops_staleness_check()` is registered at `40 * * * *` (19:54 UTC) and its first tick at 20:40:00 UTC succeeded with an `ok` observer row and no page; the drill reached the Sentry rule "Ops alert: outage (164.6.8)" and the founder confirmed it notified them without opening Sentry (D-15: Sentry is the only live channel, so this closure relies on that delivery; email is booked as `164.6.8-OPS-ALERT-EMAIL-UNCONFIGURED`). The gate's test was seen RED with the reader removed (plan 02). Items 1, 2 and 3 stay OPEN and untouched.
-
 ### [167.1.2.2.2-PROVENANCE-GATE-RESIDUALS] — MEDIUM residuals of the `trades_fetched_at` / `series_provenance` column migration and its gate that the plan 02 review round recorded and did not fix (booked 2026-10-09, Phase 167.1.2.2.2 plan 02 Task 3) (owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-03; tagged 2026-11-23)
 
 **Why it is open.** migration-reviewer, rls-policy-auditor and silent-failure-hunter reported
@@ -2810,9 +2774,9 @@ reads an unpublished row's value. (5) plan 05's red-first test on a `computing` 
 - **[167.1.2.2.2-INCOME-FALLBACK-PRODUCER-PIN]** (logged 2026-10-11, PR-B review round 3 R3-ME-01, MEDIUM, confidence 5; owner: the next phase that ships a Binance strategy key). The cron reads `daily_pnl_binance_income_fallback` through its own string constant in `routers/cron.py`, and the fetcher writes it as a separate literal in `services/exchange.py`. The round-3 tests hand the flag to the cron through a patched buffer, so a rename on the fetcher side would silently reopen R2-ME-01 (Binance spot fills stored over daily P&L). Done when one test runs the real `fetch_daily_pnl` with the income call failing and the spot call succeeding and asserts `_fetch_degradation` names the flag, or when both sides import one constant. Dormant until a Binance strategy key exists on PROD. Also correct the comment beside the cron constant: nothing in the tree reads the flag by name for an admin health card.
 
 Counts and ages only; no ids. Each entry below was recorded by plan 13 rather than fixed, because
-fixing it would widen the phase past its six success criteria. The two earlier TRADESYNC bookings
-(`[167.1.2.2.2-CRON-TICK-RESIDUALS]` and `[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]`) sit above, under the
-DERIVECRON heading, where plans 01 and 02 appended them.
+fixing it would widen the phase past its six success criteria. The earlier TRADESYNC booking
+`[167.1.2.2.2-PROVENANCE-GATE-RESIDUALS]` sits above, under the DERIVECRON heading, where plan 02 appended it
+(the other earlier booking from plan 01 was closed and deleted by Phase 242 SECRETSHYGIENE on 2026-11-27).
 
 ### 167.1.2.2.2-CRONOBS-SCOPE — the prober's `cron-obs` arm watches two named jobs and joins pg_net rows by time alone (booked 2026-10-10, Phase 167.1.2.2.2 SC-6)
 
@@ -4240,33 +4204,6 @@ follows is what was deliberately left, with the reason.
       ⚠️ NOT yet established for `check_fan_in_ready` or `reject_sentinel_writes` — each has TWO defining migrations, so the same archaeology must be done per file before either is characterised. Do not generalise this finding to them.
       ⚠️ `check_fan_in_ready` remains the one with EXECUTABLE consequence: PROD lacks the `v_row_found BOOLEAN` tracking that distinguishes "no parent row" from "a parent row of NULLs".
 - [ ] **[SEC-DRIFTPATHS-01] `migration-drift-check.yml` runs PR-head script content with the PROD database password, and the `Production` environment has no required reviewers.** **Still open:** the founder removed the `Production` reviewers on 2026-09-23 (CLAUDE.md), so the question this entry asked is answered "no". Fork PRs are excluded by the workflow's same-repo `if:`, so today the blast radius is push-access collaborators, which is the founder alone. The day a non-founder committer is added it is arbitrary code execution with the production DB password: configure required reviewers (or another gate) before that. ⚠️ Do NOT fix it by removing the gate's own script paths from the workflow's `paths:` filter.
-
-## Phase 164.3 round-4 residuals — ⚠️ SUPERSEDED 2026-08-29: 9 of 11 are now OWNED BY PHASE 164.3.1
-
-### [SECRETSCAN-FULLHISTORY-01] gitleaks full-history scan surfaces fixture secrets a PR scan never sees (owned by Phase 242 SECRETSHYGIENE, v1.23; REQUIREMENTS.md SECR-03; tagged 2026-11-23)
-
-**Measured 2026-09-05** on `workflow_dispatch` run 33938272686 (branch `phase-164.4.1-pgcron-lane`,
-head `f04ce51b`). `secret-scan` FAILED with findings in ~15 pre-existing files —
-`analytics-service/tests/test_*.py`, `scripts/backfill_funding.py`, several
-`src/**/route.test.ts` — flagging `SERVICE_KEY`, `EXCHANGE_SECRET`, `api_key`,
-`_SERVICE_KEY_CANARY`, `investor_password` literals in test fixtures.
-
-**Why it was green on every PR:** the job checks out with `fetch-depth: 0`, and on a non-PR
-event `gitleaks-action` scans the WHOLE HISTORY; on a `pull_request` event it scans only the
-PR's commits. Every flagged commit is historical — none belongs to the branch under test.
-
-**Why this is booked, not fixed here:** it is pre-existing, it is not user-facing, and a
-pg_cron lane phase is the wrong provenance for a repo-wide fixture-secret sweep (same
-reasoning as `[REDUNDER-WINDOWS-COUNTS]` below). It is also NOT nothing: it means a real
-secret committed historically would be invisible to the PR gate that everyone reads as
-authoritative.
-
-**What to do:** decide whether these fixtures should carry obviously-fake values, be covered
-by a reviewed `.gitleaks.toml` allowlist (⚠️ an allowlist is a permanent blind spot — prefer
-changing the fixtures), and whether a scheduled full-history scan should run so the gap is
-visible on a cadence rather than only when someone dispatches CI by hand.
-⚠️ Pin `GITLEAKS_VERSION` when touching this: 8.24.3 silently drops `[[allowlists]]`, and
-gitleaks auto-loads `.gitleaks.toml` from cwd, so omitting `-c` tests nothing.
 
 ## Phase 164.7 (APPSETTINGS) — SQL-fixer + three-reviewer residuals (logged 2026-09-07)
 

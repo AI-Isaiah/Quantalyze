@@ -2,95 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261020120000_ops_staleness_check.sql
--- Migration: public.ops_staleness_check() — the READER that turns the daily
--- trade-sync heartbeat and the backfill queue into a page. Phase 164.6.8
--- (OUTAGEALERT) / plan 02 / SC-1, D-10 and D-11.
---
--- WHAT THIS CLOSES. Two booked gaps share one reader:
---   * `[167.1.2.2.2-TRADESYNC-STALENESS-ALARM]` — `/api/cron-sync` writes ONE
---     closed `public.cron_runs` row per run under `cron_name = 'cron_sync'`
---     (routers/cron.py, `_cron_sync_heartbeat_row`), and nothing read it. This
---     is also item 4 of `[167.1.2.2.2-CRON-TICK-RESIDUALS]`: nothing read the run.
---   * `167.1.2.2-BACKFILL-STALENESS-ALARM` — the dedicated backfill worker has no
---     heartbeat writer, so its staleness is a `public.compute_jobs` QUEUE read.
--- Both gates say "reaches a human without one running a query". This function is
--- the reader; the page itself is delivered by the EXISTING route
--- `POST /api/prober-cadence-alert` (analytics-service/routers/cron.py), which
--- plan 01 of this phase wires to Sentry and the founder email.
---
--- WHAT THIS SHIPS AND WHAT IT DOES NOT.
--- It ships one SECURITY DEFINER function, a COMMENT, a REVOKE and a
--- catalogue-only self-verifying block. ⛔ It does NOT register anything: the
--- file never makes the pg_cron schedule call, and says so in this header only
--- by that description. Registration is a live PROD operation owned by plan 09
--- of this phase (marker query first), documented in the go-live runbook that
--- plan 05 writes. Until then nothing invokes this function.
---
--- THE TWO ARMS (D-10, D-11).
---   1. cron_sync. Pages when the newest closed `cron_sync` row is older than
---      `c_cron_sync_ceiling` (D-11; the same 2 days as D-05 of 167.1.2.2.2), when
---      no such row exists, or when the two newest closed rows are BOTH `error`.
---      Causes, first match wins in this order: `never_ran`, `heartbeat_stale`,
---      `two_consecutive_errors`. One `error` row is not a page; two in a row is.
---   2. backfill. Pages when eligible backfill-kind jobs wait unclaimed past the
---      derived ceiling (`backfill_queue_stalled`), or when a `running`
---      backfill-kind job outlives that ceiling plus one watchdog tick
---      (`backfill_running_stuck`).
---
--- ⛔ THE BACKFILL CONSTANTS ARE DERIVED, NOT CHOSEN, AND ARE PINNED.
---   * the kind list is `main_worker.BACKFILL_KINDS`;
---   * the ceiling is the LARGEST watchdog stall threshold over those kinds:
---     `WATCHDOG_PER_KIND_OVERRIDES['derive_broker_dailies']` is 30 minutes, and
---     `derive_allocator_equity` has no override so it takes the watchdog's
---     global default of 10 minutes. A live worker either finishes a job, fails
---     it, or has it reclaimed by the watchdog within that largest threshold, so
---     a queue that has shown no claim for longer is not a worker mid-crawl;
---   * the extra slack on a running job is the watchdog's own tick cadence, the
---     `interval` default of `main_worker.watchdog_loop` (60 seconds): a job past
---     its threshold is reclaimed on the NEXT tick, not instantly.
---   `analytics-service/tests/test_ops_staleness_parity.py` reads this file and
---   `main_worker` and fails when either side moves alone. A kind added to the
---   worker but not here would leave that kind's stall silent; a ceiling below the
---   watchdog's would page on a healthy long crawl.
---
--- NO "RECOVERED" NOTICE. D-06 is MT5-specific. This reader only pages; the
--- absence of a recovery message for these two sources is deliberate, not an
--- omission.
---
--- THE GUARD IS A COPY, NOT A FIX. The Vault read, the url read and the allow-list
--- re-test below are copied as they stand in `public.cron_sync_tick()`
--- (20261010140000_cron_sync_tick.sql), the NEWEST definition of that guard. The
--- known residuals of `[167.1.2.2.2-CRON-TICK-RESIDUALS]` items 1 to 3 (suffix
--- wildcard allow-list, a separate retry/RAISE concern, whitespace-only trimming)
--- ride a separate forward migration that fixes all the sibling functions
--- together; they are deliberately not re-fixed in one copy here.
---
--- THE OBSERVER ROW. Every call writes ONE `public.cron_runs` row under
--- `cron_name = 'ops_staleness_check'` (status `error` when either arm is stale,
--- else `ok`), BEFORE any outbound call, so this reader's own liveness is
--- readable the same way the heartbeats it watches are. Its text and metadata
--- carry cause NAMES and integer minutes only, never a url, a key or a setting
--- value. ⚠️ A RAISE after that INSERT rolls the row back with the rest of the
--- call; a tick that could not deliver leaves NO row, and that absence is itself
--- the next tick's evidence (the same trade the prober-cadence observer makes).
---
--- ⛔ FORWARD MIGRATION ONLY. Nothing here edits an applied migration file, and
--- nothing here runs `supabase db push`, `db reset`, `--project-ref` or
--- `--db-url`. This checkout's Supabase CLI is linked to PRODUCTION; this
--- migration reaches PROD only by merge, then apply-test, then the automatic PROD
--- apply. There is no human stop between the merge and the PROD apply, so every
--- review happens before the merge.
---
--- ⛔ CATALOGUE-ONLY VERIFY, BY DESIGN. The block at the foot never calls the
--- function (an apply-time call would fire a real HTTP POST the moment this
--- merges) and never counts rows. Shared TEST carries PROD's catalogue and EMPTY
--- tables, so a data-reading check that refuses on an empty table would block the
--- PROD apply ([164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]).
-
--- --------------------------------------------------------------------------
--- STEP 1: public.ops_staleness_check()
--- --------------------------------------------------------------------------
+-- source migration: 20261127130000_cron_destinations_exact.sql
+-- ==========================================================================
+-- STEP 2d: public.ops_staleness_check()
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION public.ops_staleness_check()
 RETURNS BIGINT
 LANGUAGE plpgsql
@@ -127,11 +42,10 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression on system_settings and to the constant in
-  --    cron_sync_tick() and match_engine_cron_tick().
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits and the same two the other three ticks carry.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- ----- ARM 1: the cron_sync heartbeat --------------------------------
   -- Narrowed by cron_name, and by a CLOSED row: a heartbeat is a completed run.
@@ -246,7 +160,7 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -265,8 +179,8 @@ BEGIN
   -- job-run row, the Postgres log and whatever ships those onward; echoing an
   -- attacker-chosen string writes their collector's hostname into every
   -- downstream reader. Name the SETTING, never its value (T-161.1-10).
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT it returns is a REQUEST ID, not an HTTP

@@ -131,7 +131,7 @@ SELECT p.prosecdef,
 SELECT count(*) AS n_keys FROM vault.decrypted_secrets WHERE name = 'analytics_service_key';
 
 SELECT count(*) AS n_url_rows,
-       count(*) FILTER (WHERE s.value ~ '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$')
+       count(*) FILTER (WHERE s.value IN ('https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'))
          AS n_url_allowed
   FROM public.system_settings s WHERE s.key = 'analytics_service_url';
 ```
@@ -139,7 +139,10 @@ SELECT count(*) AS n_url_rows,
 - **Expected:** `n_keys = 1`, `n_url_rows = 1`, `n_url_allowed = 1`. This is the same key and
   destination `match_engine_cron_tick()` and `cron_sync_tick()` use, so the check is normally a
   formality. The statements return counts on purpose: never print the key, and do not paste the
-  URL value into a ticket or a commit.
+  URL value into a ticket or a commit. `n_url_allowed` compares by equality against exactly two
+  origins, the production origin and the loopback discard literal, the set that the CHECK and each
+  function's own re-test have used since migration `*_cron_destinations_exact.sql` (Phase 242
+  SECRETSHYGIENE); a sibling `*.up.railway.app` host no longer counts.
 - **Abort if:** `n_keys <> 1` (the function raises on a missing or duplicate secret, so every
   stale tick would leave no observer row), or `n_url_rows <> 1`, or `n_url_allowed <> 1`.
 

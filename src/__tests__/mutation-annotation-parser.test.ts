@@ -1132,7 +1132,7 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `armsSeen` 1079 -> 1085, the 6 twinned arms (1a, 1b, 2a, 2b, 3, 4) of the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `arms: 0/1085/0`. stepsSeen does not move: all six twins are `sql` steps, which this walk skips.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `armsSeen` 1085 -> 1099, the 14 twinned arms of the two NEW gates test_insert_api_key_rpc.sql (R1 to R8) and test_api_keys_user_id_immutable.sql (1a, 1b, 2a, 2b, 3, 4), migration 20261127120100. MEASURED: `--parse-only` printed `arms: 0/1099/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `armsSeen` 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
-    expect(armsSeen).toBe(1100);
+    expect(armsSeen).toBe(1110);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1198,7 +1198,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `stepsSeen` 1220 -> 1232, +12 file steps in test_enqueue_poll_positions_cohort.sql (five new twins of two edits each, and P7's twin edits both migrations, +2).
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `stepsSeen` 1232 -> 1242, +10 file steps: 6 in test_insert_api_key_rpc.sql (R1, R3, R5, R6, R7 `edit`, R8 `insert-after`; R2 and R4 are `sql`) and 4 in test_api_keys_user_id_immutable.sql (2a, 2b, 3, 4 `edit`; 1a and 1b are `sql`).
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `stepsSeen` 1242 -> 1243, +1 `edit` file step (R9's twin swaps two credential parameters in the INSERT's VALUES list).
-    expect(stepsSeen).toBe(1243);
+    // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `stepsSeen` 1243 -> 1252, +9 file steps, MEASURED off the failing assertion (`expected 1252 to be 1243`), never summed.
+    expect(stepsSeen).toBe(1252);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2179,8 +2180,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): `needles.length` 1195 -> 1199, the same +4 file steps as `stepsSeen`. MEASURED: this file's run read `expected 1199 to be 1195`.
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): `needles.length` 1220 -> 1232, the same +12 `edit` needles.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `needles.length` 1232 -> 1242, the same +10 file steps as `stepsSeen`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `needles.length` 1243 -> 1252, the same +9 `edit` needles as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `needles.length` 1242 -> 1243, the same +1 file step as `stepsSeen`.
-    expect(needles.length).toBe(1243);
+    expect(needles.length).toBe(1252);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });

@@ -4939,6 +4939,11 @@ jobs:
           #   exception handler). No file joined, so SENTINEL_FLOOR stays 29 and
           #   ARMS_FLOOR moves 477 -> 480 (+3). The mutation runner's own ARMS_FLOOR
           #   moved 864 -> 867 in the same fix, also +3.
+          # Re-measured 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, migration 20261127130000), FOUR files GREW, each read
+          #   off its own first `ALL N ARMS EXECUTED` sentinel: test_cron_sync_tick.sql 8 -> 11 (W1, P2, K1),
+          #   test_prod_prober_cadence.sql 7 -> 9 (W1, K1), test_ops_staleness_check.sql 14 -> 16 (W1, K1) and
+          #   test_analytics_service_settings_and_vault_tick.sql 13 -> 16 (U3, W1, K1). No file joined, so SENTINEL_FLOOR stays 38 and
+          #   ARMS_FLOOR moves 589 -> 599 (+3 +2 +2 +3 = +10). The mutation runner's own ARMS_FLOOR moved 1079 -> 1089 in the same plan, also +10.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4948,7 +4953,7 @@ jobs:
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
           #   test_allocator_trade_reads.sql                   8
-          #   test_analytics_service_settings_and_vault_tick.sql 13
+          #   test_analytics_service_settings_and_vault_tick.sql 16
           #   test_api_key_flow_prices.sql                     8
           #   test_api_key_nav_marks.sql                      11
           #   test_api_keys_user_id_immutable.sql              6
@@ -4961,7 +4966,7 @@ jobs:
           #   test_compute_job_metadata_merge.sql            13
           #   test_contact_requests_insert_intro_authz.sql   15
           #   test_create_wizard_strategy_for_key.sql         9
-          #   test_cron_sync_tick.sql                         8
+          #   test_cron_sync_tick.sql                         11
           #   test_enqueue_dedup_record_retract.sql          18
           #   test_enqueue_poll_positions_cohort.sql           9
           #   test_enqueue_race_loss_40001.sql                3
@@ -4976,9 +4981,9 @@ jobs:
           #   test_mt5_server_clock_readings.sql             24
           #   test_mt5_terminal_lease.sql                     8
           #   test_okx_archive_rebuild.sql                   15
-          #   test_ops_staleness_check.sql                   14
+          #   test_ops_staleness_check.sql                   16
           #   test_orphan_reaped_attempt_record.sql            4
-          #   test_prod_prober_cadence.sql                    7
+          #   test_prod_prober_cadence.sql                    9
           #   test_reconcile_readmit_exhaustions.sql           8
           #   test_reset_stalled_bridge_provenance.sql         6
           #   test_retention_crons_safe.sql                   4
@@ -5386,7 +5391,7 @@ jobs:
           #   and ARMS_FLOOR 386, re-derived by ci-anti-skip-gate.contract.test.ts on the merged tree, never
           #   by adding the moves.
           SENTINEL_FLOOR=41  # files declaring a sentinel
-          ARMS_FLOOR=610     # 8 + 13 + 8 + 11 + 14 + 8 + 8 + 13 + 15 + 9 + 8 + 18 + 3 + 8 + 8 + 18 + 24 + 41 + 14 + 24 + 15 + 14 + 7 + 4 + 103 + 20 + 16 + 10 + 7 + 35 + 22 + 5 + 9 + 23 + 8 + 4 + 6 + 8 + 6 + 9 + 6
+          ARMS_FLOOR=620     # 8 + 16 + 8 + 11 + 6 + 14 + 8 + 6 + 22 + 5 + 8 + 13 + 15 + 9 + 11 + 18 + 9 + 3 + 8 + 8 + 23 + 18 + 9 + 24 + 41 + 14 + 24 + 8 + 15 + 16 + 4 + 9 + 8 + 6 + 4 + 103 + 20 + 16 + 10 + 7 + 35
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
