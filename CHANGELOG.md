@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.133.107.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 1863fe80
+## [0.133.107.2] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 1863fe80
 
 ### Changed
 - `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46036945243`, after the PROD apply of merge `1863fe80`: sha256 `b45cb90a…` → `d2beb328…`.
@@ -12,6 +12,26 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46036945243` succeeded, and this entry was composed by the `redump-pr` job. Run `46036945243` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.133.107.1] - 2026-11-27 — records: Phase 255 NULLANCHOR closed; follow-up Phase 257 SEEDHOLD booked
+
+This is a records PR. It has no source, test, workflow or migration change. It also records the PROD backfill of `[255-OKX-PAGER-BACKFILL]`.
+
+### Changed
+- Phase 255 NULLANCHOR closes. `255-VERIFICATION.md` is at `passed` (SC-1, SC-2 and SC-4 verified; SC-3 was a ship-time deliverable and was met by v0.133.104.0, which deleted `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` from `TODOS.md`). It carries `verified_at_sha` and `drift_subjects`, and neither `covered_digest` nor `covered_files`. `255-SECURITY.md` has 0 open threats.
+- The phase directory lands on `main` with its records: CONTEXT, DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, the three PLANs and SUMMARYs, REVIEW (three rounds) with the review-fix report, SECURITY and VERIFICATION.
+- ROADMAP ticks Phase 255 (3/3) in the v1.23 overview and Progress table, lists its three plans, and carries the founder rulings of 2026-11-27. `255-CONTEXT.md` gets a dated decisions addendum with the same three rulings.
+- `phase complete 255` was run and its output reverted: it moves STATE's Current Position to another phase and flips unrelated `state.json` statuses, and it did not touch the v1.23 ROADMAP rows (`roadmap_updated: false`). The close is hand-edited, as for Phase 244.
+- `/gsd-phase` add put Phase 257 into the v1.22 section, so it was moved by hand into v1.23 HARDEN (header line, prose, overview bullet, section, Progress row), as 254 to 256 were.
+- STATE's Roadmap Evolution and Last activity carry the close and the booking.
+
+### Added
+- **Phase 257 SEEDHOLD, booked in v1.23 HARDEN.** Two Phase 255 review survivors in one phase: while the bound RPC `set_strategy_fills_reread_bound` is down, the cron cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records a read-through mark (the last complete 7-day window, as Binance does) so the next run continues from there instead of re-reading the same span.
+
+### Notes
+- **Founder rulings 2026-11-27 (AskUserQuestion), verbatim.** For `[255-OKX-PAGER-BACKFILL]`: "Re-read now (Recommended)". The re-read of the affected OKX strategies' history runs outside this PR's plans, and its results go into a later commit on this branch. For `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`: "Fix both in a follow-up (Recommended)". Both `TODOS.md` entries now name Phase 257 as their owner instead of "founder decision".
+- `[255-OKX-BEGIN-REACH-PROBE]` has no ruling yet and stays booked with its owner unchanged.
+- **`[255-OKX-PAGER-BACKFILL]` is closed and deleted from `TODOS.md`:** the backfill ran 2026-11-27 about 16:00Z on PROD through the product's own path. No cursor reset was needed: all three strategies' fills cursors and newest stored fills were already older than the OKX begin floor, and no re-read bound row existed, so the queued read's seed was clamped to the floor (`okx_fills_reach_clamped`) and walked the whole reachable span. One `sync_trades` job per strategy was enqueued through `enqueue_compute_job`, as the wizard does, after confirming the analytics service runs `2fda7ab31` or later on Railway. All three `sync_trades` jobs ended `done`, with no `sync_truncated_*` or `phase2_fill_ingestion_failed` flag and no bound row left. Stored OKX ETHUSDTSWAP fills: 100 -> 1182, 106 -> 1188 and 200 -> 1282 (total fills 3316 -> 4409, 106 -> 1199, 200 -> 1293), now running to 2026-11-20, so every read paged far past one 100-row page. The fills stored before Phase 255 all predate the floor (the newest was 2026-08-19), so the spans the one-page pager dropped before then are outside `fills-history`'s reach and were NOT recovered; only the OKX archive endpoint could reach them. No headline figure moved: each chained `derive_broker_dailies` ended `failed_final` with `realized read incomplete (daily_pnl_non_usd_okx)`, the same refusal every daily derive of these strategies has hit since at least 2026-11-25 (owned by Phase 256 OKXUNITSWITCH), so `strategy_analytics.computed_at` and its metrics are unchanged. The same Phase-1 refusal holds `last_fetched_trade_timestamp`, so later reads re-walk from the floor and the unique index absorbs the overlap.
 
 ## [0.133.107.0] - 2026-11-27 — Phase 252 DERIBITOPTIONS plan 08: the measured Deribit exercise row closes an option in the smoothed book
 
