@@ -1132,7 +1132,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `armsSeen` 1079 -> 1085, the 6 twinned arms (1a, 1b, 2a, 2b, 3, 4) of the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `arms: 0/1085/0`. stepsSeen does not move: all six twins are `sql` steps, which this walk skips.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `armsSeen` 1085 -> 1099, the 14 twinned arms of the two NEW gates test_insert_api_key_rpc.sql (R1 to R8) and test_api_keys_user_id_immutable.sql (1a, 1b, 2a, 2b, 3, 4), migration 20261127120100. MEASURED: `--parse-only` printed `arms: 0/1099/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `armsSeen` 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
-    expect(armsSeen).toBe(1110);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `armsSeen` 1110 -> 1119, the 9 twinned arms of the NEW gate test_strategy_analytics_unit_segments.sql.
+    expect(armsSeen).toBe(1119);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `armsSeen` 1100 -> 1109, the 9 twinned arms (1a, 1b, 1c, 2, 3, 4, 5a, 5b, 6) of the NEW gate test_strategy_analytics_unit_segments.sql. MEASURED: `--parse-only` printed `arms: 0/1109/0` and `coverage: files 100/127`; the --file diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -1199,7 +1201,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `stepsSeen` 1232 -> 1242, +10 file steps: 6 in test_insert_api_key_rpc.sql (R1, R3, R5, R6, R7 `edit`, R8 `insert-after`; R2 and R4 are `sql`) and 4 in test_api_keys_user_id_immutable.sql (2a, 2b, 3, 4 `edit`; 1a and 1b are `sql`).
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `stepsSeen` 1242 -> 1243, +1 `edit` file step (R9's twin swaps two credential parameters in the INSERT's VALUES list).
     // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `stepsSeen` 1243 -> 1252, +9 file steps, MEASURED off the failing assertion (`expected 1252 to be 1243`), never summed.
-    expect(stepsSeen).toBe(1252);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `stepsSeen` 1252 -> 1254, +2 `edit` file steps in test_strategy_analytics_unit_segments.sql.
+    expect(stepsSeen).toBe(1254);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `stepsSeen` 1243 -> 1245, +2 file steps in the NEW gate test_strategy_analytics_unit_segments.sql (the two `edit` twins of arms 2 and 3; the other seven twins are `sql` steps). MEASURED: this file run read `expected 1245 to be 1243` on needles.length.
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -2182,7 +2186,9 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `needles.length` 1232 -> 1242, the same +10 file steps as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `needles.length` 1243 -> 1252, the same +9 `edit` needles as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `needles.length` 1242 -> 1243, the same +1 file step as `stepsSeen`.
-    expect(needles.length).toBe(1252);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `needles.length` 1252 -> 1254, the same +2 file steps.
+    expect(needles.length).toBe(1254);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `needles.length` 1243 -> 1245, the same +2 file steps as `stepsSeen`. MEASURED: this file run read `expected 1245 to be 1243`.
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2801,7 +2807,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `filesTotal` 123 -> 124, the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `coverage: files 97/124`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `filesTotal` 124 -> 126, the two NEW DBACC-02 gates test_insert_api_key_rpc.sql and test_api_keys_user_id_immutable.sql. MEASURED: `--parse-only` printed `coverage: files 99/126`.
-    expect(corpus.filesTotal).toBe(126);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `filesTotal` 126 -> 127, the NEW gate test_strategy_analytics_unit_segments.sql. MEASURED: `--parse-only` printed `coverage: files 100/127`.
+    expect(corpus.filesTotal).toBe(127);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2902,7 +2909,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): annotated files 96 -> 97, the NEW gate test_client_role_timeouts.sql (6 twinned arms, migration 20261127120000). MEASURED: `--parse-only` printed `coverage: files 97/124`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): annotated files 97 -> 99, the two NEW DBACC-02 gates (8 and 6 twinned arms, migration 20261127120100). MEASURED: `--parse-only` printed `coverage: files 99/126`.
-    expect(corpus.filesAnnotated).toBe(99);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `filesAnnotated` 99 -> 100, the NEW gate test_strategy_analytics_unit_segments.sql (9 twinned arms). MEASURED: `--parse-only` printed `coverage: files 100/127`.
+    expect(corpus.filesAnnotated).toBe(100);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       // ⭐ ADDED 2026-10-11 (Phase 170.4 ALLOCHOLDINGS, plan 09): the per-key unique-index gate (6 arms) for migration 20261011120000.
@@ -3052,6 +3060,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_strategy_analytics_stuck_computing_reaper.sql",
       // ⭐ ADDED 2026-10-09 (Phase 167.1.2.2.2 TRADESYNC, plan 03): the trade-fetch and provenance column gate (7 arms).
       "test_strategy_analytics_trade_fetch_provenance.sql",
+      // ⭐ ADDED 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): the unit_segments column gate (9 twinned arms) for migration 20261127200000.
+      "test_strategy_analytics_unit_segments.sql",
       // ⭐ ADDED 2026-11-26 (Phase 253 BINANCECURSOR, plan 03): the per-strategy fills re-read bound gate (24 twinned arms) for migration 20261126150000 (stamp moved from 20261126140000 at the merge with Phase 230).
       "test_strategy_fills_reread_bound.sql",
       "test_strategy_keys_publish_integrity.sql",
@@ -3522,7 +3532,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): `filesTotal` 121 -> 122, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `filesTotal` 123 -> 124, the NEW gate test_client_role_timeouts.sql (6 twinned arms, migration 20261127120000). MEASURED: `--parse-only` printed `coverage: files 97/124`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `filesTotal` 124 -> 126, the two NEW DBACC-02 gates test_insert_api_key_rpc.sql and test_api_keys_user_id_immutable.sql. MEASURED: `--parse-only` printed `coverage: files 99/126`.
-    expect(corpus.filesTotal).toBe(126);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `filesTotal` 126 -> 127, the NEW gate test_strategy_analytics_unit_segments.sql. MEASURED: `--parse-only` printed `coverage: files 100/127`.
+    expect(corpus.filesTotal).toBe(127);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3579,7 +3590,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): annotated files 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (8 twinned arms L1 to L8, migration 20261126140000). MEASURED: `--parse-only` printed `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `annotatedFiles` 96 -> 97, moving WITH `filesAnnotated`; the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `coverage: files 97/124`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `annotatedFiles` 97 -> 99, moving WITH `filesAnnotated`; the two NEW DBACC-02 gates. MEASURED: `--parse-only` printed `coverage: files 99/126`.
-    expect(corpus.annotatedFiles).toHaveLength(99);
+    // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): annotated files 99 -> 100, the NEW gate test_strategy_analytics_unit_segments.sql. MEASURED: `--parse-only` printed `coverage: files 100/127`.
+    expect(corpus.annotatedFiles).toHaveLength(100);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {
