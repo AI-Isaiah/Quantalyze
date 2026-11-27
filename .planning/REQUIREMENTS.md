@@ -113,11 +113,11 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Data integrity: one figure convention (FIGUREMATH)
 
-- [ ] **FIG-01**: Every engine that annualizes (the stored Python metrics, the factsheet and Scenario TypeScript engines, portfolio analytics and matching) follows F-5. Each language holds the convention in one named constant set, and a cross-language pin test fails if any engine's year length or ddof changes. (covers: 194-ENGINE-CONSTANTS, L2214)
-- [ ] **FIG-02**: For the same strategy and period, every engine reports the same CAGR, Sharpe and TWR within a pinned tolerance, proven by a parity test across all engines. The composite half of `L2214` is out (F-2). (covers: L2214)
-- [ ] **FIG-03**: CVaR is historical and reads null below a minimum observation count held in one named constant (the count is set at plan time). quantstats moves to 0.0.86 in the same PR as a per-metric decision record. Re-pinning moved values without a decision is not a close. (covers: QUANTSTATS-0086-REDERIVE-01)
-- [ ] **FIG-04**: CAGR uses one span rule in every engine, pinned by a test. Whether emptied stretches count toward the span is a founder ruling at plan time. (covers: 167.1.2.2.1-CAGR-EMPTY-SPAN)
-- [ ] **FIG-05**: Figures moved by FIG-01..04 are re-derived for the whole fleet. The frozen spine is re-baselined as a reviewed act (never by re-running `regen_golden.py` in a constants PR), and the CHANGELOG entry names the figures that moved. (covers: 194-ENGINE-CONSTANTS, QUANTSTATS-0086-REDERIVE-01)
+- [x] **FIG-01**: Every engine that annualizes (the stored Python metrics, the factsheet and Scenario TypeScript engines, portfolio analytics and matching) follows F-5. Each language holds the convention in one named constant set, and a cross-language pin test fails if any engine's year length or ddof changes. (covers: 194-ENGINE-CONSTANTS, L2214)
+- [x] **FIG-02**: For the same strategy and period, every engine reports the same CAGR, Sharpe and TWR within a pinned tolerance, proven by a parity test across all engines. The composite half of `L2214` is out (F-2). (covers: L2214)
+- [x] **FIG-03**: CVaR is historical and reads null below a minimum observation count held in one named constant (the count is set at plan time). quantstats moves to 0.0.86 in the same PR as a per-metric decision record. Re-pinning moved values without a decision is not a close. (covers: QUANTSTATS-0086-REDERIVE-01)
+- [x] **FIG-04**: CAGR uses one span rule in every engine, pinned by a test. Whether emptied stretches count toward the span is a founder ruling at plan time. (covers: 167.1.2.2.1-CAGR-EMPTY-SPAN)
+- [x] **FIG-05**: Figures moved by FIG-01..04 are re-derived for the whole fleet. The frozen spine is re-baselined as a reviewed act (never by re-running `regen_golden.py` in a constants PR), and the CHANGELOG entry names the figures that moved. (covers: 194-ENGINE-CONSTANTS, QUANTSTATS-0086-REDERIVE-01)
 
 ### User-facing: honest factsheets (FACTSHEETHONEST)
 
@@ -339,11 +339,11 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | HEAL-03 | Phase 227 | Complete |
 | HEAL-04 | Phase 227 | Complete |
 | HEAL-05 | Phase 227 | Complete |
-| FIG-01 | Phase 236 | Shipped (#1354), human verification pending |
-| FIG-02 | Phase 236 | Shipped (#1354), human verification pending |
-| FIG-03 | Phase 236 | Shipped (#1354), human verification pending |
-| FIG-04 | Phase 236 | Shipped (#1354), human verification pending |
-| FIG-05 | Phase 236 | Shipped (#1354); PROD fleet re-derive pending |
+| FIG-01 | Phase 236 | Complete |
+| FIG-02 | Phase 236 | Complete |
+| FIG-03 | Phase 236 | Complete |
+| FIG-04 | Phase 236 | Complete |
+| FIG-05 | Phase 236 | Complete |
 | FACT-01 | Phase 237 | Complete |
 | FACT-02 | Phase 237 | Complete |
 | FACT-03 | Phase 238 | Shipped (#1363), human verification pending |

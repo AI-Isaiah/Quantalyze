@@ -172,7 +172,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative (completed 2026-11-26)
 - [x] **Phase 234: NOCAPITAL — a no-capital key takes one named path, and a transient read never drops a funded key** - Seam S2 owner: transient-zero MT5 keys, any exception reverts, counted fallback flag, no residue reason (completed 2026-11-25)
 - [x] **Phase 235: HOLDINGSTRUTH — one account counts once on Holdings, match scoring and the dashboard, and every failing key is named** - Reads the identity value 225 settles: identity misses fail loud, per-account unpriced marker, dashboard marker read, shared-account keys named (completed 2026-11-26)
-- [ ] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures
+- [x] **Phase 236: FIGUREMATH — every engine annualizes one way, CVaR is historical, and moved figures are re-derived and announced** - F-5 "365, ddof 1 everywhere", F-6 historical CVaR, quantstats 0.0.86, one CAGR span rule, fleet re-derive; moves published figures (completed 2026-11-27)
 - [x] **Phase 237: FACTSHEETHONEST — every surface shows a strategy's true state, and no cache re-serves a stale or failed one** - Owner of the OG route and payload builder: withheld residue, re-run holding on every surface, OG not-found cache, BTC price failure cache, owner data source (completed 2026-11-25)
 - [x] **Phase 238: NEVERCOMPUTED — a strategy that never computed, failed or stalled never claims a compute time or tells its owner to wait** - computed_at on never-computed rows (founder ruling) and the /strategies note wording (completed 2026-11-26)
 - [x] **Phase 239: SURFACECACHE — the composer range and the Discovery ranking reflect the current truth** - Composer range stored as dates; BTC-unit and USD returns ranked together as pure performance (founder ruling 2026-11-24) (completed 2026-11-24)
@@ -641,7 +641,7 @@ This moves published figures on every surface, MT5 included.
 3. CVaR is historical and reads null below the named minimum observation count. quantstats is 0.0.86, with a per-metric decision record in the same PR, and no moved value is re-pinned without a decision. CAGR uses one span rule in every engine, pinned by a test, per the founder's ruling. (FIG-03, FIG-04)
 4. The moved figures are re-derived for the whole fleet. The frozen spine is re-baselined as a reviewed act, never by re-running `regen_golden.py` in a constants PR. The CHANGELOG entry names the figures that moved. (FIG-05)
 5. PROOF-01: each gate above goes RED on a one-sided constant change or a neutered copy, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. A loosened tolerance or re-pinned values is not a close.
-**Plans:** 11/11 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 - [x] 236-01-PLAN.md — One named constant set per language, the cross-language pin and the annualizing-site census; FIGURE_DEFS_VERSION 3 (FIG-01)
@@ -956,7 +956,7 @@ Plans:
 | 233. DERIBITTRUTH | 7/7 | Complete (shipped v0.133.83.0, #1360; verification passed 5/5; book B's out_of_window_flow handed to Phase 234) | 2026-11-26 |
 | 234. NOCAPITAL | 4/4 | Complete (shipped v0.133.76.0, #1339; verification passed, SECURITY 15/15 closed) | 2026-11-25 |
 | 235. HOLDINGSTRUTH | 6/6 | Complete    | 2026-11-26 |
-| 236. FIGUREMATH | 11/11 | Shipped v0.133.82.0 (#1354); human verification pending (FIG-05, the coordinator's PROD fleet re-derive from `docs/runbooks/figuremath-fleet-rederive.md`, after 233 DERIBITTRUTH merges and 236 is deployed) | - |
+| 236. FIGUREMATH | 11/11 | Complete (shipped v0.133.82.0, #1354; FIG-05 fleet re-derive passed 2026-11-27, verification `passed`) | 2026-11-27 |
 | 237. FACTSHEETHONEST | 13/13 | Complete (shipped v0.133.63.0, #1316; both visual checks passed 2026-11-25) | 2026-11-25 |
 | 238. NEVERCOMPUTED | 9/9 | Complete (shipped PR-1 v0.133.71.0 #1331, FACT-05, and PR-2 v0.133.90.0 #1363, FACT-03; migration 20261126130000 applied to TEST and PROD; verification passed, all five human items resolved 2026-11-26) | 2026-11-26 |
 | 239. SURFACECACHE | 3/3 | Complete (shipped v0.133.72.0, #1332) | 2026-11-24 |

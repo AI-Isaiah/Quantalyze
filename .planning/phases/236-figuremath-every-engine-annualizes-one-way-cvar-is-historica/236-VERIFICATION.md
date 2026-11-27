@@ -1,9 +1,9 @@
 ---
 phase: 236-figuremath-every-engine-annualizes-one-way-cvar-is-historica
 verified: 2026-11-25T23:55:00Z
-status: human_needed
-score: 6/7 must-haves verified
-verified_at_sha: 4b7f1688346e93ae5dedb5e1e2554930696a97e0
+status: passed
+score: 7/7 must-haves verified
+verified_at_sha: 45d7b4e5c701f5f924979b571021000b9550d7bb
 drift_subjects:
   - analytics-service/services/figure_conventions.py
   - src/lib/figure-conventions.ts
@@ -27,27 +27,17 @@ drift_subjects:
   - analytics-service/requirements.in
   - analytics-service/requirements.txt
   - docs/runbooks/figuremath-fleet-rederive.md
-behavior_unverified: 1
+behavior_unverified: 0
 overrides_applied: 0
-behavior_unverified_items:
-  - truth: "SC4 / FIG-05: the moved figures are re-derived for the whole fleet"
-    test: "Coordinator runs docs/runbooks/figuremath-fleet-rederive.md against PROD after Phases 229, 233 and 234 are merged and 236 is deployed, and records the result"
-    expected: "Every non-composite strategy's stored row reads figure_defs_version 3 with cagr_start / cagr_end; the allocator MWR is recomputed; number-to-null counts are zero or each has a written cause; the 155.2 freeze check has the coordinator's written confirmation"
-    why_human: "A PROD write, deliberately handed to the coordinator (CONTEXT Scheduling and Deferred sections). No code in the repo can prove the fleet was re-derived; only the recorded run can."
-human_verification:
-  - test: "Run the fleet re-derive from docs/runbooks/figuremath-fleet-rederive.md (FIG-05)"
-    expected: "Recorded re-derive with the section 5 closing read and section 6 number-to-null report clean (see behavior_unverified_items)"
-    why_human: "PROD write owned by the coordinator; ROADMAP SC4 says the figures 'are re-derived for the whole fleet' and that outcome cannot exist before merge and deploy"
-  - test: "CHANGELOG entry at ship names the figures that moved (SC4, FIG-05)"
-    expected: "Entry built from 236-FIGURES-MOVED.md, referencing 236-QUANTSTATS-DECISIONS.md by file name, carrying the freeze side, the TODOS ids closed, and the known limits in section 10"
-    why_human: "CHANGELOG.md and VERSION are written by the ship step per the repo's CHANGELOG discipline, not by the phase branch; at this SHA CHANGELOG.md is unchanged (git diff 8507564ef..HEAD shows no change)"
+behavior_unverified_items: []
+human_verification: []
 ---
 
 # Phase 236: FIGUREMATH Verification Report
 
 **Phase Goal:** Every engine that annualizes follows F-5 ("365, ddof 1 everywhere"): the stored Python metrics, the factsheet and Scenario TypeScript engines, portfolio analytics and matching. CVaR is historical and null below one named minimum (F-6). quantstats moves to 0.0.86 with a per-metric decision record. CAGR uses one span rule in every engine. The moved figures are re-derived for the whole fleet, the frozen spine is re-baselined as a reviewed act, and the CHANGELOG names the figures that moved.
-**Verified:** 2026-11-25
-**Status:** human_needed
+**Verified:** 2026-11-25; closed 2026-11-27
+**Status:** passed
 **Re-verification:** No, initial verification
 
 Everything the repository itself can prove is proven: the conventions, the pins, the censuses, the parity oracle, the CVaR floor, the span rule, the quantstats pin and decision record, the runbook and the figures-moved list. What remains is the PROD fleet re-derive and the CHANGELOG, neither of which a phase branch can perform. No code gap was found.
@@ -66,7 +56,7 @@ Everything the repository itself can prove is proven: the conventions, the pins,
 | 6 | SC4 (FIG-05): the moved figures are re-derived for the whole fleet; the frozen spine is re-baselined as a reviewed act (never by re-running `regen_golden.py` in a constants PR); the CHANGELOG entry names the figures that moved | PRESENT_BEHAVIOR_UNVERIFIED | In-repo deliverables are present: `236-FIGURES-MOVED.md` (10 sections, per figure, for whom, which plan; it states plainly that nothing in it is a measured PROD number); `docs/runbooks/figuremath-fleet-rederive.md` (747 lines, rewritten over 4 review rounds: marker gate, population from `strategies`/`strategy_analytics` not `ledger_refresh_staleness`, bind step that STOPs on empty, batch tagging, number-to-null report for every figure, allocator MWR guard, 155.2 written confirmation); the frozen spine moved by hand in `golden_252d_expected.json` (only `cagr_start/end`, `figure_defs_version` 3, `serenity_index`) and `constit_parity_golden.json` (`cagr` 0.95092 to 0.95003, derived from the golden's own returns), with dated reviewed-act blocks in `phase-29-` and `phase-52-frozen-spine-guards.test.ts` and no `regen_golden.py` run; the four TODOS ids are deleted (grep count 0); `OG_CARD_VERSION` 3 to 4 and `FIGURE_DEFS_VERSION` 2 to 3 in both languages. NOT present and not presentable from a phase branch: the executed re-derive and the CHANGELOG entry. See "FIG-05 scope decision". |
 | 7 | SC5 / PROOF-01: each gate goes RED on a one-sided constant change or neutered copy with its named arm first, restored from a byte backup, GREEN, recorded verbatim in the plan SUMMARY | VERIFIED | Every plan SUMMARY (01 to 11) records RED arms and `cmp` restores (e.g. 236-07: `CMP_OK` x4 plus a GREEN `257 passed / 5072 passed` re-run; 236-06: 50 RED references, 10 `cmp`). I re-executed the pin/parity neuter above and it bit as described. I did not re-neuter the other gates (load limit); those rest on the recorded verbatim logs. |
 
-**Score:** 6/7 truths verified; 1 present but behavior-unverified (FIG-05, the PROD re-derive).
+**Score:** 7/7 truths verified. FIG-05, the PROD re-derive, was the last item and was recorded as PASSED on 2026-11-27 (see Closure).
 
 ### FIG-05 scope decision (what text decides it)
 
@@ -169,3 +159,14 @@ No gaps. All four engineering success criteria (SC1, SC2, SC3, SC5) are verified
 
 _Verified: 2026-11-25_
 _Verifier: Claude (gsd-verifier)_
+
+## Closure (2026-11-27)
+
+Both human items are met, so the status moves from `human_needed` to `passed`. Nothing in the code verdict changed.
+
+1. **Fleet re-derive (FIG-05).** Run by the coordinator's agent from `docs/runbooks/figuremath-fleet-rederive.md`, recorded in `236-09-SUMMARY.md`. Strategy half: 22 of 22 bound strategies re-derived, `still_old` 0, number-to-null 0 on every figure. Allocator half, read after the 2026-11-27 00:40Z cron tick: `equity_curve_rows` 6 against a floor of 6, `not_rederived` 0, `guard_alloc` passed on 6 rows, allocator MWR n=6 changed=3, min 0.999849, max 1.00015, number-to-null 0, null-to-number 0. The 155.2 freeze confirmation was given in writing on 2026-11-26.
+2. **CHANGELOG naming the moved figures.** Met by the v0.133.82.0 entry.
+
+Caveats recorded, none a Phase 236 gap:
+- Two runbook defects, found at the run and not fixed in the runbook: the CLI prints a SQL NULL as the literal string `NULL` (section 6's counts assume an empty cell), and the allocator cron runs at 00:40 UTC, not the 05:30 UTC the runbook's section 4 states.
+- Four `derive_broker_dailies` jobs end `failed_final` every day (2026-11-25, 11-26, 11-27) with `realized read incomplete (daily_pnl_non_usd_okx)`, the named refusal for non-USD OKX keys that Phase 232 plan 03 designed. It does not touch the Phase 236 figures and has no open owner.

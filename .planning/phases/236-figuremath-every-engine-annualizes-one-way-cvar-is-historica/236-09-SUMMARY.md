@@ -231,3 +231,164 @@ None. T-236-19 (re-derive run from a plan) mitigated: the runbook is the only ar
 ## Self-Check: PASSED
 
 Created files exist (`docs/runbooks/figuremath-fleet-rederive.md`, `236-FIGURES-MOVED.md`); commits 2eed307ce, 590d347be, 91d3b0e61, a069e0907, 89ea89fbe and ee5c80bdd are ancestors of HEAD; `commits: 8` is measured from the plan ledger (`c94175c8a..ee5c80bdd`); `git status --short` is clean apart from this SUMMARY; `STATE.md` and `ROADMAP.md` were not edited.
+
+## FIG-05 fleet re-derive, first attempt (2026-11-26): STOPPED at the 155.2 freeze precondition, no PROD write
+
+Run by the coordinator's agent from a fresh worktree off `origin/main` at `19ee154a6` (v0.133.91.1),
+following `docs/runbooks/figuremath-fleet-rederive.md` as it stands there. Every read below ran as one
+CLI query per call against the linked project. **Nothing was enqueued and nothing was written to PROD.**
+FIG-05 stays pending. All captures with ids stay in scratch outside the repo.
+
+**Why it stopped: runbook section 1, precondition 3.** The deciding input is the coordinator's
+written confirmation of 155.2 plan 12's state, taken now. None was given in the run's brief, and the
+supporting signals are not that confirmation:
+
+- Counts on a fresh `origin/main` (`19ee154a6`): `155.2-12-SUMMARY.md` **0**, `155.2-14-SUMMARY.md` **0**.
+- ROADMAP lists `155.2-12-PLAN.md` and `155.2-14-PLAN.md` unchecked; records PR #1313 says 155.2 runs on
+  2026-12-01; #1349 moved 155.2 to v1.23 HARDEN.
+- ⚠️ Surprise, to reconcile before resuming: the main checkout's gitignored capture directory already
+  holds a `recapture` run directory (plan 12's own run-directory name) and a `recapture-2026-11-23`,
+  both dated 2026-11-23, from the 155.2 RECHECK readings of that day. Whether those count as plan 12
+  "begun" is the coordinator's call, not this run's.
+
+Resume needs a written answer from the coordinator: plan 12's recapture has not begun (proceed), or
+the window is open (wait).
+
+**Precondition 1 and 2 (deploy) at the time of the stop.** Railway's analytics service was running
+`a74459751` (v0.133.90.1, SUCCESS), which contains Phase 233 (#1360) and Phase 236 (#1354). The head
+`19ee154a6` deployment was WAITING on main CI, which was still in progress. Not yet satisfied as
+worded against the head; re-check on resume.
+
+**Read-only steps staged (each an untested form, run for the first time against PROD):**
+
+| Step | Result |
+|---|---|
+| Section 2 marker query | 1 row, matches the manifest's `database_marker` |
+| Section 3 before read | 40 non-composite rows: complete 16, complete_with_warnings 6, failed 18; `figure_defs_version` 2 on 22, NULL on 18, 3 on none; asset class traditional 32, crypto 8 |
+| Allocator before read + `guard_alloc` | 6 `equity_curve` rows, guard passed, all 6 MWR numeric; computed 01:37Z to 01:50Z on 2026-11-26, after the 236 merge (00:55Z), so their MWR may already be on the 365-day rule (check on resume: a ratio near 1 there is not a failure) |
+| Bind step | bound = 22, out of scope 0; per key exchange: CSV (no key) 9, mt5 9, okx 3, bybit 1; outside the set: failed 18 |
+| Venue census (extra read-only check) | PROD has no Binance, Deribit or sFOX strategy at all, so no expected venue is missing from the bound set; the only composites are 2 CSV-origin rows, excluded |
+| Section 3a pre-flight | targets 22, no strategy listed (no `under_two_rows`, no `has_denominator_config`) |
+| Targets still to do | 22 |
+
+**Runbook findings for the resume (not fixed here):**
+
+- The CLI's CSV output prints a SQL NULL as the literal string `NULL`, not an empty cell. The bind
+  step's per-exchange line therefore labels CSV strategies `NULL=9` rather than `(csv, no key)`
+  (cosmetic). Section 6's number-to-null and null-to-number counts say "an empty CSV cell is null":
+  the script that computes them must treat `NULL` as null too, or every null reads as a number.
+- The before capture must be retaken on resume (section 3 says both reads come right before the first
+  enqueue, and `ENQ_AT` is set after them), and the bind re-run on that capture.
+- The allocator half cannot close on the day of the strategy batches unless they run before the
+  05:30Z cron tick: its gate needs every `equity_curve` row's `computed_at` after `ENQ_AT`.
+
+### Resume (2026-11-26, later the same day): precondition 3 met, run paused before the first enqueue
+
+**Precondition 3, the coordinator's written confirmation (verbatim, founder, 2026-11-26):** "Not begun, proceed."
+Phase 155.2 plan 12's recapture has not begun. The 2026-11-23 recapture directories were the RECHECK
+readings, and plan 12 runs on 2026-12-01. Counts on `origin/main` `19ee154a6`: 0 and 0. That matches the
+table's first row.
+
+**Preconditions 1 and 2:**
+- Main CI at `19ee154a6` is green (CI, Contracts and the SQL Function Snapshot drift gate are all `success`).
+- The backfill service runs `19ee154a6` (SUCCESS).
+- The interactive analytics service was still BUILDING its `19ee154a6` deployment when this run paused,
+  so precondition 2 is not yet met. No enqueue was made.
+
+**Which service claims `compute_analytics_from_csv` (read-only check):**
+- In `main_worker.py`, `BACKFILL_KINDS` is only `derive_broker_dailies` and `derive_allocator_equity`.
+  The `backfill` role claims only those two kinds, and the `interactive` role excludes them.
+- PROD's `compute_jobs.claimed_by` over the last 7 days agrees. Every `compute_analytics_from_csv` claim
+  came from a worker family disjoint from the one claiming the two derive kinds.
+- So the strategy recompute runs on the interactive analytics service. The allocator compose runs on
+  the backfill service.
+
+**Runbook defects found (not fixed in the runbook):**
+- The CLI prints SQL NULL as the literal string `NULL`. Section 6's counts assume an empty cell is null.
+  The local copy of the section 6 script was fixed to treat the literal `NULL` (and an empty cell) as null.
+- Section 4 says the `derive-allocator-key-dailies` cron runs at 05:30 UTC. The manifest schedule is
+  `40 0 * * *` (00:40 UTC), and the PROD job history shows derives finishing around 01:40 to 01:50 UTC.
+  The allocator gate reads after the next 00:40 UTC tick plus the derives' run time.
+
+### Resume, part 2 (2026-11-26): batch 1 enqueued, run handed back mid-batch
+
+- The interactive analytics service reached SUCCESS on `19ee154a6`. Precondition 2 is met.
+- Marker query: matches the manifest.
+- Before reads retaken: 40 strategy rows (complete 16, complete_with_warnings 6, failed 18; version 2 on
+  22, NULL on 18), and 6 allocator rows, guard passed.
+- `ENQ_AT` was set once after both reads, at 12:00:51Z.
+- Bind: 22 bound (CSV 9, mt5 9, okx 3, bybit 1), out of scope 0, failed 18 outside the set.
+- Pre-flight: 22 targets, none listed.
+- Outcome read before any batch: 0 tagged jobs.
+- **Batch 1 (WRITE):** `marker_ok` true, `selected` 10, `enqueued` 10.
+- At hand-back the batch was draining: done 4, running 1, pending 5, `tagged_total` 10 (equals the
+  sum of `selected`), no failure.
+- Still to run: drain batch 1, batches 2 and 3 (12 targets left), section 5, section 6, and the
+  allocator gate after the next 00:40Z tick.
+
+### Resume, part 3 (2026-11-26): strategy re-derive complete, sections 5 and 6 recorded, allocator gate booked
+
+**Batches (all marker-gated, `marker_ok` true on every `batch-<n>.csv`):**
+
+| Batch | `selected` | `enqueued` | Outcome after drain | `tagged_total` vs running sum of `selected` |
+|---|---|---|---|---|
+| 1 | 10 | 10 | done 10, `ids_not_done` empty, no failure | 10 = 10 |
+| 2 | 10 | 10 | done 20 cumulative, `ids_not_done` empty, no failure | 20 = 20 |
+| 3 | 2 | 2 | done 22 cumulative, `ids_not_done` empty, no failure | 22 = 22 |
+
+- Before batches 2 and 3, the interactive analytics service had no WAITING or BUILDING deployment. Its
+  latest deployment was SUCCESS on `19ee154a6`. Only the deployment list was read, never the variables.
+- No `failed_retry` or `failed_final` job. Recovery was not needed.
+
+**Section 5, verification (bound set, `ENQ_AT` 12:00:51Z):** `bound` 22, `bound_found` 22,
+`left_complete_set` 0, `rederived` 22, `still_old` 0, `old_per_basis` 0.
+- After reads: 40 strategy rows (same count as before). `allocator-after` has 6 data rows, and
+  `guard_alloc` passed.
+- Per-id diff over `bound-ids.txt`: `bound=22 not_done=0`, so every bound strategy is complete and on version 3.
+
+**Section 6, aggregates (22 bound strategies, after / before):**
+
+| Figure | changed | ratio n | min | median | max | number to null | null to number |
+|---|---|---|---|---|---|---|---|
+| volatility | 0 | 21 | 1 | 1 | 1 | 0 | 0 |
+| sharpe | 0 | 21 | 1 | 1 | 1 | 0 | 0 |
+| sortino | 0 | 20 | 1 | 1 | 1 | 0 | 0 |
+| cagr | 0 | 22 | 1 | 1 | 1 | 0 | 0 |
+| calmar | 0 | 20 | 1 | 1 | 1 | 0 | 0 |
+| cvar | 0 | 22 | 1 | 1 | 1 | 0 | 0 |
+| serenity_index | 20 | 20 | 0.884931 | 0.953949 | 1.17542 | 0 | 0 |
+| common_sense_ratio | 4 | 20 | 1 | 1 | 1.07106 | 0 | 0 |
+| smart_sharpe | 7 | 21 | 1 | 1 | 1.2035 | 0 | 0 |
+| smart_sortino | 6 | 20 | 1 | 1 | 1.2035 | 0 | 0 |
+| time_in_market | 4 | 22 | 1 | 1 | 1.30476 | 0 | 0 |
+| probabilistic_sharpe_ratio | 4 | 21 | 0.985368 | 1 | 1.04176 | 0 | 0 |
+| allocator MWR (6 allocators) | 0 | 6 | 1 | 1 | 1 | 0 | 0 |
+
+- **Number to null: 0 on every figure and on the allocator MWR.** No STOP, and no written acceptance is needed.
+- `smart_sharpe` median ratio is 1.2035002 for crypto (n 7) and 1.0 for the other classes (n 14).
+  `smart_sortino` is 1.2035002 for crypto (n 6) and 1.0 for the others (n 14). Both match the expected
+  sqrt(365/252) and 1.
+- `cagr_start` and `cagr_end` were on 0 rows before and are on 22 rows after.
+- `cvar` changed on 0 rows. This is expected under `236-FIGURES-MOVED.md` §3: the stored `cvar` moves
+  only for a total record under 60 observations, and no bound strategy is under the floor (0 number to null).
+- The allocator MWR is unchanged because the allocator compose has not re-run since `ENQ_AT`. All 6
+  `equity_curve` rows were computed before it, and after the 236 merge. Read the MWR ratio again with
+  the allocator gate.
+
+**Still open for FIG-05:** the allocator gate (`not_rederived = 0`, `equity_curve_rows` >= 6). It can
+pass only after the 2026-11-27 00:40Z `derive-allocator-key-dailies` tick and its derives (about
+01:40Z to 01:50Z). After that, take a fresh `allocator-after` read, run `guard_alloc`, and re-run the
+section 6 MWR line. The strategy half of FIG-05 is done.
+
+## Allocator gate (FIG-05), read 2026-11-27 after the 00:40Z cron tick
+
+**Result: PASS** (with one recorded caveat on the derive fan-out, below).
+
+- Marker query returned the PROD marker before every read. READ ONLY; no PROD writes.
+- Cron: `derive-allocator-key-dailies` (schedule `40 0 * * *`) ran 2026-11-27 00:40:00Z, status succeeded.
+- Jobs enqueued at that tick: `derive_allocator_equity` 6 done, 0 failed or stuck; `derive_broker_dailies` 21 done, 4 `failed_final`.
+- Caveat: the 4 `failed_final` all carry `derive_broker_dailies: realized read incomplete (daily_pnl_non_usd_okx)`. The same 4 failed on 2026-11-25 and 2026-11-26 (21 done + 4 failed each day), so they predate this read and are a deterministic named refusal for non-USD OKX keys, not a stuck job. Not caused by Phase 236; not routed here.
+- `alloc-gate.sql` (ENQ_AT 2026-11-26T12:00:51Z): `equity_curve_rows` = 6 (>= 6 required), `not_rederived` = 0 (0 required). Every row's `computed_at` is 2026-11-27 01:37Z to 01:38Z.
+- `guard_alloc allocator-after`: passed, `data rows=6`.
+- Section 6 MWR line: `allocator_mwr: n=6 changed=3 ratio_n=6 min=0.999849 median=1 max=1.00015 number_to_null=0 null_to_number=0`; `number_to_null figures: none`. The MWR moves are at most 0.015 percent, so the allocator MWR did not materially shift, and no MWR went from a number to null.
+- Reads went through the Supabase MCP; `allocator-after.csv` was rebuilt from that read (runbook CLI NULL-as-"NULL" handling not needed: no NULLs).
