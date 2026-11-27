@@ -15127,11 +15127,13 @@ CREATE TABLE IF NOT EXISTS "public"."strategy_analytics" (
     "computation_error_job_id" "uuid",
     "trades_fetched_at" timestamp with time zone,
     "series_provenance" "jsonb",
+    "unit_segments" "jsonb",
     CONSTRAINT "strategy_analytics_computation_error_markers_together_check" CHECK ((("computation_error_source" IS NULL) = ("computation_error_job_id" IS NULL))),
     CONSTRAINT "strategy_analytics_computation_error_source_check" CHECK (("computation_error_source" = 'writer'::"text")),
     CONSTRAINT "strategy_analytics_computation_status_check" CHECK (("computation_status" = ANY (ARRAY['pending'::"text", 'computing'::"text", 'complete'::"text", 'complete_with_warnings'::"text", 'failed'::"text"]))),
     CONSTRAINT "strategy_analytics_metrics_by_basis_shape" CHECK ((("metrics_json_by_basis" IS NULL) OR ("jsonb_typeof"("metrics_json_by_basis") = 'object'::"text"))),
-    CONSTRAINT "strategy_analytics_series_provenance_is_object" CHECK ((("series_provenance" IS NULL) OR ("jsonb_typeof"("series_provenance") = 'object'::"text")))
+    CONSTRAINT "strategy_analytics_series_provenance_is_object" CHECK ((("series_provenance" IS NULL) OR ("jsonb_typeof"("series_provenance") = 'object'::"text"))),
+    CONSTRAINT "strategy_analytics_unit_segments_object_chk" CHECK ((("unit_segments" IS NULL) OR ("jsonb_typeof"("unit_segments") = 'object'::"text")))
 );
 
 
@@ -15171,6 +15173,10 @@ COMMENT ON COLUMN "public"."strategy_analytics"."trades_fetched_at" IS 'Phase 16
 
 
 COMMENT ON COLUMN "public"."strategy_analytics"."series_provenance" IS 'Phase 167.1.2.2.2 D-03 / D-08 / D-02. A jsonb OBJECT (series_provenance_is_object enforces object-ness only; the reader validates the arrays and renders nothing on a malformed value) with two optional arrays: legacy_ranges [{from, to, source, recorded_at}] where source = returns_grid_carry_forward, and unrecovered_gaps [{from, to, recorded_at}]. Dates are YYYY-MM-DD, inclusive. A later phase (OKXHISTORY) may add reconstructed_ranges. Writers: the go-live runbook and, later, OKXHISTORY. It lives OUTSIDE data_quality_flags because run_csv_strategy_analytics rebuilds that field wholesale on every run, which would erase a runbook write. NULL = no range record, which is the normal state.';
+
+
+
+COMMENT ON COLUMN "public"."strategy_analytics"."unit_segments" IS 'Phase 256 OKXUNITSWITCH. A jsonb OBJECT (strategy_analytics_unit_segments_object_chk enforces object-ness only; the readers validate the rest and render nothing on a malformed value): {version, segments[{unit, from_day, to_day, [base_day], returns[{date, value}]}], unpriced_days[]}. The two native segments of a strategy whose unit switched, USD before the switch and a coin after it, each with its unit named. Dates are YYYY-MM-DD. Writer: the analytics derive in strategy mode (service role). Readers: the factsheet payload. It lives OUTSIDE data_quality_flags because run_csv_strategy_analytics rebuilds that field wholesale on every run and copies it into last_success_snapshot. NULL = the strategy never switched unit, which is the normal state.';
 
 
 

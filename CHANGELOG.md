@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.133.109.2] - 2026-11-27 — BASELINE: automated re-dump (composed as 0.133.108.2, re-based onto main 90bde12a by hand) after the PROD apply of 588d8869
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46057037202`, after the PROD apply of merge `588d8869`: sha256 `d2beb328…` → `ab1b1720…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 150 → 150, distinct function names 148 → 148, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127200000_strategy_analytics_unit_segments.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.108.1 → 0.133.108.2.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=348 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+
+### Tests
+- `analytics-service/tests/fixtures/mt5_parity/capture_synthetic.json`: the synthetic MT5 capture's `strategy_analytics` slice row gains `"unit_segments": null`. `test_mt5_parity_capture.py::test_whole_row_slices_carry_exactly_their_tables_columns` compares each whole-row slice with the baseline's column list, so it went red the moment the dump carried Phase 256's new column (re-dump PR CI on the bot commit). Human commit on the bot branch, added by the Phase 256 agent.
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46057037202` succeeded, and this entry was composed by the `redump-pr` job. Run `46057037202` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
 ## [0.133.109.1] - 2026-11-27 — records: Phase 254 OPENINGDEPOSIT closed (verification passed)
 
 ### Changed

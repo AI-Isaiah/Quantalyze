@@ -150,6 +150,7 @@
             "computation_error_source": null,
             "computation_error_job_id": null,
             "trades_fetched_at": null,
+            "unit_segments": null,
             "series_provenance": null
           }
         ]
