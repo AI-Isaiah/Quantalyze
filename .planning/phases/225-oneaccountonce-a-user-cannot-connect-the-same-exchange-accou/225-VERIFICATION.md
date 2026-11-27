@@ -1,9 +1,9 @@
 ---
 phase: 225-oneaccountonce-a-user-cannot-connect-the-same-exchange-accou
 verified: 2026-11-26T12:00:00Z
-status: human_needed
+status: passed
 score: 6/6 roadmap success criteria verified in code; plan 21 must-haves 5/6 verified (the sixth is post-deploy)
-verified_at_sha: 9bd2b2a4ebc489d94ff4bd3b1a5a3a022736a9ee
+verified_at_sha: 45d7b4e5c701f5f924979b571021000b9550d7bb
 drift_subjects:
   - analytics-service/services/mt5_read.py
   - analytics-service/services/job_worker.py
@@ -45,7 +45,7 @@ human_verification:
 
 **Phase Goal:** A user cannot connect the same exchange account more than once: a second key or draft that reads the same account under the same owner is refused by name at connect time, and any such pair already stored is surfaced and resolved instead of publishing one account's numbers under two names. One key or account shared across several users stays allowed, and a strategy-linked key may also sit in an allocator book.
 **Verified:** 2026-11-26 at `9bd2b2a4ebc489d94ff4bd3b1a5a3a022736a9ee` (worktree `quantalyze-wt-225`, branch `gsd/phase-225-oneaccountonce`, code equal to ship PR #1374)
-**Status:** human_needed
+**Status:** passed (2026-11-27)
 **Re-verification:** No, initial verification (no prior VERIFICATION.md)
 
 ## Scope and method
@@ -133,6 +133,8 @@ Debt-marker scan over the nine plan-21 files was not exhaustive; the independent
 | P-225-21-02 | No server value or login number reaches a refusal log line, `error_message` or `sync_error` | judgment | Non-authoritative verdict: holds by fixed message and key-id-only log lines. FLAGGED, human review recommended. |
 
 ## Human Verification Required
+
+**Update 2026-11-27: item 2 (plan 21 Task 3 poll-cycle reading) PASSED on PROD at `45d7b4e5`.** 22 verdict lines across the two analytics services, all True, 0 False, 0 not_captured, 0 refusals, and a True line for each of the 11 live active MT5 keys. Detail in `225-21-SUMMARY.md` under `## Post-deploy poll cycle`. Item 3 (route SF-M1 and SF-M4) is a routing decision handed back to the orchestrator and is not a success criterion of this phase; it stays open as a handed-back item and does not hold the phase.
 
 **Update 2026-11-26: item 1 (plan 18 positive control) PASSED on PROD.** The founder re-entered an already-stored MT5 login on its real broker server in the wizard. The server matched the server-qualified identity to the founder's stored key and refused before broker sign-in. The code was `KEY_ORPHANED`, because that key has no strategy now (its draft was deleted earlier), which is the correct refusal variant for an unused stored key. Not a transient answer, so the bracket does not refuse correct sessions. Items 2 and 3 are still open, so the status stays `human_needed` and the phase is NOT complete: plan 21 Task 3 (the poll-cycle read, 2026-11-27) is outstanding.
 

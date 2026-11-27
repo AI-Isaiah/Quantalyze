@@ -161,7 +161,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 - [x] **Phase 222: ALERTTRUTH — Python and SQL error copy and portfolio benchmark labels name the real cause and a channel that exists** - User-facing error copy and the benchmark outage label, with a migration; independent of the MT5 parity phases (completed 2026-11-25)
 - [x] **Phase 223: FLOWKINDS — each funding caller treats a malformed row by a recorded, tested decision, and the malformed count is on record first** - Flow-source half only (F-2, no composites): the funding callers' malformed-row decisions and the PROD malformed count; FLOWK-01 dropped (completed 2026-11-24)
-- [ ] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule
+- [x] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule (completed 2026-11-27)
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
 - [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
@@ -253,7 +253,7 @@ Plans:
 4. Two keys that share a login always carry a share link, so a shared login with no link cannot recur; a test drives the stamping in `account_identity.py` for that case. MT5 account identity includes the broker server, so the same login on two servers never collides, and the backfill uses no data-reading `DO` guard. (ONCE-04, CONN-03)
 5. An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. A test drives a failing key beside a working one for the same account, and the working key holds the slot. (MT5D-08)
 6. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration (the CONN-03 identity change and backfill, any per-owner refusal constraint) passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 21 plans
+**Plans:** 21/21 plans complete
 
 Plans:
 **Wave 1**
@@ -293,11 +293,11 @@ Plans:
 **Gap wave 2** *(blocked on gap wave 1 completion)*
 - [x] 225-15-PLAN.md — the TS twin: a server-aware `accountIdentityTokens` and every reader and key-card state carries `venue_server` (PR-2b-2)
 - [x] 225-20-PLAN.md — the MT5 poll reads log whether the session is on the requested broker server, measured on PROD before PR-2c merges, and the poll-path refusal gets an owner (PR-2c0)
-- [ ] 225-21-PLAN.md — the three MT5 poll reads refuse a terminal session that is not on the requested broker server (review WR-01 of PR-2c), with one post-deploy poll cycle read
+- [x] 225-21-PLAN.md — the three MT5 poll reads refuse a terminal session that is not on the requested broker server (review WR-01 of PR-2c), with one post-deploy poll cycle read
 
 **Gap wave 3** *(blocked on gap wave 2 completion)*
 - [x] 225-16-PLAN.md — the SQL twin: `commit_scenario_batch` identity edges become server-aware, with a gate arm per rule clause (PR-2b-2)
-- [ ] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
+- [x] 225-18-PLAN.md — the MT5 connect check proves the broker server, not only the login, with founder measurements before and after deploy, after plan 20's measurement (PR-2c)
 
 **Gap wave 4** *(blocked on gap wave 3 completion)*
 - [x] 225-17-PLAN.md — re-point the existing fingerprint twins, record the drift row, and a read-only PROD check before PR-2b-2 merges (PR-2b-2)
@@ -945,7 +945,7 @@ Plans:
 |-------|----------------|--------|-----------|
 | 222. ALERTTRUTH | 4/4 | Complete (shipped v0.133.81.0, #1352; migration `20261125212222` applied to TEST and PROD) | 2026-11-25 |
 | 223. FLOWKINDS | 5/5 | Complete (shipped v0.133.68.0, #1327) | 2026-11-24 |
-| 225. ONEACCOUNTONCE | 19/21 | In progress (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344, PR-3 #1368 and plan 21 #1374 shipped; plan 18 open on its founder control; plan 21 Task 3 post-deploy poll read open; verification human_needed) | - |
+| 225. ONEACCOUNTONCE | 21/21 | Complete (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344, PR-3 #1368 and plan 21 #1374 shipped; plan 18 founder control passed 2026-11-26; plan 21 post-deploy poll read PASSED 2026-11-27; verification passed) | 2026-11-27 |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
 | 228. KEYANSWERS | 0/? | Not started | - |

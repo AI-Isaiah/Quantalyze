@@ -68,7 +68,7 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 - [x] **MT5D-05**: An inception day's P&L is booked, or flagged by name. It is never dropped as NaN without a flag. (covers: 164.6.6.2.3-INCEPTION-DAY0-PNL)
 - [x] **MT5D-06**: A day-level flow just under the previous day's NAV either carries the large-flow annotation, or the band is recorded as accepted (founder ruling at plan time on the D-15 band). `FLOW_TIMING_LARGE_RATIO` is never widened to make a check pass. (covers: 164.6.6.2.3-D15-THRESHOLD-BAND)
 - [x] **MT5D-07**: A timed MT5 key with no writer basis is counted or blocked with a named signal. It never composes silently on the legacy roll. (covers: 164.6.6.2.3-MT5-BASIS-SILENT-NONE)
-- [ ] **MT5D-08**: An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. (covers: 167.1.2-MT5-FAILING-HOLDER)
+- [x] **MT5D-08**: An MT5 key whose sign-in keeps failing cannot claim an account's holder slot. (covers: 167.1.2-MT5-FAILING-HOLDER)
 
 ### Data integrity: venue reads (BYBITREADS, OKXTRADES)
 
@@ -137,9 +137,9 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### User-facing: honest connect answers (CONNECTTRUTH)
 
-- [ ] **CONN-01**: Connecting a key that matches the user's own draft never answers a silent `200 deduped`. The answer names what was stored. (covers: 167.1.2-DRAFT-CLASH-SAYS-SO)
+- [x] **CONN-01**: Connecting a key that matches the user's own draft never answers a silent `200 deduped`. The answer names what was stored. (covers: 167.1.2-DRAFT-CLASH-SAYS-SO)
 - [ ] **CONN-02**: Reconnecting an MT5 account with a rotated or mistyped password gets a named answer that matches what was stored. Validating and storing the new password, or refusing by name, is a founder ruling at plan time. (covers: L4097)
-- [ ] **CONN-03**: MT5 account identity includes the broker server, so the same login on two servers never collides. The backfill uses no data-reading `DO` guard. (covers: L4105)
+- [x] **CONN-03**: MT5 account identity includes the broker server, so the same login on two servers never collides. The backfill uses no data-reading `DO` guard. (covers: L4105)
 - [ ] **CONN-04**: `KEY_ORPHANED` copy tells an allocator-role owner which key to Disconnect. The archived-composite case is out (F-2). (covers: 167.1.2-ORPHAN-COPY-FIX)
 - [x] **CONN-05**: Every validate-key 400 body carries the same machine-readable code field on every venue. The entry's other two findings (permanence plumbing with one consumer, coordinate drift) are fixed or recorded with a reason. (covers: L2510)
 - [x] **CONN-06**: A month-name date cell in a numeric-date CSV column is either parsed or rejected with a message naming the cell and the expected format (founder ruling at plan time). (covers: 170.1-CSV-ODD-SPELLING-REJECTED)
@@ -174,10 +174,10 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 ### Carried phase 225 ONEACCOUNTONCE
 
-- [ ] **ONCE-01**: Connecting a key, or saving a draft, whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API, for both an exchange key and an MT5 login. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-02**: The same account connected by two different users stays allowed and keeps its share link, and a strategy-linked key that also sits in an allocator book is unaffected. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-03**: Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and once the phase ships no strategy publishes another key's numbers under its own name. (covers: none by id; founder decision 2026-11-23)
-- [ ] **ONCE-04**: Two keys that share a login always carry a share link. (covers: none by id; founder decision 2026-11-23)
+- [x] **ONCE-01**: Connecting a key, or saving a draft, whose account identity matches a key the same owner already holds is refused with a named reason, in the wizard and in the API, for both an exchange key and an MT5 login. (covers: none by id; founder decision 2026-11-23)
+- [x] **ONCE-02**: The same account connected by two different users stays allowed and keeps its share link, and a strategy-linked key that also sits in an allocator book is unaffected. (covers: none by id; founder decision 2026-11-23)
+- [x] **ONCE-03**: Every same-owner duplicate already stored on PROD is counted read-only and brought to the founder, and once the phase ships no strategy publishes another key's numbers under its own name. (covers: none by id; founder decision 2026-11-23)
+- [x] **ONCE-04**: Two keys that share a login always carry a share link. (covers: none by id; founder decision 2026-11-23)
 
 ## Planned for v1.23 HARDEN — security, alerting, tooling
 
@@ -300,10 +300,10 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | DEAD-03 | Phase 224 (v1.23) | Pending |
 | DEAD-04 | Phase 224 (v1.23) | Pending |
 | DEAD-05 | Phase 224 (v1.23) | Pending |
-| ONCE-01 | Phase 225 | Pending |
-| ONCE-02 | Phase 225 | Pending |
-| ONCE-03 | Phase 225 | Pending |
-| ONCE-04 | Phase 225 | Pending |
+| ONCE-01 | Phase 225 | Complete |
+| ONCE-02 | Phase 225 | Complete |
+| ONCE-03 | Phase 225 | Complete |
+| ONCE-04 | Phase 225 | Complete |
 | PROOF-01 | Every v1.22 phase, and every v1.23 phase by F-10 (closed at each milestone audit) | Pending |
 | MT5D-01 | Phase 227 | Complete |
 | MT5D-02 | Phase 230 | Shipped (#1358); seven clean nights pending |
@@ -312,7 +312,7 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | MT5D-05 | Phase 229 | Complete |
 | MT5D-06 | Phase 229 | Complete |
 | MT5D-07 | Phase 229 | Complete |
-| MT5D-08 | Phase 225 | Pending |
+| MT5D-08 | Phase 225 | Complete |
 | VREAD-01 | Phase 231 | Complete |
 | VREAD-02 | Phase 231 | Complete |
 | VREAD-03 | Phase 231 | Complete |
@@ -353,9 +353,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | CACHE-02 | Phase 239 | Complete |
 | CACHE-03 | Phase 237 | Complete |
 | CACHE-04 | Phase 239 | Complete |
-| CONN-01 | Phase 225 | Pending |
+| CONN-01 | Phase 225 | Complete |
 | CONN-02 | Phase 228 | Pending |
-| CONN-03 | Phase 225 | Pending |
+| CONN-03 | Phase 225 | Complete |
 | CONN-04 | Phase 228 | Pending |
 | CONN-05 | Phase 240 | Complete |
 | CONN-06 | Phase 240 | Complete |

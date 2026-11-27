@@ -183,7 +183,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 235 (HOLDINGSTRUTH) and 241 (DEMOCREDS) closed in the 2026-11-26 records PR; v1.22 phases run in parallel
 Plan: 7 of 7
-Status: Phases complete; 225 (plan 18 positive control passed on PROD 2026-11-26; plan 21 Task 3 poll-cycle read still open, 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stay human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
+Status: Phases complete; 225 (ONEACCOUNTONCE) closed 2026-11-27 with verification passed (plan 18 control passed 2026-11-26, plan 21 post-deploy poll read passed 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stays human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
 Last activity: 2026-11-26 — records PR: 235 and 241 closed (verification passed), 225 and 228 partial PROD evidence
 Progress: [████████░░] 78%
 
@@ -1847,7 +1847,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Records PR: 235 and 241 closed; 225 and 228 stay open
+**Stopped At:** Records PR: 225 closed (verification passed); 228 stays open
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z
