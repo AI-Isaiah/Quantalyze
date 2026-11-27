@@ -103,6 +103,9 @@ from services.deribit_txn import (
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
     LedgerValuationError,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
+    OptionMarkHoleError,
     OptionRowFieldMissingError,
 )
 from services.external_flows import USD_FAMILY
@@ -158,7 +161,14 @@ NOT_RUN = "not-run"
 # known ledger row / summary fields. The message itself is never kept: it embeds
 # a row id and a repr of the offending value.
 LEDGER_ERROR_CLASSES: frozenset[str] = frozenset(
-    cls.__name__ for cls in (*_BUILD_ERRORS, OptionRowFieldMissingError)
+    cls.__name__
+    for cls in (
+        *_BUILD_ERRORS,
+        OptionRowFieldMissingError,
+        OptionMarkHoleError,
+        OptionExerciseRowError,
+        OptionExpiryRowError,
+    )
 )
 LEDGER_ERROR_FIELDS: frozenset[str] = frozenset(
     {

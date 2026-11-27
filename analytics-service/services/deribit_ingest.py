@@ -35,7 +35,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import AbstractSet, Any
 
 import ccxt
@@ -51,6 +51,7 @@ from services.deribit_txn import (
     ROW_SCOPE_KEY,
     _day_ccy_own_index,
     _option_activity_after_coverage,
+    _option_expiry_iso,
     _pre_coverage_option_days,
     _row_is_cash_bearing,
     assert_balance_identity,
@@ -2510,39 +2511,6 @@ def _option_mark_retention_days() -> int:
             _OPTION_MARK_RETENTION_DAYS_DEFAULT,
         )
     return _OPTION_MARK_RETENTION_DAYS_DEFAULT
-# The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
-# / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
-# future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
-# strike + right suffix after the expiry.
-_OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
-# IN-02: Deribit's month tokens are ENGLISH constants — never parse them with
-# ``strptime(%b)``, which consults the process locale (de_DE: MAR/OCT/DEC fail →
-# expiry None → the pre-retention partition can never bucket and old
-# wholly-empty instruments hard-fail instead of warning). No other services/
-# code uses ``%b``.
-_OPTION_EXPIRY_MONTHS: dict[str, int] = {
-    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-}
-
-
-def _option_expiry_iso(instrument: str) -> str | None:
-    """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
-    instrument name, or ``None`` if the name carries no dated-expiry segment.
-    Never guessed — the expiry caps the marks fetch span (never fetch past it) and
-    keys the pre-retention partition. Locale-independent (explicit English month
-    map — IN-02). Pure / never raises on untrusted input."""
-    match = _OPTION_EXPIRY_RE.search(instrument.upper())
-    if match is None:
-        return None
-    token = match.group(1)  # e.g. "27JUN25": day (1-2 digits), month, 2-digit year
-    month = _OPTION_EXPIRY_MONTHS.get(token[-5:-2])
-    if month is None:
-        return None
-    try:
-        return date(2000 + int(token[-2:]), month, int(token[:-5])).isoformat()
-    except ValueError:
-        return None
 
 
 def _last_settled_option_mark_day() -> str:
@@ -2678,7 +2646,10 @@ async def _build_smoothed_option_mtm(
     # naming the healthy instrument). The crawl-day cash already books on the
     # cash channel; that day is simply never MTM-marked.
     delta_mtm, terminal_book = option_mtm_daily(
-        kept_positions, marks, last_settled_day=last_settled
+        kept_positions,
+        marks,
+        last_settled_day=last_settled,
+        retention_cutoff=retention_cutoff,
     )
     return delta_mtm, terminal_book, sorted(pre_retention)
 

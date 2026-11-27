@@ -98,6 +98,153 @@ class OptionRowFieldMissingError(LedgerValuationError):
     one."""
 
 
+# Gap G252-PROBE-M3 (Phase 252 plan 07). Three smoothed-only refusals used to print the same
+# class and the same redacted field, so a PROD probe reading could not tell them apart. Each
+# now raises its own subclass of ``LedgerValuationError`` (NOT of ``OptionRowFieldMissingError``,
+# whose subclasses the job worker's mark_to_market degrade maps to its own reason). The
+# refusals themselves are unchanged: the same rows refuse at the same point and ``str(exc)`` /
+# ``exc.args`` are byte-identical. The attributes below are CLOSED words and non-negative ints
+# computed at the raise, so a reader can print them without redaction: never a day, an
+# instrument or a row id. The probe imports these sets to validate what it prints.
+HOLE_VS_MARKS_NO_MARKS = "no-marks"
+HOLE_VS_MARKS_BEFORE_FIRST = "before-first-bar"
+HOLE_VS_MARKS_BETWEEN = "between-bars"
+HOLE_VS_MARKS_AFTER_LAST = "after-last-bar"
+HOLE_VS_MARKS_WORDS: frozenset[str] = frozenset(
+    {
+        HOLE_VS_MARKS_NO_MARKS,
+        HOLE_VS_MARKS_BEFORE_FIRST,
+        HOLE_VS_MARKS_BETWEEN,
+        HOLE_VS_MARKS_AFTER_LAST,
+    }
+)
+HOLE_VS_EXPIRY_PAST = "past-expiry"
+HOLE_VS_EXPIRY_NOT_PAST = "not-past-expiry"
+HOLE_VS_EXPIRY_UNKNOWN = "unknown"
+HOLE_VS_EXPIRY_WORDS: frozenset[str] = frozenset(
+    {HOLE_VS_EXPIRY_PAST, HOLE_VS_EXPIRY_NOT_PAST, HOLE_VS_EXPIRY_UNKNOWN}
+)
+HOLE_VS_RETENTION_OLDER = "older"
+HOLE_VS_RETENTION_NOT_OLDER = "not-older"
+HOLE_VS_RETENTION_UNKNOWN = "unknown"
+HOLE_VS_RETENTION_WORDS: frozenset[str] = frozenset(
+    {HOLE_VS_RETENTION_OLDER, HOLE_VS_RETENTION_NOT_OLDER, HOLE_VS_RETENTION_UNKNOWN}
+)
+ROW_FIELD_ABSENT = "absent"
+ROW_FIELD_NON_NUMERIC = "non-numeric"
+ROW_FIELD_ZERO = "zero"
+ROW_FIELD_NONZERO = "nonzero"
+ROW_FIELD_SHAPE_WORDS: frozenset[str] = frozenset(
+    {ROW_FIELD_ABSENT, ROW_FIELD_NON_NUMERIC, ROW_FIELD_ZERO, ROW_FIELD_NONZERO}
+)
+# The type census keys of a refusing row's instrument. Every key is always present.
+ROW_SIBLING_TYPES: tuple[str, ...] = (
+    "trade",
+    "delivery",
+    "assignment",
+    "expiry",
+    "exercise",
+    "other",
+)
+ROW_SIBLING_KEYS: frozenset[str] = frozenset(ROW_SIBLING_TYPES)
+
+
+class OptionMarkHoleError(LedgerValuationError):
+    """The D-07 daily-mark hole in :func:`option_mtm_daily`: a day inside a held option's life
+    with a nonzero position and no daily mark. A subclass, so every existing ``except
+    LedgerValuationError`` and every permanent-ledger-error tuple still catches it, and the
+    message is the unchanged D-07 text. ``vs_marks`` is which side of the instrument's fetched
+    marks the missing day falls on and ``vs_retention`` whether that day is older than the hard
+    retention cutoff (``HOLE_VS_MARKS_WORDS`` / ``HOLE_VS_RETENTION_WORDS``). ``vs_expiry`` is
+    whether the missing day is strictly after the instrument's own expiry day
+    (``HOLE_VS_EXPIRY_WORDS``): ``after-last-bar`` alone cannot tell marks that stop early from
+    a position still open after expiry, because the marks fetch is capped at expiry. Closed
+    words only: never a day or an instrument."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        vs_marks: str,
+        vs_retention: str,
+        vs_expiry: str = HOLE_VS_EXPIRY_UNKNOWN,
+    ) -> None:
+        super().__init__(message)
+        self.vs_marks = vs_marks
+        self.vs_retention = vs_retention
+        self.vs_expiry = vs_expiry
+
+
+class OptionExerciseRowError(LedgerValuationError):
+    """The D-09 ``exercise`` refusal in :func:`replay_option_positions`: the exercise row shape
+    is unmeasured. A subclass of ``LedgerValuationError`` with the unchanged message.
+    ``change_shape`` and ``position_shape`` are ``ROW_FIELD_SHAPE_WORDS`` words for the
+    refusing row; ``siblings`` is the per-type count of every row on the same instrument,
+    keyed by ``ROW_SIBLING_TYPES``. Closed words and non-negative ints only."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        change_shape: str,
+        position_shape: str,
+        siblings: Mapping[str, int],
+    ) -> None:
+        super().__init__(message)
+        self.change_shape = change_shape
+        self.position_shape = position_shape
+        self.siblings = dict(siblings)
+
+
+class OptionExpiryRowError(LedgerValuationError):
+    """Every D-09 ``expiry`` refusal in :func:`_expiry_close`: a nonzero change, a nonzero
+    position, or a change or position that is not numeric. A subclass of
+    ``LedgerValuationError`` with the unchanged message; the attributes are those of
+    :class:`OptionExerciseRowError`. Closed words and non-negative ints only."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        change_shape: str,
+        position_shape: str,
+        siblings: Mapping[str, int],
+    ) -> None:
+        super().__init__(message)
+        self.change_shape = change_shape
+        self.position_shape = position_shape
+        self.siblings = dict(siblings)
+
+
+def _row_field_shape(row: Mapping[str, Any], field: str) -> str:
+    """The closed shape word of one raw row field, for a refusal's attributes. NEVER raises.
+    ``absent`` is a missing key, ``None`` or a blank string (the reading ``_expiry_close``
+    already applies to ``position``); ``non-numeric`` is what ``float()`` refuses."""
+    value = row.get(field)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ROW_FIELD_ABSENT
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return ROW_FIELD_NON_NUMERIC
+    return ROW_FIELD_ZERO if number == 0.0 else ROW_FIELD_NONZERO
+
+
+def _same_instrument_census(
+    rows: Sequence[Mapping[str, Any]], instrument: str
+) -> dict[str, int]:
+    """Count every row whose ``instrument_name`` equals ``instrument`` by ``type`` (any type off
+    ``ROW_SIBLING_TYPES`` counts as ``other``). Every key is always present. Computed only
+    when refusing."""
+    census = {key: 0 for key in ROW_SIBLING_TYPES}
+    for r in rows:
+        if str(r.get("instrument_name", "")) != instrument:
+            continue
+        row_type = str(r.get("type", ""))
+        census[row_type if row_type in ROW_SIBLING_KEYS else "other"] += 1
+    return census
+
+
 def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
     """Coerce an untrusted transaction-log numeric field to ``float``, raising
     ``LedgerValuationError`` (permanent, structural) — NOT a bare
@@ -2332,27 +2479,57 @@ assert not (_OPTION_BOOK_CLOSE_TYPES & CASH_BEARING_TYPES), (
 _OPTION_EXERCISE_TYPE: str = "exercise"
 
 
-def _expiry_close(row: Mapping[str, Any]) -> float:
+def _expiry_refusal(
+    message: str, row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> OptionExpiryRowError:
+    """The ``OptionExpiryRowError`` for a refusing ``expiry`` row: the unchanged ``message`` and
+    the closed shape of the row's change and position plus the same-instrument type census over
+    ``rows``. Built only when refusing."""
+    return OptionExpiryRowError(
+        message,
+        change_shape=_row_field_shape(row, "change"),
+        position_shape=_row_field_shape(row, "position"),
+        siblings=_same_instrument_census(rows, str(row.get("instrument_name", ""))),
+    )
+
+
+def _expiry_close(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> float:
     """The post-event position of a D-09 ``expiry`` row: always 0.0 (an expired
     option is no longer held). Fails closed on the shapes the documentation does
     not describe: a nonzero ``change`` (the documented OTM expiry carries no
     cash) or a present, nonzero ``position`` (the option did not close). An
     absent or null ``position`` is accepted, because whether Deribit's expiry row
-    carries one is unmeasured and the close does not depend on it."""
-    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    carries one is unmeasured and the close does not depend on it.
+
+    Every refusal raises :class:`OptionExpiryRowError` (a ``LedgerValuationError``) with the
+    unchanged message, including the two non-numeric paths ``_coerce_float`` refuses: those
+    keep its exact text and are re-raised as the subclass, chained. ``rows`` is the replay's
+    full row list, read only for the refusal's same-instrument census."""
+    try:
+        change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    except LedgerValuationError as e:
+        raise _expiry_refusal(str(e), row, rows) from e
     if change != 0.0:
-        raise LedgerValuationError(
+        raise _expiry_refusal(
             f"option Deribit row id={row.get('id')!r}: expiry row carries nonzero "
             "cash — the documented out-of-the-money expiry is zero-cash, so this "
-            "shape is unobserved; refusing to guess (D-09)"
+            "shape is unobserved; refusing to guess (D-09)",
+            row,
+            rows,
         )
     raw_pos = row.get("position")
     if raw_pos is not None and not (isinstance(raw_pos, str) and not raw_pos.strip()):
-        if _coerce_float(raw_pos, field="position", row=row) != 0.0:
-            raise LedgerValuationError(
+        try:
+            position = _coerce_float(raw_pos, field="position", row=row)
+        except LedgerValuationError as e:
+            raise _expiry_refusal(str(e), row, rows) from e
+        if position != 0.0:
+            raise _expiry_refusal(
                 f"option Deribit row id={row.get('id')!r}: expiry row carries a "
                 "nonzero position — an expired option is no longer held, so this "
-                "shape is unobserved; refusing to guess (D-09)"
+                "shape is unobserved; refusing to guess (D-09)",
+                row,
+                rows,
             )
     return 0.0
 
@@ -2409,11 +2586,14 @@ def replay_option_positions(
             # expiry is logged as `exercise`, and no census has measured its row
             # shape. A zero-change one passes both cash twins, so without this it
             # would leave the long open in the book. Named, never guessed.
-            raise LedgerValuationError(
+            raise OptionExerciseRowError(
                 f"option Deribit row id={row.get('id')!r} type='exercise': the "
                 "exercise row shape is unmeasured (no census), so the smoothed "
                 "option book cannot tell whether it closes the position; refusing "
-                "to guess (D-09)"
+                "to guess (D-09)",
+                change_shape=_row_field_shape(row, "change"),
+                position_shape=_row_field_shape(row, "position"),
+                siblings=_same_instrument_census(rows, instrument),
             )
         per_instr.setdefault(instrument, []).append(row)
         # WR-03: UPPERCASE like every other currency read site in this module —
@@ -2440,7 +2620,7 @@ def replay_option_positions(
         positions: dict[str, float] = {}
         for r in ordered:
             if str(r.get("type", "")) in _OPTION_BOOK_CLOSE_TYPES:
-                positions[_row_utc_day(r.get("timestamp"))] = _expiry_close(r)
+                positions[_row_utc_day(r.get("timestamp"))] = _expiry_close(r, rows)
                 continue
             raw_pos = r.get("position", _MISSING)
             if raw_pos is _MISSING or raw_pos is None or (
@@ -2473,11 +2653,75 @@ def replay_option_positions(
     return out
 
 
+# The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
+# / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
+# future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
+# strike + right suffix after the expiry.
+_OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
+# IN-02: Deribit's month tokens are ENGLISH constants — never parse them with
+# ``strptime(%b)``, which consults the process locale (de_DE: MAR/OCT/DEC fail →
+# expiry None → the pre-retention partition can never bucket and old
+# wholly-empty instruments hard-fail instead of warning). No other services/
+# code uses ``%b``.
+_OPTION_EXPIRY_MONTHS: dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _option_expiry_iso(instrument: str) -> str | None:
+    """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
+    instrument name, or ``None`` if the name carries no dated-expiry segment.
+    Never guessed — the expiry caps the marks fetch span (never fetch past it) and
+    keys the pre-retention partition. Locale-independent (explicit English month
+    map — IN-02). Pure / never raises on untrusted input."""
+    match = _OPTION_EXPIRY_RE.search(instrument.upper())
+    if match is None:
+        return None
+    token = match.group(1)  # e.g. "27JUN25": day (1-2 digits), month, 2-digit year
+    month = _OPTION_EXPIRY_MONTHS.get(token[-5:-2])
+    if month is None:
+        return None
+    try:
+        return date(2000 + int(token[-2:]), month, int(token[:-5])).isoformat()
+    except ValueError:
+        return None
+
+
+def _hole_vs_marks(instr_marks: Mapping[str, float], day: str) -> str:
+    """Which side of the instrument's fetched marks the missing ``day`` falls on. ISO day
+    strings order as calendar days."""
+    if not instr_marks:
+        return HOLE_VS_MARKS_NO_MARKS
+    if day < min(instr_marks):
+        return HOLE_VS_MARKS_BEFORE_FIRST
+    if day > max(instr_marks):
+        return HOLE_VS_MARKS_AFTER_LAST
+    return HOLE_VS_MARKS_BETWEEN
+
+
+def _hole_vs_expiry(instrument: str, day: str) -> str:
+    """Whether the missing ``day`` is STRICTLY after the instrument's expiry day; ``unknown``
+    when the name carries no parseable expiry."""
+    expiry = _option_expiry_iso(instrument)
+    if expiry is None:
+        return HOLE_VS_EXPIRY_UNKNOWN
+    return HOLE_VS_EXPIRY_PAST if day > expiry else HOLE_VS_EXPIRY_NOT_PAST
+
+
+def _hole_vs_retention(day: str, retention_cutoff: str | None) -> str:
+    """Whether the missing ``day`` is STRICTLY earlier than the hard retention cutoff."""
+    if retention_cutoff is None:
+        return HOLE_VS_RETENTION_UNKNOWN
+    return HOLE_VS_RETENTION_OLDER if day < retention_cutoff else HOLE_VS_RETENTION_NOT_OLDER
+
+
 def option_mtm_daily(
     positions: Mapping[str, Mapping[str, Any]],
     marks: Mapping[str, Mapping[str, float]],
     *,
     last_settled_day: str | None = None,
+    retention_cutoff: str | None = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
     """Per-(currency, UTC-day) ΔMTM redistribution + terminal book from the replayed
     option ``positions`` (from :func:`replay_option_positions`) and per-instrument
@@ -2496,6 +2740,12 @@ def option_mtm_daily(
     the crawl-day (unsettled) cash already books on the cash channel; that day is
     simply never MTM-marked (it accrues from the next settlement onward). Default
     ``None`` = no cap (byte-identical for the pure-core direct callers, SC-4).
+
+    ``retention_cutoff`` (G252-PROBE-M3) is the hard mark-retention cutoff day (ISO
+    ``YYYY-MM-DD``) the caller already computed. It changes NOTHING about what refuses or
+    when: it is read only to fill ``OptionMarkHoleError.vs_retention`` (``older`` when the
+    missing day is strictly earlier than it, otherwise ``not-older``). Default ``None`` reads
+    ``unknown`` and is byte-identical for the pure-core direct callers.
 
     Day-grid convention (pinned 83-PLAN §2-Q1): ``mark[instr][D]`` is the close of
     the 1D bar whose tick falls on UTC day ``D`` (the bar Deribit stamps at ``D``
@@ -2552,11 +2802,14 @@ def option_mtm_daily(
                 continue
             mark = marks.get(instr, {}).get(day)
             if mark is None:
-                raise LedgerValuationError(
+                raise OptionMarkHoleError(
                     f"option daily-MTM hole: instrument={instr} carries a nonzero "
                     f"position on {day} but has NO daily mark (bar) — refusing to "
                     "interpolate or fall back to the session lump (D-07: a missing "
-                    "bar inside a listed instrument's life is structural, fail loud)"
+                    "bar inside a listed instrument's life is structural, fail loud)",
+                    vs_marks=_hole_vs_marks(marks.get(instr, {}), day),
+                    vs_retention=_hole_vs_retention(day, retention_cutoff),
+                    vs_expiry=_hole_vs_expiry(instr, day),
                 )
             ccy = str(positions[instr]["currency"])
             book[ccy] = book[ccy] + pos * float(mark)

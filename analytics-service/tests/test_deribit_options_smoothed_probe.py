@@ -43,6 +43,8 @@ from services.deribit_txn import (
     PNL_BASIS_CASH_SETTLEMENT,
     PNL_BASIS_SMOOTHED_MTM,
     LedgerValuationError,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
     OptionRowFieldMissingError,
 )
 from services.nav_twr import NavReconstructionError
@@ -53,6 +55,7 @@ from tests.fixtures.deribit_option_round_trip import (
     options_round_trip_ledger,
 )
 from tests.test_deribit_ingest import _NativeAnchorStub
+from tests.test_smoothed_mtm_core import _mk_ms, _opt_row, _OptionsAdapterStub
 
 _PROBE_SRC = Path(probe.__file__).read_text(encoding="utf-8")
 
@@ -667,6 +670,7 @@ def _honest_record() -> dict[str, Any]:
         "days_over_guard": 0,
         "days_over_half": 1,
         "top_ordinals": [3, 2, 1],
+        "refusal_shape": None,
     }
 
 
@@ -857,3 +861,378 @@ async def test_a_run_leaves_the_smoothed_switch_and_the_environment_unchanged(
 
     assert is_smoothed_mtm_enabled() is switch_before is False
     assert dict(os.environ) == env_before
+
+
+# ---------------------------------------------------------------------------
+# Phase 252 plan 07 (gap G252-PROBE-M3): the refusal that fired is named.
+#
+# Three different smoothed-only refusals used to print the same pair
+# (``build-error:LedgerValuationError`` / ``LedgerValuationError:position``), so the
+# 2026-11-26 PROD reading of member m3 could not be root-caused. These cases drive the REAL
+# smoothed build on a stubbed exchange (the five crawl seams of ``services.deribit_ingest``
+# are monkeypatched exactly as ``_run_options_ledger`` does) and pin what the probe prints.
+# If they go red the next PROD run reads ``other`` or the base class again and the cause stays
+# unmeasurable. The refusals themselves are NOT changed by the plan (founder decision
+# 2026-11-26): only their names and closed attributes are new.
+# ---------------------------------------------------------------------------
+
+_HOLE_INSTR = "BTC-30JUN23-30000-C"
+_HOLE_ROW_IDS = (7301, 7302)
+_HOLE_SUMMARIES = [
+    {"currency": "BTC", "equity": -0.02, "session_upl": 0.0, "options_value": 0.0}
+]
+# Held 2023-06-20 .. 2023-06-22, delivered flat on 06-23. Years past, whatever the clock says.
+_HOLE_ROWS = [
+    _opt_row(
+        instrument=_HOLE_INSTR, day="2023-06-20", change=-0.05, position=1.0,
+        id=_HOLE_ROW_IDS[0],
+    ),
+    _opt_row(
+        instrument=_HOLE_INSTR, day="2023-06-23", change=0.03, position=0.0,
+        id=_HOLE_ROW_IDS[1], type="delivery",
+    ),
+]
+# Marks only from the third held day: the head days 06-20 and 06-21 are missing.
+_HEAD_HOLED_CHARTS = {_HOLE_INSTR: {"2023-06-22": 0.02}}
+
+
+def _patch_real_crawl(monkeypatch: Any, btc_rows: list[dict[str, Any]]) -> None:
+    """The five crawl seams of ``services.deribit_ingest``, so the REAL
+    ``build_deribit_native_ledger`` runs against ``btc_rows`` with no network."""
+    import pandas as pd
+
+    async def _enumerate_scopes(_ex: Any) -> list[Any]:
+        return [di.Scope("main", None, True)]
+
+    async def _resolve_scope_auth(_ex: Any, _scope: Any) -> dict[str, Any]:
+        return {}
+
+    async def _enumerate_currencies(_ex: Any, _scope: Any, _auth: Any) -> list[str]:
+        return ["BTC"]
+
+    async def _paginate(
+        _ex: Any, _scope_label: str, currency: str, *_a: Any, **_k: Any
+    ) -> list[dict[str, Any]]:
+        return list(btc_rows) if currency == "BTC" else []
+
+    async def _index(
+        _ex: Any, _ccy: str, *, oldest_day: str, sleep: Any
+    ) -> dict[str, float]:
+        start = pd.Timestamp(oldest_day).normalize()
+        end = max(pd.Timestamp.now("UTC").tz_localize(None).normalize(), start)
+        return {d.strftime("%Y-%m-%d"): 60000.0 for d in pd.date_range(start, end, freq="D")}
+
+    monkeypatch.setattr(di, "enumerate_scopes", _enumerate_scopes)
+    monkeypatch.setattr(di, "resolve_scope_auth", _resolve_scope_auth)
+    monkeypatch.setattr(di, "enumerate_currencies", _enumerate_currencies)
+    monkeypatch.setattr(di, "paginate_txn_log", _paginate)
+    monkeypatch.setattr(di, "fetch_deribit_settlement_index", _index)
+
+
+async def _measure_real(
+    monkeypatch: Any,
+    rows: list[dict[str, Any]],
+    charts: dict[str, dict[str, float]],
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """One member through the probe's real ``measure_member_live`` and the real smoothed build.
+    Returns the records by basis and every line the emitter prints for them."""
+    _patch_real_crawl(monkeypatch, rows)
+    records = await probe.measure_member_live(
+        _OptionsAdapterStub(_HOLE_SUMMARIES, charts), "m1", None, sleep=_no_sleep
+    )
+    return {r["basis"]: r for r in records}, [probe.emit_record(r) for r in records]
+
+
+def _assert_no_row_text_in(
+    lines: list[str], row_ids: tuple[int, ...] = _HOLE_ROW_IDS
+) -> None:
+    """Nothing the real refusal message carries may reach a line: not the instrument, not a day,
+    not a row id."""
+    for line in lines:
+        assert _HOLE_INSTR not in line and "BTC-" not in line
+        assert not _DATE_RE.search(line)
+        for row_id in row_ids:
+            assert str(row_id) not in line
+
+
+async def test_the_hole_is_real_and_its_message_carries_the_text_the_probe_must_not_print(
+    monkeypatch: Any,
+) -> None:
+    """Control for the redaction assertions below: the REAL refusal on this fixture names the
+    instrument and the day. Without this the 'no line carries them' checks could pass because the
+    fixture never produced such a message."""
+    _patch_real_crawl(monkeypatch, _HOLE_ROWS)
+    with pytest.raises(LedgerValuationError) as caught:
+        await di.build_deribit_native_ledger(
+            _OptionsAdapterStub(_HOLE_SUMMARIES, _HEAD_HOLED_CHARTS),
+            None,
+            pnl_basis=_SMOOTHED,
+        )
+    assert _HOLE_INSTR in str(caught.value) and "2023-06-20" in str(caught.value)
+
+
+async def test_a_retention_straddlers_hole_is_named_by_side_and_retention(
+    monkeypatch: Any,
+) -> None:
+    """The tracer. A head hole older than the hard retention cutoff prints its own class, the
+    side of the fetched marks it fell on and ``older``. If this reads ``other`` or the base
+    class the PROD reading cannot separate a straddler from a D-09 row; if ``vs_retention``
+    reads ``unknown`` the ingest stopped handing down its cutoff."""
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "1")
+    recs, lines = await _measure_real(monkeypatch, _HOLE_ROWS, _HEAD_HOLED_CHARTS)
+    smoothed, cash = recs[_SMOOTHED], recs[_CASH]
+
+    assert smoothed["build"] == "build-error:OptionMarkHoleError"
+    assert smoothed["build_error_detail"] == "OptionMarkHoleError:position"
+    assert smoothed["refusal_shape"] == {
+        "kind": "hole",
+        "vs_marks": "before-first-bar",
+        "vs_retention": "older",
+        "vs_expiry": "not-past-expiry",
+    }
+    assert smoothed["member_verdict"] == "fail"
+    assert (smoothed["c3"], smoothed["c4"]) == ("not-run", "not-run")
+    assert cash["refusal_shape"] is None
+    _assert_no_row_text_in(lines)
+
+
+async def test_a_wholly_empty_in_retention_instrument_reads_no_marks_and_not_older(
+    monkeypatch: Any,
+) -> None:
+    """With the horizon set centuries back the wholly-empty instrument is not bucketed to cash,
+    so the guard fires on an instrument with no bars at all, and the day is not older than the
+    cutoff. A founder reading this needs to know that is a different thing from a straddler."""
+    monkeypatch.setenv("DERIBIT_OPTION_MARK_RETENTION_DAYS", "100000")
+    recs, lines = await _measure_real(monkeypatch, _HOLE_ROWS, {})
+    smoothed, cash = recs[_SMOOTHED], recs[_CASH]
+
+    assert smoothed["build"] == "build-error:OptionMarkHoleError"
+    assert smoothed["refusal_shape"] == {
+        "kind": "hole",
+        "vs_marks": "no-marks",
+        "vs_retention": "not-older",
+        "vs_expiry": "not-past-expiry",
+    }
+    assert cash["refusal_shape"] is None
+    _assert_no_row_text_in(lines)
+
+
+async def test_an_off_set_attribute_degrades_to_unreadable_and_the_record_still_prints(
+    monkeypatch: Any,
+) -> None:
+    """Degrade, never refuse (the 252-06 precedent): a hole whose attribute is not a closed word
+    prints ``unreadable`` rather than making the emitter refuse the record, so a founder-gated
+    PROD run cannot exit 1 for want of a word."""
+    from services.deribit_txn import OptionMarkHoleError
+
+    off_set = OptionMarkHoleError(
+        "x", vs_marks="2023-06-20", vs_retention="older"
+    )
+    recs = await _measure(monkeypatch, {**_fixture_pair(), _SMOOTHED: off_set})
+    assert recs[_SMOOTHED]["build"] == "build-error:OptionMarkHoleError"
+    assert recs[_SMOOTHED]["refusal_shape"] == "unreadable"
+    probe.emit_record(recs[_SMOOTHED])
+
+
+async def test_a_build_that_raises_none_of_the_three_has_a_null_refusal_shape(
+    monkeypatch: Any,
+) -> None:
+    recs = await _measure(
+        monkeypatch, {**_fixture_pair(), _SMOOTHED: LedgerValuationError("boom")}
+    )
+    assert recs[_SMOOTHED]["refusal_shape"] is None
+    assert all(r["refusal_shape"] is None for r in (await _measure(monkeypatch, _fixture_pair())).values())
+
+
+_SIBLINGS = {"trade": 1, "delivery": 0, "assignment": 0, "expiry": 0, "exercise": 1, "other": 0}
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"kind": "burst", "vs_marks": "no-marks", "vs_retention": "older"},  # unknown kind
+        {"kind": "hole", "vs_marks": "no-marks", "vs_retention": "older", "day": "x"},  # extra key
+        {"kind": "hole", "vs_marks": "2023-06-20", "vs_retention": "older"},  # a date as a word
+        {"kind": "hole", "vs_marks": "no-marks", "vs_retention": "tomorrow"},
+        {"kind": "hole", "vs_marks": "no-marks"},  # a key short
+        {"kind": "exercise", "change": "zero", "position": "absent", "siblings": _SIBLINGS, "x": 1},
+        {"kind": "exercise", "change": "0.0", "position": "absent", "siblings": _SIBLINGS},
+        {"kind": "expiry", "change": "zero", "position": "BTC-30JUN23-30000-C", "siblings": _SIBLINGS},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": {**_SIBLINGS, "BTC-30JUN23-30000-C": 1}},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": {"trade": 1}},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": {**_SIBLINGS, "trade": -1}},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": {**_SIBLINGS, "trade": True}},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": {**_SIBLINGS, "trade": 1.0}},
+        {"kind": "expiry", "change": "zero", "position": "absent", "siblings": [1, 2]},
+        "tomorrow",  # a string other than ``unreadable``
+        ["hole"],  # a list
+        7,  # a number
+    ],
+    ids=lambda s: repr(s)[:60],
+)
+def test_the_emitter_refuses_a_refusal_shape_outside_the_closed_set(shape: Any) -> None:
+    """The shape is the one new place free text could enter. Each of these is a way a date,
+    an instrument, a row id, a float or an unbounded census could be smuggled through it."""
+    probe.emit_record(_honest_record())  # control
+    with pytest.raises(ValueError):
+        probe.emit_record({**_honest_record(), "refusal_shape": shape})
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        None,
+        "unreadable",
+        {"kind": "hole", "vs_marks": "between-bars", "vs_retention": "unknown", "vs_expiry": "unknown"},
+        {"kind": "exercise", "change": "zero", "position": "absent", "siblings": _SIBLINGS},
+        {"kind": "expiry", "change": "nonzero", "position": "non-numeric", "siblings": _SIBLINGS},
+    ],
+    ids=lambda s: repr(s)[:40],
+)
+def test_the_emitter_prints_each_closed_refusal_shape(shape: Any) -> None:
+    line = probe.emit_record({**_honest_record(), "refusal_shape": shape})
+    assert json.loads(line)["refusal_shape"] == shape
+
+
+# --- plan 07: the two D-09 row refusals, through the real smoothed build --------
+
+_ROW_INSTR = "BTC-17JAN26-50000-P"
+_ROW_IDS = (7401, 7402, 7403)
+_ROW_SIBLING_ZERO = {"trade": 0, "delivery": 0, "assignment": 0, "expiry": 0, "exercise": 0, "other": 0}
+
+
+def _d09_rows(close_type: str, **overrides: Any) -> list[dict[str, Any]]:
+    """A long put opened on 01-15, then a zero-cash ``close_type`` row on 01-17. Both pass the
+    cash twins, so only the smoothed replay can refuse them."""
+    opening = _opt_row(
+        instrument=_ROW_INSTR, day="2026-01-15", change=-0.04, position=1.0, id=_ROW_IDS[0]
+    )
+    closing: dict[str, Any] = {
+        "type": close_type,
+        "instrument_name": _ROW_INSTR,
+        "currency": "BTC",
+        "change": 0.0,
+        "timestamp": _mk_ms("2026-01-17", 8),
+        "id": _ROW_IDS[1],
+    }
+    closing.update(overrides)
+    return [opening, closing]
+
+
+_D09_SUMMARIES = [{"currency": "BTC", "equity": -0.04, "session_upl": 0.0, "options_value": 0.0}]
+
+
+async def _measure_d09(
+    monkeypatch: Any, rows: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    _patch_real_crawl(monkeypatch, rows)
+    stub = _OptionsAdapterStub(_D09_SUMMARIES, {})
+    records = await probe.measure_member_live(stub, "m1", None, sleep=_no_sleep)
+    return {r["basis"]: r for r in records}, [probe.emit_record(r) for r in records]
+
+
+async def test_an_exercise_ledger_reads_its_own_class_and_the_row_shape(
+    monkeypatch: Any,
+) -> None:
+    """The exercise refusal fires before any mark is fetched. The record names it and prints the
+    refusing row's change and position shape and the same-instrument type census, and the real
+    message (instrument, id) reaches no line. Red means a PROD reading cannot tell an
+    unmeasured exercise row from a retention hole."""
+    recs, lines = await _measure_d09(monkeypatch, _d09_rows("exercise"))
+    smoothed, cash = recs[_SMOOTHED], recs[_CASH]
+    assert smoothed["build"] == "build-error:OptionExerciseRowError"
+    assert smoothed["build_error_detail"] == "OptionExerciseRowError:position"
+    assert smoothed["refusal_shape"] == {
+        "kind": "exercise",
+        "change": "zero",
+        "position": "absent",
+        "siblings": {**_ROW_SIBLING_ZERO, "trade": 1, "exercise": 1},
+    }
+    assert smoothed["member_verdict"] == "fail"
+    assert cash["refusal_shape"] is None
+    _assert_no_row_text_in(lines, _ROW_IDS)
+
+
+async def test_an_expiry_with_a_position_reads_its_own_class_and_the_row_shape(
+    monkeypatch: Any,
+) -> None:
+    recs, lines = await _measure_d09(monkeypatch, _d09_rows("expiry", position=-1.0))
+    smoothed = recs[_SMOOTHED]
+    assert smoothed["build"] == "build-error:OptionExpiryRowError"
+    assert smoothed["build_error_detail"] == "OptionExpiryRowError:position"
+    assert smoothed["refusal_shape"] == {
+        "kind": "expiry",
+        "change": "zero",
+        "position": "nonzero",
+        "siblings": {**_ROW_SIBLING_ZERO, "trade": 1, "expiry": 1},
+    }
+    assert recs[_CASH]["refusal_shape"] is None
+    _assert_no_row_text_in(lines, _ROW_IDS)
+
+
+@pytest.mark.parametrize("cls", [OptionExerciseRowError, OptionExpiryRowError])
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {"change_shape": "2023-06-20", "position_shape": "absent", "siblings": _ROW_SIBLING_ZERO},
+        {"change_shape": "zero", "position_shape": ["absent"], "siblings": _ROW_SIBLING_ZERO},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {"trade": 1}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": True}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": -1}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": 1.0}},
+    ],
+    ids=["date-word", "unhashable-word", "short-census", "bool-count", "negative-count", "float-count"],
+)
+async def test_an_off_set_row_attribute_degrades_to_unreadable_and_still_prints(
+    monkeypatch: Any, cls: Any, attrs: dict[str, Any]
+) -> None:
+    """Degrade, never refuse: whatever is wrong with an attribute, the record prints as
+    ``unreadable`` (a float count would otherwise make the emitter refuse the whole record)."""
+    recs = await _measure(monkeypatch, {**_fixture_pair(), _SMOOTHED: cls("x", **attrs)})
+    assert recs[_SMOOTHED]["refusal_shape"] == "unreadable"
+    probe.emit_record(recs[_SMOOTHED])
+
+
+# --- plan 07 round 1 (SFH LOW-4): the hole shape carries ``vs_expiry`` --------------------
+
+
+@pytest.mark.parametrize("word", ["past-expiry", "not-past-expiry", "unknown"])
+def test_the_hole_shape_builder_carries_each_vs_expiry_word(word: str) -> None:
+    from services.deribit_txn import OptionMarkHoleError
+
+    exc = OptionMarkHoleError(
+        "x", vs_marks="after-last-bar", vs_retention="not-older", vs_expiry=word
+    )
+    shape = probe._refusal_shape(exc)
+    assert shape == {
+        "kind": "hole",
+        "vs_marks": "after-last-bar",
+        "vs_retention": "not-older",
+        "vs_expiry": word,
+    }
+    assert json.loads(probe.emit_record({**_honest_record(), "refusal_shape": shape}))[
+        "refusal_shape"
+    ] == shape
+
+
+def test_an_off_set_vs_expiry_degrades_to_unreadable() -> None:
+    from services.deribit_txn import OptionMarkHoleError
+
+    exc = OptionMarkHoleError(
+        "x", vs_marks="after-last-bar", vs_retention="older", vs_expiry="2023-06-30"
+    )
+    assert probe._refusal_shape(exc) == "unreadable"
+
+
+@pytest.mark.parametrize(
+    "vs_expiry", ["tomorrow", "2023-06-30", "", None, 7, ["past-expiry"]], ids=repr
+)
+def test_the_emitter_refuses_a_vs_expiry_outside_the_closed_set(vs_expiry: Any) -> None:
+    shape = {
+        "kind": "hole",
+        "vs_marks": "after-last-bar",
+        "vs_retention": "older",
+        "vs_expiry": vs_expiry,
+    }
+    with pytest.raises(ValueError):
+        probe.emit_record({**_honest_record(), "refusal_shape": shape})
