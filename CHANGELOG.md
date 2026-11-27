@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.133.112.0] - 2026-11-28 — Phase 256 OKXUNITSWITCH PR-2: an OKX account that moved from USDT into BTC is reported in USD up to the switch and in BTC after it, and its frozen derives can end done
+
+The readers and writers that use the `strategy_analytics.unit_segments` column shipped in PR-1 (v0.133.108.0, #1402). That column is applied on PROD, and the baseline re-dump is in (#1406).
+
+### Added
+- **Switch detection from data** (`analytics-service/services/unit_switch.py`). `derive_unit_switch` reads stored holdings and the OKX bills census and returns the switch, or a refusal from a closed token set (`no_coin_evidence`, `coin_bills_without_majority`, `two_coins`, `switch_back`, `ambiguous_boundary`, `holdings_unavailable`, `bills_precede_majority_beyond_tolerance` and others). The switch day is the first day the coin is at least 95% of end-of-day account value and stays so. For the founder's account that gives last USD day Nov 20, first BTC day Nov 21. `split_daily_pnl_at_switch` puts each day in exactly one unit.
+- **Two-segment series** (`services/unit_switch_series.py`). `build_switched_series` builds the USD segment, anchored at the earliest stored NAV mark so earlier returns are not rescaled. It reconstructs the BTC segment in BTC and converts it with the existing `convert_native_returns_to_usd` at the daily close, giving one whole-history USD headline. The coin anchor uses the live price from the same balance response.
+- **The derive ends done** (`services/job_worker.py`, both strategy mode and key mode). The OKX bills read books the switched coin's fee bills in the coin segment only when the derive passes a `unit_switch` resolver (`services/exchange.py`). Every other caller, every other coin and any account with no switch still refuses `daily_pnl_non_usd_okx`; an AST pin keeps it that way. The derive writes the USD headline with no `native_unit` flag, a `data_quality_flags.unit_switch` marker and the `unit_segments` sidecar. Key mode writes an additive `unit_segments` in `key_inputs`, and `read_native_key_inputs` honours its `unpriced_days` and `segment_terminals`.
+- **The switch persists.** Once derived, it is read back from the stored record after the coin bills age out of OKX's 93-day bills window, so the switch day never moves. The record is bound to its key by a SHA-256 `key_binding` digest and never carries the raw key id. A malformed record refuses permanently (`stored_segments_malformed`) and is never overwritten.
+- **Factsheet, list, share card and API.**
+  - The masthead and the KPI block state "In USD to Nov 20, 2026, in BTC from Nov 21, 2026", built from the stored days in the app date format.
+  - The Cumulative Returns chart draws the two native segments with a real break and a unit label.
+  - Leverage is held at 1x for a switched strategy.
+  - A `UnitSwitchChip` appears in the strategy table.
+  - The OG card and the returns API carry the switch.
+  - Withheld days and days with no stored close have their own named notes.
+  - The factsheet payload cache moves to v30.
+
+### Changed
+- **Phase 232-03's VREAD-06 refusal is partly reversed** for a coin the account has switched into. The deviation is recorded in `232-CONTEXT.md` and the ROADMAP.
+- Headline KPIs run over the whole record in USD, with the BTC segment converted at each day's stored close. They pass the total-record KPI gate.
+- A switch back counts only after 7 consecutive days with the coin under 50% of account value. A dip under 95% changes nothing.
+- `transforms.py` reads its dust anchor from the passed floors. The default is unchanged, so existing callers are byte-identical.
+
+### Fixed
+- Review rounds 1 to 3 (code reviewer and silent-failure hunter), fixed before ship:
+  - **CR-01:** a partly-USDT account was booked as all BTC.
+  - **CR-02:** the switch was rebuilt nightly from only 93 days of bills.
+  - **WR-01:** the anchor was converted at yesterday's close.
+  - **WR-02 / SF-03:** a missing close refused the whole account or broke the return chain.
+  - **SF-01, SF-02, SF-04, SF-05:**
+    - an old bill set the switch day when there was no holdings history;
+    - today's deposit refused the derive;
+    - a silent single line appeared when the segments were missing;
+    - skipped holdings rows were not logged.
+  - **R2-01 to R2-05, SF2-01 to SF2-03:**
+    - the threshold;
+    - rescaled pre-mark returns;
+    - the chart USD history truncated to the bills window;
+    - the chain boundary at an older hole;
+    - the record not bound to its key;
+    - a malformed record dropped silently;
+    - spans with no points.
+  - **R3-01:** the raw key id was in an anon-readable column.
+  - **R3-03:** the switch-back cliff.
+  - **R3-06:** wrong "no close" wording.
+  - **SF3-02, SF3-03:** named refusal tokens.
+
+### Tests
+- New suites:
+  - `test_unit_switch.py`, `test_unit_switch_series.py`;
+  - `test_okx_unit_switch_fetch.py`, `test_okx_unit_switch_derive.py`, `test_okx_unit_switch_key_mode.py`, `test_okx_unit_switch_readers.py`;
+  - the `okx_unit_switch_derive_harness` fixture;
+  - TS: `unit-segments.test.ts`, `queries.unit-switch.test.ts`, `unit-switch-readers.test.ts`, the chart, view, metrics, chip, table, OG and returns-route unit-switch tests.
+- Every reader states its rule in a test that is RED on the pre-fix code or a neutered copy. PROOF-01 (byte backup, RED, `cp` restore, silent `cmp`, GREEN) is indexed in `256-10-SUMMARY.md`.
+
+### Notes
+- **Founder rulings 2026-11-27, verbatim:**
+  - "USD before 11-15, BTC after" (two-unit series);
+  - "Whole record in USD (Recommended)", "One chart, marked switch (Recommended)", "USD, BTC part converted (Recommended)";
+  - copy "In USD to 14 Nov, in BTC from 15 Nov", rendered in the app date format per Phase 201 U-14;
+  - "Move switch to coin majority", then "≥95% coin and stays (Recommended)", which sets the switch day at Nov 21 for this account;
+  - "<50% for 7 days (Recommended)";
+  - "Book a follow-up phase (Recommended)".
+- **Routed, not fixed:** R3-02 (re-pointing to a new key on the same account), R3-04 (a first mark on a mixed day), R3-05 (a deposit before the first mark), R3-07 (keys with no mark before the coin) and SF3-01 (mixed-day withholding after bills age out, for keys without marks). They go to Phase 261 UNITSWITCHEDGES, and none affects the founder's account at ship.
+- **Post-deploy (SC-5):** the 7 nightly jobs (4 key-mode, 3 strategy-mode) should end `done` and the 3 strategies unfreeze. This is read from PROD after deploy and the next nightly derive, marker query first.
+- **Known limit, founder-visible:** P&L and funding dated today are left to the next derive, so today's partial P&L stays in the anchor for one night.
 ## [0.133.111.1] - 2026-11-28 — records: Phase 258 REDUMPDIRECT closed (verification passed)
 
 ### Changed
