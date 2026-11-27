@@ -60,6 +60,10 @@ export const GET = withAuth(async (_req, user): Promise<NextResponse> => {
     // The card turns this deny into its "could not check" line, and the card
     // runs in the browser, where there is no Sentry. This line is the one
     // server-side trace of that cause. No user id.
+    // ⛔ CORRECTED 2026-11-27 (Phase 221 SENTRYSCRUB2): since Phase 221 the browser has
+    // a Sentry client (src/instrumentation-client.ts), but the feed reader in
+    // src/lib/key-feeds.ts does not capture this deny, so this server line is
+    // still the one trace of the cause.
     console.warn(
       "[keys/feeds] feeds read denied by the limiter; the key cards say they could not check",
       { status: isRateLimitMisconfigured(rl) ? 503 : 429 },

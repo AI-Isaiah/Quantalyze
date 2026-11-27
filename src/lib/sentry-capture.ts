@@ -73,6 +73,18 @@ import { scrubSeamErrorForCapture, scrubSeamString } from "./seam-redaction";
  * through this scrub. Nothing structurally forbids a seam file from doing the
  * same tomorrow; that would need a guard, and this docblock is not one.
  *
+ * ⛔ CORRECTED 2026-11-27 (Phase 221 SENTRYSCRUB2): the last hop,
+ * `scrubSentryEvent` in `src/lib/sentry-scrub.ts`, now drops `details` and
+ * `hint` from a non-Error capture's `extra.__serialized__`, so those direct
+ * sites no longer ship those two fields. Everything else they pass, such as
+ * their own `extra`, still bypasses this helper's scrub. The paragraph above is
+ * kept as lineage.
+ * ⛔ CORRECTED 2026-11-27 (Phase 221 round 1 / WR-02): an earlier version of
+ * the note above said "top level" and pointed the wrapped-object case at Phase
+ * 247 SENTRYHELD, which does not own it. The drop now covers nested objects
+ * under `__serialized__` down to the SDK's normalise depth, so a wrapped
+ * PostgREST object is covered too.
+ *
  * WHAT IS DISPATCHED. An `Error` is rebuilt with a scrubbed `name`, `message`
  * and `stack`, and its `cause` chain is FOLDED INTO the scrubbed message rather
  * than re-attached — attaching the original object would hand Sentry the very

@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.133.103.0] - 2026-11-27 — Phase 221 SENTRYSCRUB2: no Sentry event carries PostgREST details or hint, and browser captures actually report
+
+### Why
+- Phase 209 scrubbed the `captureToSentry` chokepoint. The direct `Sentry.captureException` sites bypass it, and the SDK serialises a plain PostgREST error object into `extra.__serialized__` with its `details` and `hint` intact. Separately, browser code had no `Sentry.init` at all, so every `captureToSentry` call in a `"use client"` module was a silent no-op. Founder decisions 2026-11-23 booked both, plus the callback log gate (SCRB-01, SCRB-02, SCRB-03).
+
+### Added
+- **The last-hop scrub drops `details` and `hint`.** `scrubSentryEvent` now removes both keys from a non-Error capture's `extra.__serialized__`, including nested objects down to depth 3 (the SDK's normalise depth). It keeps the Phase 164/209 contract: every read and write is guarded, an unwritable slot is rebuilt at the nearest writable parent, and the event is never returned unscrubbed.
+- **The scrub lives in `src/lib/sentry-scrub.ts`.** It moved byte for byte out of `src/instrumentation.ts`, which re-exports it, so the server and the browser run the same function. Tests pin both runtimes' hooks to it with `toBe`.
+- **The browser now has a Sentry init, `src/instrumentation-client.ts`.** It runs only when a DSN was inlined at build time. Its `beforeSend` and `beforeSendTransaction` are the shared scrub, and it opens no extra channel: no Replay, `BrowserTracing` and `BrowserSession` are filtered out, no trace sample rate, `traceLifecycle: "static"`, `dataCollection` with `userInfo` and `urlQueryParams` off, and console breadcrumbs dropped as on the server. `environment` comes from the inlined `VERCEL_ENV`, so previews are not filed as production.
+- **`next.config.ts` inlines the browser DSN and admits its ingest origin.** `NEXT_PUBLIC_SENTRY_DSN` is set from the first usable value of `NEXT_PUBLIC_SENTRY_DSN` or `SENTRY_DSN` (http or https, host `[a-z0-9.-]`), and the same pick adds only that DSN's origin to the CSP `connect-src`, never its key or path. With no DSN, the CSP literal is unchanged. A DSN that is set but unusable logs one build-time warning instead of starting a browser init the CSP would block.
+
+### Fixed
+- **Server events no longer carry the request query string** (review round 1, WR-01). `onRequestError` cuts the query from `extra.path`, and the server init sets `dataCollection: { urlQueryParams: false }`. Before this, `/auth/callback?token_hash=...` could reach Sentry on a failure before the hash was redeemed.
+- **A sampled transaction's span URL attributes carry no query string** (review round 2, WR-03). Next puts the full request URL on its own span as `http.target`; a `beforeSendSpan` hook (`Sentry.withStaticSpan`) now cuts the query from `http.target`, `http.url` and `url.full` and deletes `url.query`.
+- **A production build without a browser DSN says so.** `register()` warns once at startup when `SENTRY_DSN` is set but the build carries no browser DSN, so a split where the server reports and the browser does not is visible in the deploy log.
+
+### Removed
+- `TODOS.md` entries `[209-SENTRY-DIRECT-CAPTURE-DETAILS]`, `[167.2.1-CLIENT-SENTRY-NOOP]` (with its interim rule) and `[219-CALLBACK-VERIFY-ERROR-LOG]` are closed and deleted. Comments that said the browser has no Sentry (`src/app/error.tsx`, `src/app/global-error.tsx`, `src/app/api/keys/feeds/route.ts`, `src/lib/sentry-capture.ts`) carry dated corrections.
+
+### Changed
+- **Browser events start flowing on the first deploy that carries a DSN:** uncaught browser errors, the error boundaries and every `"use client"` capture. Sentry quota use and new-issue alerts will rise; existing alert rules are founder-side.
+- `docs/runbooks/sentry-triage.md` gains Browser DSN, Browser environment and Scrub rows. `.env.example` documents the two inlined keys.
+
+### Tests
+- A real-SDK envelope test captures a plain object with `details`/`hint` sentinels through a direct `Sentry.captureException` and asserts neither reaches the envelope, plus frozen, getter, nested and deep-frozen cases. A jsdom test drives the real browser SDK (aliased in for `@sentry/nextjs`): a capture from the real `"use client"` module `cross-tab.ts` and a direct `captureToSentry` both produce scrubbed events; a share URL with a PKCE `?code=` and a fetch breadcrumb with a query arrive without either. Contract cases pin the DSN precedence, the injection refusals and the CSP order. Real-SDK cases pin the server query strip and the span attribute strip.
+- SCRB-03: two callback cases send `error_code=otp_expired` with the email-change marker and assert the log carries the code, cut to 64 characters, and never `error_description`.
+- Every gate was shown RED on pre-fix code or a neutered byte copy, then restored (`cmp` exit 0) and GREEN.
+
+### Notes
+- **SCRB-03 history:** the callback's `error_code` log itself shipped in RESETFAILLOUD (#1375, 701e4d9c). This phase added the missing marker-path gate, RED on the route from before that commit.
+- **Post-deploy check (human):** load a preview and a production page, trigger a client capture, and confirm the ingest request and a Sentry event with the right `environment`, no query string and no `details`/`hint`. If nothing arrives, the Vercel build did not see `SENTRY_DSN`: expose it to builds or set `NEXT_PUBLIC_SENTRY_DSN`, then redeploy.
+- **Accepted residuals:** URL fragments survive the scrub and `urlQueryParams: false` (the app is PKCE-only, so no fragment carries an auth secret). A caller's own `extra.details`, outside `__serialized__`, is not scrubbed.
+- **Bundle cost:** the DSN-carrying client chunk measured 74,579 bytes gzip in a real `next build`.
+- **Declared test limit:** vitest aliases `@sentry/nextjs` to `@sentry/browser`, so the nextjs client wrapper is checked only by the build smoke.
+- Review: gsd-code-reviewer and silent-failure-hunter, three rounds. Round 1 found four MEDIUMs (WR-01, WR-02, SFH-M1, SFH-M2) and round 2 one more (WR-03); all are fixed and round 3 is clean. LOW and INFO items stay in the phase review. Security audit: `threats_open: 0`.
+
 ## [0.133.102.0] - 2026-11-27 — ACCESSGUARDS: an owner read keeps its key id, the six unaudited write sites are audited or founder-exempt, and the watchlist RLS proof gates merges
 
 ### Added

@@ -385,6 +385,58 @@ describe("GET /auth/callback — GR1-MD-01 GoTrue verify-error redirect", () => 
   });
 });
 
+// Phase 221 SENTRYSCRUB2 / SCRB-03: GR1-MD-01 lands a failed verify carrying the
+// marker on the Account tab with no visible error, so the log line is the only
+// trace of a run of expired or scanner-consumed email-change links. RESETFAILLOUD
+// (701e4d9ca) added the line before that redirect, but only case Q pinned it, on
+// a path without the marker. These cases pin it on the marker path.
+describe("GET /auth/callback — SCRB-03 the marker-path verify error is logged", () => {
+  const CALLBACK = "http://localhost:3000/auth/callback";
+  const MARKER_NEXT = "next=%2Fprofile%3Ftab%3Daccount%26email_change%3Dconfirmed";
+  const VERIFY_LINE = "[auth/callback] verify redirected with an error:";
+
+  it("S: a failed email-change verify logs the code and error, never the description", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await callGet(
+        `${CALLBACK}?error=access_denied&error_code=otp_expired&error_description=secret-desc&${MARKER_NEXT}`,
+      );
+
+      // Anti-vacuity: the marker branch ran, so the log is proven to fire on it.
+      expect(res.headers.get("location")).toBe(
+        "http://localhost:3000/profile?tab=account",
+      );
+      const verifyCalls = spy.mock.calls.filter((c) => c[0] === VERIFY_LINE);
+      expect(verifyCalls).toHaveLength(1);
+      expect(verifyCalls[0]).toEqual([VERIFY_LINE, "otp_expired", "access_denied"]);
+      expect(JSON.stringify(spy.mock.calls)).not.toContain("secret-desc");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("T: the logged error_code is cut to 64 characters", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // The slice bounds what an attacker-chosen query value can write into our logs.
+      const res = await callGet(
+        `${CALLBACK}?error_code=${"E".repeat(200)}&${MARKER_NEXT}`,
+      );
+
+      expect(res.headers.get("location")).toBe(
+        "http://localhost:3000/profile?tab=account",
+      );
+      const verifyCalls = spy.mock.calls.filter((c) => c[0] === VERIFY_LINE);
+      expect(verifyCalls).toHaveLength(1);
+      expect(verifyCalls[0][1]).toBe("E".repeat(64));
+      expect((verifyCalls[0][1] as string).length).toBe(64);
+      expect(verifyCalls[0][2]).toBe("none");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 // Phase 219 SFH-M1: the marker path swallows the exchange error, so PROD logs
 // could not tell an expected flow_state_expired from any other failure.
 describe("GET /auth/callback — SFH-M1 marker-path exchange failure is logged", () => {

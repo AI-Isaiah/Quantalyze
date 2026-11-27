@@ -23,6 +23,12 @@ export default function Error({
     const correlation_id = cidMeta?.getAttribute("content") ?? null;
     // Lazy import keeps @sentry/nextjs out of the static bundle for pages
     // that never render this boundary (Phase 16 / OBSERV-04).
+    // ⛔ CORRECTED 2026-11-27 (Phase 221 SENTRYSCRUB2): src/instrumentation-client.ts now
+    // loads @sentry/nextjs on every page whenever the build carried a DSN, so this
+    // lazy import no longer keeps the SDK out of the bundle. The import stays: it
+    // resolves to the same module and the same client, and this capture now
+    // actually reports, where before Phase 221 the browser had no client and it
+    // was a silent no-op.
     import("@sentry/nextjs")
       .then((Sentry) => {
         Sentry.captureException(error, {

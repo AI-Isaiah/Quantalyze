@@ -7,10 +7,13 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 const sentryInitMock = vi.hoisted(() => vi.fn());
 const sentryCaptureExceptionMock = vi.hoisted(() => vi.fn());
 const sentryCaptureMessageMock = vi.hoisted(() => vi.fn());
-vi.mock("@sentry/nextjs", () => ({
+vi.mock("@sentry/nextjs", async () => ({
   init: sentryInitMock,
   captureException: sentryCaptureExceptionMock,
   captureMessage: sentryCaptureMessageMock,
+  // Phase 221 round 2 / WR-03: the REAL wrapper, because it stamps the marker
+  // the real SDK reads to tell a static `beforeSendSpan` from a streamed one.
+  withStaticSpan: (await vi.importActual<typeof import("@sentry/nextjs")>("@sentry/nextjs")).withStaticSpan,
 }));
 
 import {
@@ -19,7 +22,9 @@ import {
   register,
   onRequestError,
   shareTokenSecretBootError,
+  scrubSentryEvent,
 } from "./instrumentation";
+import { scrubSentryEvent as libScrubSentryEvent } from "@/lib/sentry-scrub";
 import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
@@ -68,6 +73,75 @@ describe("[#15] warnUnsetSoftSkipKeys", () => {
     for (const k of SOFT_SKIP_PROD_KEYS) process.env[k] = "set";
     warnUnsetSoftSkipKeys();
     expect(warn).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 221 round 1 / SFH-M1. A build that carries no browser DSN silently
+ * leaves the browser channel off while the server keeps reporting. `register()`
+ * says so once at startup, in production only, naming the cause and the remedy
+ * and never the DSN itself.
+ */
+describe("[221 SFH-M1] register() warns when the build carries no browser DSN", () => {
+  const KEYS = ["SENTRY_DSN", "NEXT_PUBLIC_SENTRY_DSN", "VERCEL_ENV"];
+  const saved: Record<string, string | undefined> = {};
+  const SERVER_DSN = "https://publickey@o0.ingest.sentry.io/1";
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    for (const k of KEYS) saved[k] = process.env[k];
+    vi.clearAllMocks();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+    warn.mockRestore();
+  });
+
+  const browserWarnings = () =>
+    (warn.mock.calls as unknown[][])
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes("browser errors are NOT reported"));
+
+  it("warns once in production, naming cause and remedy and never the DSN", async () => {
+    process.env.VERCEL_ENV = "production";
+    process.env.SENTRY_DSN = SERVER_DSN;
+    delete process.env.NEXT_PUBLIC_SENTRY_DSN;
+    await register();
+    const msgs = browserWarnings();
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toContain("SENTRY_DSN is set");
+    expect(msgs[0]).toContain("Redeploy");
+    expect(msgs[0]).not.toContain("publickey");
+    // Anti-vacuity: the server channel was still initialised.
+    expect(sentryInitMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays silent when the build carries the browser DSN", async () => {
+    process.env.VERCEL_ENV = "production";
+    process.env.SENTRY_DSN = SERVER_DSN;
+    process.env.NEXT_PUBLIC_SENTRY_DSN = SERVER_DSN;
+    await register();
+    expect(browserWarnings()).toHaveLength(0);
+  });
+
+  it("stays silent outside production", async () => {
+    process.env.VERCEL_ENV = "preview";
+    process.env.SENTRY_DSN = SERVER_DSN;
+    delete process.env.NEXT_PUBLIC_SENTRY_DSN;
+    await register();
+    expect(browserWarnings()).toHaveLength(0);
+  });
+
+  it("stays silent when there is no server DSN either (the soft-skip warning owns that)", async () => {
+    process.env.VERCEL_ENV = "production";
+    delete process.env.SENTRY_DSN;
+    delete process.env.NEXT_PUBLIC_SENTRY_DSN;
+    await register();
+    expect(browserWarnings()).toHaveLength(0);
   });
 });
 
@@ -784,6 +858,180 @@ describe("[164 SHARE-01] Sentry never receives a share token", () => {
         expect(out).toBe(event);
       },
     );
+
+    // Phase 221 / SCRB-01 guarded edges. The details/hint arm shares the walk's
+    // contract: it never throws out of beforeSend and never returns an event
+    // that still carries the two keys. Oracles are hand-typed, never read from
+    // the module. Each sentinel carries an email so the absence assertion means
+    // something.
+    const PG_DETAILS = "DETAILS-SENTINEL Key (email)=(victim@example.com) already exists";
+    const PG_HINT = "HINT-SENTINEL ask the founder";
+    const EVENT_ID = "0123456789abcdef0123456789abcdef";
+    const pgFixture = () => ({
+      code: "23505",
+      message: "duplicate key value",
+      details: PG_DETAILS,
+      hint: PG_HINT,
+    });
+    /** Anti-vacuity on the fixture, then absence of every sentinel on the output. */
+    function expectNoPostgrestFields(fixtureJson: string, out: unknown) {
+      expect(fixtureJson).toContain("DETAILS-SENTINEL");
+      expect(fixtureJson).toContain("HINT-SENTINEL");
+      const serialized = JSON.stringify(out);
+      expect(serialized).not.toContain("DETAILS-SENTINEL");
+      expect(serialized).not.toContain("HINT-SENTINEL");
+      expect(serialized).not.toContain("victim@example.com");
+    }
+
+    // A frozen __serialized__ inside a writable extra cannot have its keys
+    // deleted, so it is rebuilt at extra, and the keys are dropped again from
+    // the copy because the rebuild copies every readable key (RESEARCH Pitfall 2).
+    it("SCRB-01: a frozen __serialized__ holding details/hint is rebuilt at extra without them", async () => {
+      const opts = await registeredInitOptions();
+      const event = {
+        event_id: EVENT_ID,
+        extra: { __serialized__: Object.freeze(pgFixture()) },
+      };
+      const fixtureJson = JSON.stringify(event);
+      errorSpy.mockClear();
+
+      const out = deliver<typeof event>(opts.beforeSend, event);
+
+      expect(out).toBe(event);
+      expectNoPostgrestFields(fixtureJson, out);
+      expect(out.extra.__serialized__).toEqual({
+        code: "23505",
+        message: "duplicate key value",
+        scrub_rebuilt: "0",
+      });
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[beforeSend] an unscrubbable value was rebuilt in place",
+        { event_id: EVENT_ID, channel: "extra", omitted: 0 },
+      );
+    });
+
+    // Phase 221 round 1 / WR-02. The nested walk shares the guarded contract: a
+    // frozen wrapper one level down cannot be deleted from, so __serialized__ is
+    // rebuilt at extra and the keys are dropped again from the copy.
+    it("WR-02: a frozen nested object holding details/hint is rebuilt without them", async () => {
+      const opts = await registeredInitOptions();
+      const event = {
+        event_id: EVENT_ID,
+        extra: { __serialized__: { status: 400, error: Object.freeze(pgFixture()) } },
+      };
+      const fixtureJson = JSON.stringify(event);
+
+      const out = deliver<typeof event>(opts.beforeSend, event);
+
+      expect(out).toBe(event);
+      expectNoPostgrestFields(fixtureJson, out);
+      expect(out.extra.__serialized__).toMatchObject({
+        status: 400,
+        error: { code: "23505", message: "duplicate key value" },
+      });
+    });
+
+    // A frozen extra cannot take a rebuilt __serialized__ either, so the
+    // escalation goes one level up: extra is rebuilt at the event (D-08).
+    it("SCRB-01: a frozen extra holding a frozen __serialized__ is rebuilt at the event without details/hint", async () => {
+      const opts = await registeredInitOptions();
+      const event = {
+        event_id: EVENT_ID,
+        extra: deepFreeze({ __serialized__: pgFixture() }),
+      };
+      const fixtureJson = JSON.stringify(event);
+
+      const out = deliver<typeof event>(opts.beforeSend, event);
+
+      expect(out).toBe(event);
+      expectNoPostgrestFields(fixtureJson, out);
+      expect(out.extra).toEqual({
+        __serialized__: { code: "23505", message: "duplicate key value" },
+        scrub_rebuilt: "0",
+      });
+    });
+
+    // A non-configurable throwing getter cannot be deleted, so the rebuild has
+    // to OMIT it; the other key is dropped from the copy. Nothing throws.
+    it("SCRB-01: a throwing non-configurable details getter is omitted by the rebuild and never thrown out of the hook", async () => {
+      const opts = await registeredInitOptions();
+      const serialized: Record<string, unknown> = {
+        code: "23505",
+        message: "duplicate key value",
+        hint: PG_HINT,
+      };
+      Object.defineProperty(serialized, "details", {
+        enumerable: true,
+        configurable: false,
+        get: () => {
+          throw new Error(PG_DETAILS);
+        },
+      });
+      const event = { event_id: EVENT_ID, extra: { __serialized__: serialized } };
+      const fixtureJson = JSON.stringify({ ...event, extra: { __serialized__: { hint: PG_HINT, details: PG_DETAILS } } });
+
+      const out = deliver<typeof event>(opts.beforeSend, event);
+
+      expectNoPostgrestFields(fixtureJson, out);
+      expect(out.extra.__serialized__).toEqual({
+        code: "23505",
+        message: "duplicate key value",
+        scrub_rebuilt: "omitted=1",
+      });
+    });
+
+    // D-06: the arm writes only when there is something to drop, so a frozen
+    // __serialized__ with neither key stays the same frozen object.
+    it("SCRB-01: a frozen __serialized__ carrying neither key is left untouched (D-06)", async () => {
+      const opts = await registeredInitOptions();
+      const frozen = Object.freeze({ code: "23505", message: "duplicate key value" });
+      const event = { event_id: EVENT_ID, extra: { __serialized__: frozen } };
+      errorSpy.mockClear();
+
+      const out = deliver<typeof event>(opts.beforeSend, event);
+
+      expect(out).toBe(event);
+      expect(out.extra.__serialized__).toBe(frozen);
+      expect(Object.keys(out.extra.__serialized__)).not.toContain("scrub_rebuilt");
+      expect(errorSpy).not.toHaveBeenCalledWith(
+        "[beforeSend] an unscrubbable value was rebuilt in place",
+        expect.anything(),
+      );
+    });
+
+    // Nothing up to the event root is writable: the existing root-withheld
+    // replacement ships, never the original with details/hint.
+    it("SCRB-01: a deep-frozen event carrying details/hint comes back as the root-withheld replacement", async () => {
+      const opts = await registeredInitOptions();
+      const event = deepFreeze({
+        event_id: EVENT_ID,
+        extra: { __serialized__: pgFixture() },
+      });
+      const fixtureJson = JSON.stringify(event);
+
+      const out = deliver<{ tags?: { scrub_withheld?: string } }>(opts.beforeSend, event);
+
+      expect(out).not.toBe(event);
+      expect(out.tags?.scrub_withheld).toBe("root");
+      expectNoPostgrestFields(fixtureJson, out);
+    });
+  });
+
+  // Phase 221 / T-221-03. The assumption delta of this phase is server-only
+  // becoming server plus browser; CONTEXT [Code layout] answers it with ONE
+  // function, never a copy. A move that re-typed the scrub, or wired a copy,
+  // would pass every behavioural case above and still drift.
+  it("SCRB-01: both registered hooks and the re-export are the one function in src/lib/sentry-scrub.ts", async () => {
+    process.env.SENTRY_DSN = "https://publickey@o0.ingest.sentry.io/1";
+    process.env.VERCEL_ENV = "preview";
+    await register();
+    const opts = sentryInitMock.mock.calls[0][0] as {
+      beforeSend?: unknown;
+      beforeSendTransaction?: unknown;
+    };
+    expect(opts.beforeSend).toBe(libScrubSentryEvent);
+    expect(opts.beforeSendTransaction).toBe(libScrubSentryEvent);
+    expect(scrubSentryEvent).toBe(libScrubSentryEvent);
   });
 });
 
@@ -1121,6 +1369,11 @@ describe("[209 CR-01/CR-02] the registered Sentry options, through the real SDK 
   const RAW_PATH = `/factsheet-share/${TOKEN}`;
   const DETAILS = "DETAILS-SENTINEL Key (email)=(victim@example.com) already exists";
   const HINT = "HINT-SENTINEL ask the founder";
+  // Kept in constants, never inline at the capture call: the SDK's
+  // ContextLines integration ships the source lines around a frame, so a
+  // sentinel literal next to the call would sit in the envelope by itself.
+  const QUERY_SENTINEL = "TOKENHASH-SENTINEL";
+  const CALLBACK_PATH = `/auth/callback?token_hash=${QUERY_SENTINEL}&type=recovery`;
 
   type EnvelopeItem = [{ type?: string }, Record<string, unknown>];
   type Envelope = [unknown, EnvelopeItem[]];
@@ -1238,6 +1491,204 @@ describe("[209 CR-01/CR-02] the registered Sentry options, through the real SDK 
     // Anti-vacuity: breadcrumbs ARE recorded, and only the console ones go.
     expect(event!.breadcrumbs?.map((b) => b.message)).toEqual(["kept-breadcrumb"]);
     expect(event!.breadcrumbs?.some((b) => b.category === "console")).toBe(false);
+  });
+
+  // Phase 221 / SCRB-01. The 12 direct Sentry.captureException sites bypass
+  // scrubCaptureInput, so the last hop (beforeSend) is the one place that
+  // covers every one of them. A plain object is not an Error, so the SDK takes
+  // its non-Error path and writes the WHOLE object to extra.__serialized__.
+  // Sentinel VALUES are asserted absent, never the words details/hint: the
+  // SDK's exception text lists the key names.
+  it("SCRB-01: a direct captureException of a plain PostgREST object ships neither details nor hint", async () => {
+    await real.withIsolationScope(async () => {
+      real.captureException({
+        code: "23505",
+        message: "duplicate key value",
+        details: DETAILS,
+        hint: HINT,
+      });
+    });
+    await real.flush(2000);
+
+    const event = envelopes
+      .flatMap((e) => e[1])
+      .find((item) => item[0].type === "event")?.[1] as
+      | { extra?: { __serialized__?: Record<string, unknown> } }
+      | undefined;
+    expect(event).toBeDefined();
+    // Anti-vacuity: the non-Error path ran, and only the two keys went.
+    expect(event!.extra?.__serialized__).toMatchObject({
+      code: "23505",
+      message: "duplicate key value",
+    });
+    const serialized = JSON.stringify(envelopes);
+    expect(serialized).not.toContain("DETAILS-SENTINEL");
+    expect(serialized).not.toContain("HINT-SENTINEL");
+    expect(serialized).not.toContain("victim@example.com");
+  });
+
+  // Phase 221 round 1 / WR-02. A PostgREST error wrapped one level down (a
+  // browser unhandled rejection whose reason is `{ error: {...} }`, a rejected
+  // `{ data, error }` response) lands as `__serialized__.error.details`, and
+  // the top-level-only drop left it on the wire. The SDK normalises to depth 3,
+  // so the arm walks that far and no further.
+  it("WR-02: a PostgREST error wrapped under a nested key ships neither details nor hint", async () => {
+    await real.withIsolationScope(async () => {
+      real.captureException({
+        status: 400,
+        error: {
+          code: "23505",
+          message: "duplicate key value",
+          details: DETAILS,
+          hint: HINT,
+          inner: { details: `${DETAILS} (second level)` },
+        },
+      });
+    });
+    await real.flush(2000);
+
+    const event = envelopes
+      .flatMap((e) => e[1])
+      .find((item) => item[0].type === "event")?.[1] as
+      | { extra?: { __serialized__?: Record<string, unknown> } }
+      | undefined;
+    expect(event).toBeDefined();
+    // Anti-vacuity: the nested path ran, and only the two keys went.
+    expect(event!.extra?.__serialized__).toMatchObject({
+      status: 400,
+      error: { code: "23505", message: "duplicate key value" },
+    });
+    const serialized = JSON.stringify(envelopes);
+    expect(serialized).not.toContain("DETAILS-SENTINEL");
+    expect(serialized).not.toContain("HINT-SENTINEL");
+    expect(serialized).not.toContain("victim@example.com");
+  });
+
+  // Phase 221 round 1 / WR-01. Next hands `onRequestError` the path PLUS the
+  // query (`/blog?name=foo`), so `/auth/callback?token_hash=...` reached Sentry
+  // as `extra.path`. The hook below is the REAL one, driven into the REAL SDK.
+  it("WR-01: onRequestError's extra.path carries no query string, so a token_hash never ships", async () => {
+    sentryCaptureExceptionMock.mockImplementation((...args: unknown[]) =>
+      (real.captureException as (...a: unknown[]) => string)(...args),
+    );
+    try {
+      await real.withIsolationScope(async () => {
+        await onRequestError(
+          Object.assign(new Error("boom"), { digest: undefined }),
+          {
+            path: CALLBACK_PATH,
+            method: "GET",
+            headers: {},
+          },
+          {
+            routerKind: "App Router",
+            routePath: "/auth/callback",
+            routeType: "route",
+            renderSource: "react-server-components",
+          },
+        );
+      });
+    } finally {
+      sentryCaptureExceptionMock.mockReset();
+    }
+    await real.flush(2000);
+
+    // Anti-vacuity: the capture really reached the envelope, with the path.
+    const event = envelopes
+      .flatMap((e) => e[1])
+      .find((item) => item[0].type === "event")?.[1] as
+      | { extra?: { path?: string } }
+      | undefined;
+    expect(event?.extra?.path).toBe("/auth/callback");
+    expect(JSON.stringify(envelopes)).not.toContain(QUERY_SENTINEL);
+  });
+
+  // Phase 221 round 1 / WR-01, the SDK half: with request data on the scope the
+  // server `requestDataIntegration` writes `request.url` and `query_string`,
+  // and only `dataCollection.urlQueryParams: false` (read off the REGISTERED
+  // options) keeps the query out of both. The key is `probe`, not `token_hash`:
+  // the SDK's own sensitive-key filter already masks a `token_hash` value, which
+  // would let this case pass without the option.
+  it("WR-01: the registered dataCollection keeps the query out of request.url and query_string", async () => {
+    await real.withIsolationScope(async (scope) => {
+      scope.setSDKProcessingMetadata({
+        normalizedRequest: {
+          url: `http://localhost${CALLBACK_PATH.replace("token_hash", "probe")}`,
+          method: "GET",
+          query_string: `probe=${QUERY_SENTINEL}&type=recovery`,
+        },
+      });
+      real.captureException(new Error("boom"));
+    });
+    await real.flush(2000);
+
+    const event = envelopes
+      .flatMap((e) => e[1])
+      .find((item) => item[0].type === "event")?.[1] as
+      | { request?: { url?: string } }
+      | undefined;
+    // Anti-vacuity: request data was attached, the path is there, the query is not.
+    expect(event?.request?.url).toContain("/auth/callback");
+    expect(JSON.stringify(envelopes)).not.toContain(QUERY_SENTINEL);
+  });
+
+  // Phase 221 round 2 / WR-03. Next writes `http.target: req.url` (path PLUS
+  // query) on its own request span, and the SDK filters only the URL attributes
+  // its own integrations create, so `dataCollection.urlQueryParams: false` does
+  // not reach it. A sampled transaction therefore carried `/auth/callback?
+  // token_hash=...`. Reproduces Next's shape (root and child span) and drives
+  // it through the REGISTERED `beforeSendSpan`.
+  it("WR-03: a sampled transaction's span URL attributes carry no query string", async () => {
+    const FULL_URL = `http://localhost:3000${CALLBACK_PATH}`;
+    await real.startSpan(
+      {
+        name: "GET /auth/callback",
+        op: "http.server",
+        attributes: {
+          "http.target": CALLBACK_PATH,
+          "url.full": FULL_URL,
+          "url.query": `token_hash=${QUERY_SENTINEL}&type=recovery`,
+        },
+      },
+      async () => {
+        await real.startSpan(
+          { name: "GET", attributes: { "http.target": CALLBACK_PATH, "http.url": FULL_URL } },
+          async () => {},
+        );
+      },
+    );
+    await real.flush(2000);
+
+    const transaction = envelopes
+      .flatMap((e) => e[1])
+      .find((item) => item[0].type === "transaction")?.[1] as
+      | {
+          contexts?: { trace?: { data?: Record<string, unknown> } };
+          spans?: Array<{ data?: Record<string, unknown> }>;
+        }
+      | undefined;
+    // Anti-vacuity: the transaction shipped, and the path (not just an empty
+    // attribute) is still there, on the root span and on the child.
+    expect(transaction).toBeDefined();
+    expect(transaction!.contexts?.trace?.data?.["http.target"]).toBe("/auth/callback");
+    expect(transaction!.contexts?.trace?.data?.["url.full"]).toBe("http://localhost:3000/auth/callback");
+    expect(transaction!.spans?.[0]?.data?.["http.target"]).toBe("/auth/callback");
+    expect(transaction!.spans?.[0]?.data?.["http.url"]).toBe("http://localhost:3000/auth/callback");
+    expect(JSON.stringify(envelopes)).not.toContain(QUERY_SENTINEL);
+  });
+
+  // The SDK ships a span UNMODIFIED when `beforeSendSpan` throws, so the hook
+  // must not throw on attributes it cannot rewrite: they go out empty instead.
+  it("WR-03: a span whose attributes cannot be rewritten ships with none, never with the query", () => {
+    const registered = sentryInitMock.mock.calls[0][0] as {
+      beforeSendSpan: (span: { data?: Record<string, unknown> }) => {
+        data?: Record<string, unknown>;
+      };
+    };
+    const frozen = { data: Object.freeze({ "http.target": CALLBACK_PATH }) as Record<string, unknown> };
+    const out = registered.beforeSendSpan(frozen);
+    expect(out.data).toEqual({});
+    expect(JSON.stringify(out)).not.toContain(QUERY_SENTINEL);
   });
 
   it("CR-02: beforeBreadcrumb returns null for console crumbs and the SAME object for every other category", () => {

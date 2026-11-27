@@ -295,19 +295,6 @@ founder can take.
   - **Fix direction:** a static twinned arm that asserts the function source carries the dependent clause inside the lock query, or a two-session lane test.
   - **Gate:** the new arm goes RED when the clause is removed.
 
-- [ ] **`[219-CALLBACK-VERIFY-ERROR-LOG]` The callback's GoTrue `error` / `error_code` branch redirects without logging the error code** (logged 2026-11-20, Phase 219 ACCOUNTEMAIL gap review, MEDIUM, observability, not user-facing; owner: the next touch of `src/app/auth/callback/route.ts`)
-  - **What:** when GoTrue's `/verify` itself fails (expired, already used or scanner-consumed token) it redirects to `/auth/callback` with `error` / `error_code` and no code, token hash or message. Since the Phase 219 gap, a request whose accepted `next` carries the email-change marker lands on the Account tab for that case, and nothing is logged, so a run of failed verifies cannot be seen. The marker-path exchange failure already logs its code and status.
-  - **Fix direction:** log the `error_code` value only, sliced to a short length, in that branch. Never log `error_description`, which GoTrue fills with free text.
-  - **Gate:** a callback test that sends `error_code=otp_expired` with the marker and asserts the console line carries the code and not the description, shown RED before the fix.
-      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-03; tagged 2026-11-23.**
-
-- [ ] **[209-SENTRY-DIRECT-CAPTURE-DETAILS]** (logged 2026-11-14, Phase 209 SCRUBLEAKS review residual, CONTEXT `<deferred>`; MEDIUM, security/data-integrity; owner: unassigned, book a phase when taken up) **Direct `Sentry.captureException` call sites bypass `scrubCaptureInput`, so a plain PostgREST error object captured there still carries `details` and `hint` to Sentry under `extra.__serialized__`.**
-  - **Why:** Phase 209 scrubbed the `captureToSentry` chokepoint and made `beforeSend` total; the SDK serialises a non-Error capture into `extra.__serialized__`, which `scrubSentryEvent` scrubs for share tokens only. Measured in review: `alert-digest` (two sites) ships `details`/`hint` this way.
-  - **Candidate sites:** `alert-digest` (2), `admin.ts`, `founder-lp-report`, `ops-alert`, `for-quants-lead`, `error.tsx`/`global-error.tsx`, plus `audit.ts`, `for-quants-leads-admin.ts`, `preferences.ts`. Find them with `grep -rn -a 'Sentry.captureException' src --include=*.ts --include=*.tsx`, excluding tests.
-  - **Fix direction:** one arm in `scrubSentryEvent` (`src/instrumentation.ts`) that drops `details`/`hint` from `extra.__serialized__`, so every direct site is covered at the last hop; or route the sites through `captureToSentry`.
-  - **Gate:** a real-SDK envelope test (the in-memory transport in `src/instrumentation.test.ts`) capturing a plain object with `details`/`hint` sentinels, shown RED before the fix.
-      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-01; tagged 2026-11-23.**
-
 - [ ] **[198-FD3-SIDEBAR-ADD-A-STRATEGY]** (logged 2026-11-09, Phase 198 MYBOOK, founder decision FD-3 2026-11-08; owner: unassigned, book a phase when taken up). On the allocator workspace, the sidebar and mobile-nav "Add a Strategy" still open the manager `WizardClient`. Phase 198 took the wizard off the My allocation header only; the header now opens the allocator's own add-allocation flow. The founder chose to leave the sidebar entry alone in that phase and book this follow-up. Decide what "Add a Strategy" means for an allocator (the add-allocation flow, a manager-only entry, or hidden), and update `e2e/wizard-resume.spec.ts`, which now reaches the wizard through the sidebar.
 
 - [ ] **[DEPS-REACT-HOOKS-7.1-LINT]** (logged 2026-10-30, found landing PR #1157, which superseded Dependabot #1122-#1124; owner: unassigned, book a phase when taken up) `eslint-config-next` 16.3.8 to 16.4.2 was LEFT OUT of #1157 because it pulls `eslint-plugin-react-hooks` 7.1.1, which raises 64 new lint errors in `src/` across six rules: `set-state-in-effect`, `refs`, `purity`, `immutability`, `preserve-manual-memoization` and `error-boundaries`. ⛔ Do NOT land it by downgrading those rules to `warn`; fix the sites, then take the bump. Dependabot will re-propose it; that PR stays red until the sites are fixed. Done when `eslint-config-next` is at 16.4.2 or later, `eslint.config.mjs` is unchanged in rule severity, and `npm run lint` exits 0.
@@ -1177,39 +1164,6 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **DELIVERABLE: a repo-owned gate, `plan-anchor-verify`'s shape applied to source comments.**
       ⭐ Prefer converting an anchor to a SYMBOL over re-pinning a number — a symbol survives the
       edit that moves the line. Encode that preference in the gate's MESSAGE, not just its docs.
-
-- [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
-      no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1
-      FACTSHEETBUILDABLE, 167.2.1-REVIEW-R2 IN-04 and 167.2.1-REVIEW-SFH M-6)** — Sentry is
-      initialised server-side only, in `src/instrumentation.ts`. There is no `sentry.client.config.*`
-      and no `instrumentation-client.ts` (checked 2026-09-26). So a `captureToSentry` or `@sentry/*`
-      call in a `"use client"` module reports nothing, and the author has no way to see that.
-      **The class, measured 2026-09-26:** **12** non-test files carry a real `"use client"` directive
-      and call `captureToSentry` or import `@sentry/*`. The count comes from
-      `grep -rlE "['\"]use client['\"]" src | grep -v '\.test\.' | xargs grep -lE 'captureToSentry|@sentry/'`,
-      keeping only files whose directive is on its own line. That grep matches 18 files. Six only
-      mention "use client" in prose: a server route, a contracts registry, and four `src/lib`
-      modules. Shared helpers such as `src/lib/resilient-fetch.ts` may also be bundled into client
-      code, so 12 is a floor. The round-2 reviewer counted 16 by another method. Regenerate the
-      count; do not trust either number.
-      **Why this is not fixed in place:** adding a browser `Sentry.init` is a security decision.
-      `scrubSentryEvent` in `src/instrumentation.ts` states that a client init re-opens the browser
-      channel (breadcrumbs record `location.href`, Replay records the URL bar, so a share token
-      leaks). Any client init MUST use `scrubSentryEvent` as `beforeSend`, and Replay URL masking,
-      before the channel opens. This is observability, not data integrity, so it gets a booking and
-      not a phase.
-      **Two candidate fixes:** (a) a client `Sentry.init` whose `beforeSend` and
-      `beforeSendTransaction` are `scrubSentryEvent`, with Replay off or URL-masked; or (b) the
-      alternative, a tags-only, rate-limited server endpoint that client code posts `{ route,
-      stage, code }` to and that captures server-side. (b) never opens a browser channel.
-      **Interim rule:** do not add a client `captureToSentry` call on the belief that it reports.
-      Put the capture on the server side of the request, as the key memberships route does
-      (167.2.1 round-1 fixer C).
-      **Trigger:** the next phase that needs a client-side failure to reach Sentry, or any proposal
-      to add Session Replay or a browser `Sentry.init`.
-      **Owner:** the founder decides between (a) and (b), because (a) is a security decision.
-      Unrouted until then.
-      ⭐ **Owned by Phase 221 SENTRYSCRUB2, v1.23; REQUIREMENTS.md SCRB-02; tagged 2026-11-23.**
 
 - [ ] **`[167.2.1-LOCAL-STACK-NO-CROSS-WORKTREE-LOCK]` two worktrees running the local-stack lane at
       once collide on the same containers (booked 2026-09-26, Phase 167.2.1 FACTSHEETBUILDABLE)** —

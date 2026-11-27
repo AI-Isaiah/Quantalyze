@@ -398,6 +398,9 @@ describe("GET /api/keys/feeds", () => {
       expect(STATE.reads).toEqual([]);
       // The browser has no Sentry, so this server line is the one trace that a
       // feeds line read "could not check" for this reason. No user id.
+      // ⛔ CORRECTED 2026-11-27 (Phase 221 SENTRYSCRUB2): the browser has a Sentry
+      // client now (src/instrumentation-client.ts), but the feed reader does not
+      // capture this deny, so the server line is still the one trace.
       const denyLines = consoleWarn.mock.calls.filter(([msg]) =>
         String(msg).includes("feeds read denied by the limiter"),
       );
