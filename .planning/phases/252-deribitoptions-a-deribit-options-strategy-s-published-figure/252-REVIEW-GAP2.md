@@ -3,6 +3,7 @@ phase: 252-deribitoptions-a-deribit-options-strategy-s-published-figure
 scope: gap plans 252-09 and 252-10 (G252-MTM-PROMOTION)
 diff_range: 33d4cf863..HEAD (worktree branch gsd/phase-252-mtm, head 5eb1fda9e), excluding .planning
 reviewed: 2026-11-27T23:30:00Z
+revised: 2026-11-27 (round-1 self-check: WR-02 downgraded to IN-08 after reading probe criterion C3; WR-01 protection rule corrected from the bridge source; the former WR-03, now WR-02, reworded)
 depth: deep
 files_reviewed: 20
 files_reviewed_list:
@@ -28,8 +29,8 @@ files_reviewed_list:
   - src/lib/factsheet/types.ts
 findings:
   critical: 0
-  warning: 3
-  info: 7
+  warning: 2
+  info: 8
   total: 10
   necessity: 0
 status: issues_found
@@ -38,15 +39,15 @@ status: issues_found
 # Phase 252 gap plans 09 and 10: Code Review Report (G252-MTM-PROMOTION)
 
 **Reviewed:** 2026-11-27
-**Depth:** deep (call chains traced into `_reconstruct_all`, `derive_basis_series`, `compute_all_metrics`, `deribit_ingest` mark retention, the `sync_strategy_analytics_status` bridge, and every TS reader the plan 10 audit lists)
+**Depth:** deep. I traced these call chains in source: `_reconstruct_all`, `derive_basis_series`, `compute_all_metrics`, `deribit_ingest` mark retention, the `sync_strategy_analytics_status` bridge (`v_publish_healthy`, `is_protected`, branch (b)), the factsheet basis-gated withhold helpers, `computeOgHeadline`, and the `figure_withheld_by` derivation in `queries.ts`. **Relied on, not re-traced:** the plan 10 SUMMARY's same-payload and no-USD-view confirmations, and its per-seam list audit (`shapeRowAnalytics`, `figure-record-scalars.ts`, the constituent parser), which the census arm 1b exercises (95 vitest cases green at head).
 **Files reviewed:** 20
 **Status:** issues_found
 
-**Severity mapping to this repo's rule.** No CRITICAL or HIGH finding. The three `WR-` findings are MEDIUM. WR-01 and WR-03 are user-facing (a published composite's status or headline changes), and WR-02 is user-facing (a headline the ruled criteria would show stays withheld). Every `IN-` item is LOW or Info: recorded here only, never fixed and never booked in `TODOS.md`.
+**Severity mapping to this repo's rule.** No CRITICAL or HIGH finding. The two `WR-` findings are MEDIUM and user-facing: a composite's status or published headline changes. Every `IN-` item is LOW or Info: recorded here only, never fixed and never booked in `TODOS.md`.
 
 ## Summary
 
-The core promotion is correct, and I traced every focus item to code.
+The core promotion is correct. I traced each focus item to code, with the exceptions named on the Depth line.
 
 - **One upsert, nothing cash left behind.** `compute_all_metrics` returns a fixed top-level key set (`services/metrics.py`, the `sanitize_metrics({...})` literal), so `headline_payload.update(_headline_metrics)` replaces every metric column. The marker, the reason pop and the smoothed scalars all ride the one `_write_headline_and_by_basis` payload.
 - **Exactly one marker.** `mark_to_market_available` checks option activity first, so whenever `smoothed_ok` is True and the row does not promote, `mtm_reason` is `unsmoothed_options_book`. A stale `headline_basis` is popped on every non-promoting stitch, including one where `smoothed_ok` is False. `twr_chain_broken` and the NAV guard keys are drop-stale'd from the headline result.
@@ -60,23 +61,30 @@ Tests run at head: `pytest tests/test_stitch_composite.py tests/test_stitch_comp
 
 The defects are at the edges:
 
-- WR-01: the smoothed pass now always runs on PROD, so its transient failures can sink the cash composite.
-- WR-02: P3 is stricter than the binding criterion text.
-- WR-03: the promotion is time-limited by construction, and nothing records that.
+- WR-01: the smoothed pass now always runs on PROD, so its transient failures can sink the cash composite. A promoted row is more exposed than a withheld one.
+- WR-02: the promotion is time-limited by construction, and nothing records that.
+- IN-08: CONTEXT's wording of P3 ("inside the span") does not match probe criterion C3 or the code, which both check the whole history.
 
 ## Warnings
 
 ### WR-01: A transient failure in the now-unconditional smoothed pass can move a healthy cash composite to `computing` and then `failed` (MEDIUM, user-facing)
 
-**File:** `analytics-service/services/job_worker.py:14922` (`smoothed_ok`), `:15001` (`return smoothed_result`), `:14455-14466` (the `_reconstruct_all` Deribit arm's bare `except Exception: ... raise`), `:14395-14408` (the per-crawl `asyncio.TimeoutError` arm)
+**File:** `analytics-service/services/job_worker.py:14922` (`smoothed_ok`), `:15001` (`return smoothed_result`), `:14453` onwards (the `_reconstruct_all` Deribit arm's `except Exception as exc:`, which re-raises anything not geo-blocked), `:14392` onwards (the per-crawl `except asyncio.TimeoutError:` arm)
 
 **Issue:** Before this diff, PROD has `SMOOTHED_MTM_ENABLED` unset, so an option-active composite stitch ran no third pass. Now every stitch of one runs it, the recurring `ledger-refresh-composite` refresh included. The pass is a third full Deribit crawl plus one public `get_tradingview_chart_data` read per held option instrument. GLB-3 degrades only structural, budget and outer-slice-timeout failures. Three other exits fail the whole job instead:
 
 1. A 429 or geo-block in the smoothed crawl returns a transient `DispatchResult` at `:15001`. This is pinned by `test_g252_transient_in_the_smoothed_pass_retries_the_job_and_writes_nothing`.
-2. `DeribitTransientReadError` from `fetch_deribit_option_daily_marks` falls through the bare `raise` at `:14466`. It is not in `_PERMANENT_LEDGER_ERRORS`, so it escapes `run_stitch_composite_job` as an exception. `classify_exception` files it `transient` or `unknown`, and both retry. No test covers this exit.
-3. The inner per-crawl bound returns a transient when the smoothed slice (0.7 × remaining, up to 840 s) is larger than `_BROKER_CRAWL_TIMEOUT_S` (810 s). That happens when the cash passes finished in under about 43 s.
+2. `DeribitTransientReadError` from `fetch_deribit_option_daily_marks` falls through that arm's final `raise`. It is not in `_PERMANENT_LEDGER_ERRORS`, so it escapes `run_stitch_composite_job` as an exception. `classify_exception` files it `transient` or `unknown`, and both retry. No test covers this exit.
+3. The inner per-crawl bound returns a transient when the smoothed slice (0.7 × remaining, up to 840 s) is larger than `_BROKER_CRAWL_TIMEOUT_S` (810 s). That needs a member crawl hung for 810 s and cash passes that finished in under about 43 s, so it is the rarest of the three.
 
-Each retry is a `failed_retry`, and the bridge (`sync_strategy_analytics_status`, migration `20261105120000`) rewrites a plain `complete` row to `computing`, so the factsheet reads as recomputing. When the attempts run out, the job is `failed_final`. Branch (b) of the bridge then writes `computation_status = 'failed'` unless the job is protected. Protection requires a `ledger-refresh*` source and a healthy published row (`is_protected`), so a user-initiated stitch or a private composite is unprotected.
+Each retry is a `failed_retry`, and the bridge (`sync_strategy_analytics_status`, migration `20261105120000`) rewrites a plain `complete` row to `computing`, so the factsheet reads as recomputing. When the attempts run out, the job is `failed_final`. Branch (b) of the bridge then writes `computation_status = 'failed'` unless the failure is protected. `is_protected` needs both of these:
+
+- a `ledger-refresh` or `ledger-refresh-composite` source on the job;
+- `v_publish_healthy`, which is the row's own status being `complete` or `complete_with_warnings` when the bridge runs. It says nothing about public visibility.
+
+The first `failed_retry` already moved a plain `complete` row to `computing`, so at `failed_final` only a `complete_with_warnings` row is still protected. The stitch's own comment says the same (the WR-01 note above `MarkerLiveState`). A user-initiated stitch is never protected.
+
+**A promoted row is more exposed than a withheld one.** The withheld rows carry `twr_chain_broken`, which promotes the status to `complete_with_warnings`. A promoted row drops it, because P4 guarantees no break, so unless another guard flag fires it becomes a plain `complete` row and loses the recurring-refresh protection.
 
 The plan accepted this as T-252-27 ("transients surface exactly as with the flag on"). That acceptance was the planner's, not a founder ruling. It also does not match the stated purpose of GLB-3: the additive basis must never sink the cash headline. The cash pass has the same transient exposure on its own crawl. The new part is the extra crawl and the per-instrument chart reads, and that the additive basis is what turns a blip into a failed cash composite.
 
@@ -99,36 +107,16 @@ if isinstance(smoothed_result, DispatchResult):
 ```
 Retrying on the earlier attempts keeps a promoted row from flipping to withheld on a single blip. Degrading on the last attempt stores the safe state (cash plus the named withhold) instead of `failed`. Add a test for the escaped `DeribitTransientReadError` exit, which no test drives today. If the founder prefers the current behaviour, record it as a decision in `252-CONTEXT.md` (and ROADMAP, per the deviation policy) rather than leaving it as a plan-level accept.
 
-### WR-02: P3 tests the member's whole unclipped history, but the binding criterion says "inside the span" (MEDIUM, user-facing, fail-safe direction)
-
-**File:** `analytics-service/services/job_worker.py:15092-15097`
-
-**Issue:** `252-CONTEXT.md` ("Decided at gap planning", 2026-11-27) states P3 as: "no option day **inside the span** is valued at cash for mark retention". The code passes `retention_bucketed=any(m.get("pre_mark_retention_option_dailies") for m in smoothed_member_metas)`. That list is built in `_reconstruct_deribit` from the member's full reconstruction (`completeness.pre_mark_retention_option_days`), before `clip_to_window`. A day outside the member's composite window, or before the stitched span, therefore blocks promotion even though no published figure contains it.
-
-The cutoff is anchored on today (`deribit_ingest.py` `_build_smoothed_option_mtm`: `retention_cutoff = today - retention_days`, with a 30-day tolerance band). Once a long-history member has an option instrument that predates its window and that instrument's whole life falls behind the horizon, P3 fails on every later stitch, permanently. The composite can then never promote, although the criteria the founder's ruling was measured against would promote it. The plan 09 table carried the unscoped reading and did not note the difference from CONTEXT.
-
-**Fix:** scope the P3 input to each member's window inside the stitched span before calling the decision:
-```python
-def _in_window(entries: list[str], lo: str, hi: str | None) -> bool:
-    return any(lo <= e.split(":", 1)[1] and (hi is None or e.split(":", 1)[1] < hi) for e in entries)
-
-retention_bucketed = any(
-    _in_window(meta.get("pre_mark_retention_option_dailies") or [], *_window_by_seq[seq])
-    for (seq, _), meta in zip(clipped_smoothed, smoothed_member_metas, strict=True)
-)
-```
-`clipped_smoothed` is only bound when the pass produced metas. When it did not, `smoothed_member_metas` is empty, so guard the expression for that case. Add a matrix case with a bucketed day outside the member window that promotes, beside the existing in-window case that does not. If the stricter reading is intended, amend CONTEXT P3 to say "anywhere in a member's history" so the code and the binding text agree.
-
-### WR-03: A promoted headline will demote on its own as marks age past the retention horizon, and nothing records or surfaces it (MEDIUM, user-facing)
+### WR-02: A promoted headline will demote on its own as marks age past the retention horizon, and nothing records or surfaces it (MEDIUM, user-facing)
 
 **File:** `analytics-service/services/job_worker.py:15104-15113` (the decision log lines); the decision inputs at `:15092-15102`
 
 **Issue:** By the code's own retention model, mark data for an expired option is gone about 913 days after the fact, and the cutoff is anchored on today. Every held option instrument therefore goes through two stages:
 
 1. While its marks straddle the horizon, it is a straddler. `option_mtm_daily` refuses it under D-07, the member's smoothed build raises `LedgerValuationError`, GLB-3 degrades, and P2 fails.
-2. Once its whole life is behind the horizon, it is bucketed, and P3 fails (see WR-02 for the in-window case).
+2. Once its whole life is behind the horizon, it is bucketed, and P3 fails.
 
-So a promoted, published composite flips back to the withheld cash headline on some later refresh, with no code change and no founder action. The members measured at 704, 410 and 1232 days of history are all on that clock. Under the 2026-11-25 ruling ("only if it actually works") this is the correct fail-safe state. The defects are that it is not recorded and not loud:
+So a promoted, published composite flips back to the withheld cash headline on some later refresh, with no code change and no founder action. When that happens for each member depends on when it first held an option across a settlement. That date is unmeasured. The 1232-day member passed the probe, so its held options are inside the horizon today, or the venue keeps marks longer than the 913-day default. Under the 2026-11-25 ruling ("only if it actually works") this is the correct fail-safe state. The defects are that it is not recorded and not loud:
 
 - I found no mention of the time limit in CONTEXT, either plan, either SUMMARY or the post-deploy section.
 - A demotion through P3 logs only `logger.info("... not promoted ... (retention_bucketed_option_days)")`. The P2 path has the GLB-3 `logger.warning`, but that warning does not say a published headline was withdrawn.
@@ -182,11 +170,18 @@ Already recorded in the plan 10 SUMMARY as a safe-direction limit.
 
 Recorded in plan 09 as a known mismatch. I independently confirmed that no `src/` file reads those kinds.
 
+### IN-08: CONTEXT words P3 as "inside the span"; probe criterion C3 and the code check the member's whole history
+
+**File:** `analytics-service/services/job_worker.py:15092-15097`; `252-CONTEXT.md` ("Decided at gap planning"); `252-06-PLAN.md` (C3)
+
+CONTEXT says "P3 no option day inside the span is valued at cash for mark retention". Plan 09 says P3 mirrors C3, and `252-06-PLAN.md` defines C3 as "the build's `CompletenessReport.pre_mark_retention_option_days` is empty", which covers the whole history. The code matches C3: the list comes from the member's unclipped reconstruction, so a bucketed day before the member's composite window also blocks promotion. That is fail-safe, and it is the criterion the PROD probe measured. This is not a code defect. I first filed it as a MEDIUM and withdrew that after reading C3. The CONTEXT wording should still be aligned with C3 so the next reader does not take the stricter check for a bug. If the founder ever wants the narrower reading, the change is to filter each meta's `{ccy}:{day}` entries to that member's `_window_by_seq` window before the `any(...)`.
+
 ## Not findings (checked and cleared)
 
 - **Stale cash column on a promoted row:** cleared. The top-level key set is fixed, and `test_g252_promoted_and_cash_metrics_share_one_key_set` pins it.
 - **Marker plus reason both present, or neither:** cleared on every success path and on `_stamp_failed` (M-2 merge). The TS predicate also gives the reason precedence.
 - **Other writers dropping or keeping the marker:** `run_csv_strategy_analytics` rebuilds the flags (marker dropped, correct). The finalize-wizard composite refusal replaces flags with `{csv_source, composite}` on a `failed` row (not rankable; it predates this diff).
+- **`strategy_analytics.daily_returns` beside smoothed scalars:** cleared. `resolveDailyReturnSeries` prefers that column over `returns_series` (in the returns route and the portfolio router), and the stitch payload never writes it. On this branch I found no writer of that column in `analytics-service/services`, `analytics-service/routers` or `src/`. The baseline SQL only reads it, at the export site. So on a composite row it holds no cash curve, and readers fall back to the top-level `returns_series`, which follows the promoted headline. This is a measured search result, not proof of absence.
 - **Snapshot flags (`effectiveDataQualityFlags`):** bound to `computed_at`, and composites carry a live marker.
 - **Allocator per-key series:** keyed by `api_key_id`, never by the composite's strategy id. Blends of strategy legs stay in the existing `<deferred>` entry.
 - **Necessity:** no finding. The record-or-null guards in `isSmoothedHeadlineRow` sit on an untrusted JSONB boundary.
