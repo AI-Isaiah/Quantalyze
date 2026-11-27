@@ -185,8 +185,8 @@ Moved out of v1.22 by founder ruling F-10 (2026-11-23, "Yes, split into two mile
 
 ### Security: secrets hygiene (SECRETSHYGIENE)
 
-- [ ] **SECR-03**: A full-history secret scan runs on a schedule. How historical findings are suppressed (commit-scoped fingerprints, or literals made obviously fake), and whether a red scheduled scan may block a redeploy, are decided at plan time. (covers: SECRETSCAN-FULLHISTORY-01)
-- [ ] **SECR-04**: `cron_sync_tick` and `ops_staleness_check` post the service key only to exact named hosts, never through a `.up.railway.app` suffix wildcard. The entry's gate-arm and tab-key guard gaps are closed. (covers: 167.1.2.2.2-CRON-TICK-RESIDUALS)
+- [x] **SECR-03**: A full-history secret scan runs on a schedule. How historical findings are suppressed (commit-scoped fingerprints, or literals made obviously fake), and whether a red scheduled scan may block a redeploy, are decided at plan time. (covers: SECRETSCAN-FULLHISTORY-01)
+- [x] **SECR-04**: `cron_sync_tick` and `ops_staleness_check` post the service key only to exact named hosts, never through a `.up.railway.app` suffix wildcard. The entry's gate-arm and tab-key guard gaps are closed. (covers: 167.1.2.2.2-CRON-TICK-RESIDUALS)
 
 ### Security: database access (DBACCESS)
 
@@ -363,8 +363,8 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | RLIM-02 | Phase 240 | Complete |
 | SECR-01 | Phase 241 | Complete |
 | SECR-02 | Phase 241 | Complete |
-| SECR-03 | Phase 242 (v1.23) | Pending |
-| SECR-04 | Phase 242 (v1.23) | Pending |
+| SECR-03 | Phase 242 (v1.23) | Complete |
+| SECR-04 | Phase 242 (v1.23) | Complete |
 | DBACC-01 | Phase 243 (v1.23) | Pending |
 | DBACC-02 | Phase 243 (v1.23) | Pending |
 | DBACC-03 | Phase 243 (v1.23) | Pending |

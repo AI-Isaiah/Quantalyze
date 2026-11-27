@@ -987,7 +987,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
 - [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, the retired compute_analytics enqueue and kind rows, and inert plumbing, with a migration; the poll_positions enqueue stays live (F-8)
-- [ ] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
+- [x] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
 - [ ] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
 - [x] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
 - [ ] **Phase 245: ALERTPAGE — an MT5 outage pages once, recovers once and closes once, and every paging failure is loud** - Python paging path: episode lifecycle on a fake clock, honest Sentry credit, inline close budget, ERROR-level failures
@@ -1120,10 +1120,15 @@ Plans:
 1. A scheduled workflow scans the full history and is green on its first run. Historical findings are suppressed by the method chosen at plan time, and no credential-shaped literal is re-published. (SECR-03)
 2. `cron_sync_tick` and `ops_staleness_check` post the service key only to exact named hosts; a SQL gate arm goes RED on a wildcard host. The entry's gate-arm and tab-key guard gaps are closed, each with an arm that goes RED. (SECR-04)
 3. PROOF-01: each gate above goes RED on a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. The new SQL arms carry `RED-UNDER` twins. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 6/6 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 242-01-PLAN.md — SECR-03: commit-scoped `.gitleaksignore`, the scheduled full-history scan of main with its count-only dedup issue, the workflow and ignore-file pins, PROOF-01 for the scan (wave 1)
+- [x] 242-02-PLAN.md — SECR-04 tracer: one migration narrows the CHECK and all four key-posting functions to the exact two origins and widens the key guard; cron_sync gate arms W1, K1 and P2 (wave 1)
+- [x] 242-03-PLAN.md — SECR-04: the prober and ops gates repointed at the new bodies, with W1 and K1 in each (wave 2)
+- [x] 242-04-PLAN.md — SECR-04: the analytics settings gate repointed, with U3 (the CHECK), W1 and K1, and the migration's tested manual rollback (wave 2)
+- [x] 242-05-PLAN.md — SECR-04: ARMS_FLOOR and every arm census moved to measured values (wave 3)
+- [x] 242-06-PLAN.md — Records and the phase gate: the two closed TODOS entries deleted, runbooks and WINDOWS entry 61 updated, all gates and a squash-shaped scan green (wave 4)
 
 ### Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock
 
@@ -1357,7 +1362,7 @@ Plans:
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
 | 221. SENTRYSCRUB2 | 0/? | Planned for v1.23 | - |
 | 224. DEADLEFTOVERS | 0/? | Planned for v1.23 | - |
-| 242. SECRETSHYGIENE | 0/? | Planned for v1.23 | - |
+| 242. SECRETSHYGIENE | 6/6 | Complete | 2026-11-27 |
 | 243. DBBACKSTOP | 0/? | Planned for v1.23 | - |
 | 244. ACCESSGUARDS | 4/4 | Complete (shipped v0.133.102.0, #1391; verification passed, SC-1 met as narrowed by founder decision 2026-11-27; SECURITY 0 open) | 2026-11-27 |
 | 245. ALERTPAGE | 0/? | Planned for v1.23 | - |
