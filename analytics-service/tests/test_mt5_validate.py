@@ -1274,6 +1274,37 @@ async def test_mt5_server_changing_after_the_probe_fails_closed_transient(
     client.order_check.assert_called_once()
 
 
+async def test_mt5_server_changing_before_the_short_circuit_verdict_fails_closed_transient(
+    exchange_router,
+):
+    """The short-circuit path (the terminal refuses trading, so no order_check
+    is sent) has its own POST bracket, and it must judge the server too. A
+    session that moved to another broker server between the PRE bracket and
+    the short-circuit's POST read must not be judged on that other account's
+    terminal: without the bracket the answer would be the operator 500
+    (MT5_GATEWAY_UNCONFIGURED) computed on a foreign session."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    client.account_info = MagicMock(
+        side_effect=[_INVESTOR_ACCOUNT, {**_INVESTOR_ACCOUNT, "server": _OTHER_SERVER}]
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # Never the operator verdict computed on the foreign session.
+    assert ei.value.status_code != 500
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
 # --------------------------------------------------------------------------- #
 # Three distinguishable failure paths — bad creds / wrong server / transient
 # --------------------------------------------------------------------------- #
