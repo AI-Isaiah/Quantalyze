@@ -5565,6 +5565,45 @@ async def test_g252_escaping_transient_read_before_the_last_attempt_still_retrie
 
 
 @pytest.mark.asyncio
+async def test_g252_withdrawing_a_published_smoothed_headline_is_logged_and_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """WR-02 (252 gap-2 review): a row that carried headline_basis smoothed_mtm and whose
+    stitch does NOT promote (marks aged past retention, P3) logs at WARNING and reports to
+    Sentry with the cause literal, using the existing_flags read the persist already makes.
+    A stitch that DOES promote reports nothing. If this goes red a published headline
+    reverts to cash with only an INFO line."""
+    prior = {"csv_source": True, "composite": True, "headline_basis": "smoothed_mtm"}
+    kwargs, cause = _g252_path("retention_bucketed", monkeypatch)
+    capture = MagicMock()
+    with caplog.at_level(logging.INFO, logger=_G252_LOG), patch.object(
+        _jw.sentry_sdk, "capture_message", new=capture,
+    ):
+        fake, result, _ = await _g252_run(monkeypatch, existing_flags=dict(prior), **kwargs)
+    assert result.outcome == DispatchOutcome.DONE
+    assert "headline_basis" not in _headline_row(fake)["data_quality_flags"]  # type: ignore[index]
+    warned = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "withdrawn" in r.getMessage()
+    ]
+    assert len(warned) == 1 and cause in warned[0].getMessage()
+    capture.assert_called_once()
+    assert cause in capture.call_args.args[0]
+    assert capture.call_args.kwargs["level"] == "warning"
+    assert _STRATEGY_ID not in capture.call_args.args[0]
+
+    caplog.clear()
+    capture.reset_mock()
+    with caplog.at_level(logging.INFO, logger=_G252_LOG), patch.object(
+        _jw.sentry_sdk, "capture_message", new=capture,
+    ):
+        _, ok_result, _ = await _g252_run(monkeypatch, existing_flags=dict(prior))
+    assert ok_result.outcome == DispatchOutcome.DONE
+    capture.assert_not_called()
+    assert not [r for r in caplog.records if "withdrawn" in r.getMessage()]
+
+
+@pytest.mark.asyncio
 async def test_g252_failure_after_promotion_keeps_the_marker_beside_the_scalars(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

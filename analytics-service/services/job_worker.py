@@ -15370,6 +15370,29 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         job_id=job.get("id"),
         consequence="the composite persist writes its markers without it.",
     )
+    # WR-02 (252 gap-2 review): a promoted headline demotes by itself later as option
+    # marks age past retention (P2 then P3). Make a withdrawn published headline loud:
+    # WARNING plus a Sentry message carrying the cause literal only (no id, date or
+    # amount). Reads the ``existing_flags`` this function already makes; no new query.
+    if (
+        not smoothed_promoted
+        and existing_flags.get(HEADLINE_BASIS_FLAG) == HEADLINE_BASIS_SMOOTHED
+    ):
+        _demote_cause = _not_promoted_cause if smoothed_ok else "not_option_active"
+        logger.warning(
+            "run_stitch_composite_job: a PUBLISHED smoothed headline was withdrawn for "
+            "strategy %s (%s) — the row reverts to the cash headline and the named "
+            "withhold",
+            strategy_id, _demote_cause,
+        )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("headline_demotion_cause", str(_demote_cause))
+            sentry_sdk.capture_message(
+                "run_stitch_composite_job: a published smoothed headline was "
+                f"withdrawn ({_demote_cause})",
+                level="warning",
+            )
     # MERGE (read-modify-write) — preserve every existing flag (e.g. a prior derive's
     # benchmark_unavailable), add the composite coverage-mask fields.
     merged_flags: dict[str, Any] = dict(existing_flags)
