@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.103.3] - 2026-11-27 — records: Phase 256 OKXUNITSWITCH booked for v1.23 HARDEN
+
+### Added
+- Phase 256 OKXUNITSWITCH booked with `/gsd-phase` add and placed in v1.23 HARDEN by hand, as 254 and 255 were: an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover. Not planned, not executed. The ROADMAP section carries seven success criteria: the switch date derived from data and never hard-coded, how a two-unit series is stored, every reader's boundary rule without invented data, the BTC fee bills booked in the BTC segment, the 7 nightly failures ending `done` with the 3 strategies unfrozen, the dated reversal record, and PROOF-01. `256-CONTEXT.md` carries the founder decision and the diagnosis.
+
+### Notes
+- Founder ruling 2026-11-27 (AskUserQuestion): "USD before 11-15, BTC after". The diagnosed `okx-non-usd-native` debug session found one OKX account, stored as 4 keys, whose 7 nightly derives have failed by `daily_pnl_non_usd_okx` since 2026-11-24 (11 BTC-charged bills, most likely the fees of two spot BTC buys; inferred, not proven from a raw bill), freezing its 3 strategies. The native-unit machinery is one unit per key, so this needs a phase and not a debug fix.
+- **Reverses part of 232-03 (VREAD-06).** Dated notes at the 232-03 line in `ROADMAP.md` and in `232-CONTEXT.md`, per the deviation policy. The refusal stays for a coin with no unit switch.
+- STATE.md's Roadmap Evolution gets the entry; the v1.23 header, overview line, checklist and Progress table count 256. No code, no migration, and no `TODOS.md` entry opened or closed.
+
 ## [0.133.103.2] - 2026-11-27 — records: Phase 252 probe re-run names m3's cause (a D-09 exercise row); founder decision recorded
 
 ### Changed

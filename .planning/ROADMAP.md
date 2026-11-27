@@ -7,7 +7,7 @@
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -100,7 +100,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"). Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -525,6 +525,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [x] 232-03-PLAN.md — VREAD-06: a non-USD OKX bill refuses the read by `daily_pnl_non_usd_okx`, named by every reader
+  - ⛔ **PARTLY REVERSED 2026-11-27 by Phase 256 OKXUNITSWITCH (founder ruling, AskUserQuestion: "USD before 11-15, BTC after"; recorded here and in `232-CONTEXT.md`, per the deviation policy).** The refusal stays for a coin with no unit switch. For an account that moves from USDT into a coin, the coin's bills are booked in that coin's segment of a two-unit series instead of refusing the whole read. Reason, measured 2026-11-27: the refusal froze one OKX account's 3 strategies and failed 7 nightly derives since 2026-11-24, because the BTC-charged fees of its spot BTC buys tripped it. This line is kept as lineage.
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [x] 232-04-PLAN.md — VREAD-07 cron: the cron stores a deadline prefix, holds every cursor, and completes a long first window across ticks
@@ -996,6 +997,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 249: TESTLANES — every live-DB lane test executes, a fence timeout fails, lint agrees cold and warm, and the PROD image crash risk is measured** - Ledger to zero with no assertion weakened, no green skips, cache-proof lint, supautils measured locally on the PROD image version
 - [ ] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
 - [ ] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD
+- [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1294,6 +1296,30 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover
+
+**Goal:** An OKX account whose P&L was in USDT and which then moves into a coin is reported in USD up to the switch and in that coin after it, on every surface, and the derives that fail today end `done` and unfreeze the strategies they hold. No reader supports a series that changes unit today: the native-unit machinery (`services/account_unit.py`, `api_key_nav_marks.native_unit`, the BTCUSDVIEW USD view in `services/native_to_usd.py`, `benchmark.read_btc_closes`) gives one unit per key for its whole history.
+- **Founder ruling 2026-11-27 (AskUserQuestion), verbatim: "USD before 11-15, BTC after".** It picked option C of four (A: stay in USD and convert each BTC bill at the day's close; B: BTC for the whole history; C: USD before the switch and the coin after; D: keep the refusal). The date 11-15 is the founder's reading of this one account, and the phase derives it from data.
+- **What is failing (measured read-only on PROD 2026-11-27, no ids recorded here).** One OKX account, stored as 4 keys, has ended 7 derive jobs `failed_final` every night since 2026-11-24 (4 key-mode and 3 strategy-mode), `error_kind=permanent`, `realized read incomplete (daily_pnl_non_usd_okx)`. Its 3 strategies are frozen at their last good figures (`read_refusal_kept_figures`). Every night from 11-16 to 11-24 those jobs ended `done`.
+- **Cause.** Phase 232-03's VREAD-06 refusal, in the OKX branch of `fetch_daily_pnl` in `analytics-service/services/exchange.py`, trips on 11 bills with `ccy=BTC` and a non-zero `pnl + fee` (the census read `{'BTC': 11}` of about 1300 bills; every other bill is USDT or zero). They are most likely the fees, charged in BTC, on the spot BTC-USDT buys of 11-15 and 11-21. That is inferred from holdings and dates, not proven from a raw bill, because no bill is stored. 232-CONTEXT Q3 recorded this exact case as a known refusal.
+- **History.** A USDT-margined ETHUSDT swap from May to 11-12, an all-USDT account on 11-13 and 11-14, then spot BTC buys. About 99.7% of its value is BTC today.
+- **The part this phase reverses.** 232-03's VREAD-06 refuses any non-stable `ccy` by name with no price source. For a coin the account has switched into, this phase books the bills in that coin's segment instead of refusing. Other coins that appear with no switch still refuse by name.
+- **Not the fix.** Re-reporting the key in BTC for its whole history (option B), converting each BTC bill to USD at a daily close while keeping one USD series (option A), or raising or removing the refusal. The founder chose a two-unit series.
+**Requirements**: TBD
+**Depends on:** nothing hard. It re-bases on whichever of 229 and 233 (the S1 derive writer and its key-mode exits), 235 and 236 merged last, and on Phase 232's `daily_pnl_non_usd_okx` seam. Research first: the raw OKX bills for the account (read through the venue API docs as well as the stored rows, per the standing OKX rule), which settles whether the 11 bills are the spot fees.
+**Success Criteria** (what must be TRUE):
+1. The switch date is derived from data, never hard-coded for this account: the first day on which the account's value or P&L is denominated in a coin other than its stable unit, read from stored bills, holdings or fills. A test feeds two differently shaped accounts with different switch dates and gets each one's own date. For the founder's account the derived date matches his 11-15 reading, recorded in the plan SUMMARY, and a missing or ambiguous date refuses by a named reason rather than guessing.
+2. A two-unit series is stored with each segment's unit named (USD up to the switch, the coin from the switch), and a design is chosen and recorded for where that lives (the `api_key_nav_marks` and `account_unit` seam, and the strategy and composite readers). The boundary day is carried once, in one unit, with no day double-counted and no day dropped.
+3. Every reader handles the boundary without inventing data: the factsheet, the KPIs, the charts, composites, allocator books and the USD view. Each states its rule for a series that switches unit. A figure that would need a cross-unit return, volatility, drawdown or correlation across the boundary is either computed per segment and labelled, or withheld by name, never computed on a mixed series. Each reader has a test that is RED on `origin/main` today.
+4. The BTC fee bills are booked in the BTC segment. The 11 bills no longer trip `daily_pnl_non_usd_okx` for this account, and an account that never switches, and any other coin with no switch, still refuses by name (a test pins both).
+5. The 7 nightly failures end `done` after the fix is deployed and the account's 3 strategies unfreeze, read from PROD with the marker query first and no ids written into tracked text. `read_refusal_kept_figures` clears, and the next nightly derive confirms it.
+6. The reversal of part of 232-03's VREAD-06 is recorded with its reason, in `232-CONTEXT.md` and here in the ROADMAP, per the deviation policy.
+7. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. A migration, if the design needs one, passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1312,6 +1338,7 @@ Plans:
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
 | 254. OPENINGDEPOSIT | 0/? | Planned for v1.23 | - |
 | 255. NULLANCHOR | 0/? | Planned for v1.23 | - |
+| 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
 
 ---
 
