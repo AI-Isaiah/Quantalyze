@@ -65,7 +65,9 @@ only. The one structured field, ``refusal_shape``, is one of: ``null`` (the buil
 one of the three refusals, which covers every cash record and every successful build); a hole,
 ``{"kind": "hole", "vs_marks": <side of the instrument's fetched marks the missing day falls
 on: no-marks | before-first-bar | between-bars | after-last-bar>, "vs_retention": <whether that
-day is older than the hard retention cutoff: older | not-older | unknown>}``; a row refusal,
+day is older than the hard retention cutoff: older | not-older | unknown>, "vs_expiry": <whether
+that day is strictly after the instrument's own expiry day: past-expiry | not-past-expiry |
+unknown>}``; a row refusal,
 ``{"kind": "exercise" | "expiry", "change": <absent | non-numeric | zero | nonzero>,
 "position": <the same four words>, "siblings": {trade, delivery, assignment, expiry, exercise,
 other: a count each}}`` (a census of every row on the refusing row's instrument, by type); or
@@ -135,6 +137,7 @@ from services.deribit_ingest import (
     fetch_deribit_native_account_state,
 )
 from services.deribit_txn import (
+    HOLE_VS_EXPIRY_WORDS,
     HOLE_VS_MARKS_WORDS,
     HOLE_VS_RETENTION_WORDS,
     PNL_BASIS_CASH_SETTLEMENT,
@@ -258,7 +261,9 @@ def _is_ordinals(x: Any) -> bool:
 
 
 UNREADABLE = "unreadable"
-_HOLE_SHAPE_KEYS: frozenset[str] = frozenset({"kind", "vs_marks", "vs_retention"})
+_HOLE_SHAPE_KEYS: frozenset[str] = frozenset(
+    {"kind", "vs_marks", "vs_retention", "vs_expiry"}
+)
 _ROW_SHAPE_KEYS: frozenset[str] = frozenset({"kind", "change", "position", "siblings"})
 
 
@@ -291,6 +296,7 @@ def _is_refusal_shape(x: Any) -> bool:
             set(x) == _HOLE_SHAPE_KEYS
             and _is_word(x.get("vs_marks"), HOLE_VS_MARKS_WORDS)
             and _is_word(x.get("vs_retention"), HOLE_VS_RETENTION_WORDS)
+            and _is_word(x.get("vs_expiry"), HOLE_VS_EXPIRY_WORDS)
         )
     if kind in ("exercise", "expiry"):
         return (
@@ -411,6 +417,7 @@ def _refusal_shape(exc: BaseException) -> Any:
             "kind": "hole",
             "vs_marks": getattr(exc, "vs_marks", None),
             "vs_retention": getattr(exc, "vs_retention", None),
+            "vs_expiry": getattr(exc, "vs_expiry", None),
         }
         return hole if _is_refusal_shape(hole) else UNREADABLE
     if isinstance(exc, (OptionExerciseRowError, OptionExpiryRowError)):

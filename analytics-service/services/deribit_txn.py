@@ -118,6 +118,12 @@ HOLE_VS_MARKS_WORDS: frozenset[str] = frozenset(
         HOLE_VS_MARKS_AFTER_LAST,
     }
 )
+HOLE_VS_EXPIRY_PAST = "past-expiry"
+HOLE_VS_EXPIRY_NOT_PAST = "not-past-expiry"
+HOLE_VS_EXPIRY_UNKNOWN = "unknown"
+HOLE_VS_EXPIRY_WORDS: frozenset[str] = frozenset(
+    {HOLE_VS_EXPIRY_PAST, HOLE_VS_EXPIRY_NOT_PAST, HOLE_VS_EXPIRY_UNKNOWN}
+)
 HOLE_VS_RETENTION_OLDER = "older"
 HOLE_VS_RETENTION_NOT_OLDER = "not-older"
 HOLE_VS_RETENTION_UNKNOWN = "unknown"
@@ -149,13 +155,24 @@ class OptionMarkHoleError(LedgerValuationError):
     LedgerValuationError`` and every permanent-ledger-error tuple still catches it, and the
     message is the unchanged D-07 text. ``vs_marks`` is which side of the instrument's fetched
     marks the missing day falls on and ``vs_retention`` whether that day is older than the hard
-    retention cutoff (``HOLE_VS_MARKS_WORDS`` / ``HOLE_VS_RETENTION_WORDS``). Closed words only:
-    never a day or an instrument."""
+    retention cutoff (``HOLE_VS_MARKS_WORDS`` / ``HOLE_VS_RETENTION_WORDS``). ``vs_expiry`` is
+    whether the missing day is strictly after the instrument's own expiry day
+    (``HOLE_VS_EXPIRY_WORDS``): ``after-last-bar`` alone cannot tell marks that stop early from
+    a position still open after expiry, because the marks fetch is capped at expiry. Closed
+    words only: never a day or an instrument."""
 
-    def __init__(self, message: str, *, vs_marks: str, vs_retention: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        vs_marks: str,
+        vs_retention: str,
+        vs_expiry: str = HOLE_VS_EXPIRY_UNKNOWN,
+    ) -> None:
         super().__init__(message)
         self.vs_marks = vs_marks
         self.vs_retention = vs_retention
+        self.vs_expiry = vs_expiry
 
 
 class OptionExerciseRowError(LedgerValuationError):
@@ -2636,6 +2653,41 @@ def replay_option_positions(
     return out
 
 
+# The dated-expiry segment of a Deribit option name, e.g. ``BTC-27JUN25-100000-C``
+# / ``BTC_USDC-27MAR26-50000-P`` → ``27JUN25``. Mid-name (unlike the ``$``-anchored
+# future tail ``_FUTURE_EXPIRY_RE`` in deribit_txn) because the option carries a
+# strike + right suffix after the expiry.
+_OPTION_EXPIRY_RE: re.Pattern[str] = re.compile(r"-(\d{1,2}[A-Z]{3}\d{2})-")
+# IN-02: Deribit's month tokens are ENGLISH constants — never parse them with
+# ``strptime(%b)``, which consults the process locale (de_DE: MAR/OCT/DEC fail →
+# expiry None → the pre-retention partition can never bucket and old
+# wholly-empty instruments hard-fail instead of warning). No other services/
+# code uses ``%b``.
+_OPTION_EXPIRY_MONTHS: dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _option_expiry_iso(instrument: str) -> str | None:
+    """The UTC-day ISO expiry (``YYYY-MM-DD``) parsed from a Deribit option
+    instrument name, or ``None`` if the name carries no dated-expiry segment.
+    Never guessed — the expiry caps the marks fetch span (never fetch past it) and
+    keys the pre-retention partition. Locale-independent (explicit English month
+    map — IN-02). Pure / never raises on untrusted input."""
+    match = _OPTION_EXPIRY_RE.search(instrument.upper())
+    if match is None:
+        return None
+    token = match.group(1)  # e.g. "27JUN25": day (1-2 digits), month, 2-digit year
+    month = _OPTION_EXPIRY_MONTHS.get(token[-5:-2])
+    if month is None:
+        return None
+    try:
+        return date(2000 + int(token[-2:]), month, int(token[:-5])).isoformat()
+    except ValueError:
+        return None
+
+
 def _hole_vs_marks(instr_marks: Mapping[str, float], day: str) -> str:
     """Which side of the instrument's fetched marks the missing ``day`` falls on. ISO day
     strings order as calendar days."""
@@ -2646,6 +2698,15 @@ def _hole_vs_marks(instr_marks: Mapping[str, float], day: str) -> str:
     if day > max(instr_marks):
         return HOLE_VS_MARKS_AFTER_LAST
     return HOLE_VS_MARKS_BETWEEN
+
+
+def _hole_vs_expiry(instrument: str, day: str) -> str:
+    """Whether the missing ``day`` is STRICTLY after the instrument's expiry day; ``unknown``
+    when the name carries no parseable expiry."""
+    expiry = _option_expiry_iso(instrument)
+    if expiry is None:
+        return HOLE_VS_EXPIRY_UNKNOWN
+    return HOLE_VS_EXPIRY_PAST if day > expiry else HOLE_VS_EXPIRY_NOT_PAST
 
 
 def _hole_vs_retention(day: str, retention_cutoff: str | None) -> str:
@@ -2748,6 +2809,7 @@ def option_mtm_daily(
                     "bar inside a listed instrument's life is structural, fail loud)",
                     vs_marks=_hole_vs_marks(marks.get(instr, {}), day),
                     vs_retention=_hole_vs_retention(day, retention_cutoff),
+                    vs_expiry=_hole_vs_expiry(instr, day),
                 )
             ccy = str(positions[instr]["currency"])
             book[ccy] = book[ccy] + pos * float(mark)

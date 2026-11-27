@@ -988,6 +988,7 @@ async def test_a_retention_straddlers_hole_is_named_by_side_and_retention(
         "kind": "hole",
         "vs_marks": "before-first-bar",
         "vs_retention": "older",
+        "vs_expiry": "not-past-expiry",
     }
     assert smoothed["member_verdict"] == "fail"
     assert (smoothed["c3"], smoothed["c4"]) == ("not-run", "not-run")
@@ -1010,6 +1011,7 @@ async def test_a_wholly_empty_in_retention_instrument_reads_no_marks_and_not_old
         "kind": "hole",
         "vs_marks": "no-marks",
         "vs_retention": "not-older",
+        "vs_expiry": "not-past-expiry",
     }
     assert cash["refusal_shape"] is None
     _assert_no_row_text_in(lines)
@@ -1081,7 +1083,7 @@ def test_the_emitter_refuses_a_refusal_shape_outside_the_closed_set(shape: Any) 
     [
         None,
         "unreadable",
-        {"kind": "hole", "vs_marks": "between-bars", "vs_retention": "unknown"},
+        {"kind": "hole", "vs_marks": "between-bars", "vs_retention": "unknown", "vs_expiry": "unknown"},
         {"kind": "exercise", "change": "zero", "position": "absent", "siblings": _SIBLINGS},
         {"kind": "expiry", "change": "nonzero", "position": "non-numeric", "siblings": _SIBLINGS},
     ],
@@ -1189,3 +1191,48 @@ async def test_an_off_set_row_attribute_degrades_to_unreadable_and_still_prints(
     recs = await _measure(monkeypatch, {**_fixture_pair(), _SMOOTHED: cls("x", **attrs)})
     assert recs[_SMOOTHED]["refusal_shape"] == "unreadable"
     probe.emit_record(recs[_SMOOTHED])
+
+
+# --- plan 07 round 1 (SFH LOW-4): the hole shape carries ``vs_expiry`` --------------------
+
+
+@pytest.mark.parametrize("word", ["past-expiry", "not-past-expiry", "unknown"])
+def test_the_hole_shape_builder_carries_each_vs_expiry_word(word: str) -> None:
+    from services.deribit_txn import OptionMarkHoleError
+
+    exc = OptionMarkHoleError(
+        "x", vs_marks="after-last-bar", vs_retention="not-older", vs_expiry=word
+    )
+    shape = probe._refusal_shape(exc)
+    assert shape == {
+        "kind": "hole",
+        "vs_marks": "after-last-bar",
+        "vs_retention": "not-older",
+        "vs_expiry": word,
+    }
+    assert json.loads(probe.emit_record({**_honest_record(), "refusal_shape": shape}))[
+        "refusal_shape"
+    ] == shape
+
+
+def test_an_off_set_vs_expiry_degrades_to_unreadable() -> None:
+    from services.deribit_txn import OptionMarkHoleError
+
+    exc = OptionMarkHoleError(
+        "x", vs_marks="after-last-bar", vs_retention="older", vs_expiry="2023-06-30"
+    )
+    assert probe._refusal_shape(exc) == "unreadable"
+
+
+@pytest.mark.parametrize(
+    "vs_expiry", ["tomorrow", "2023-06-30", "", None, 7, ["past-expiry"]], ids=repr
+)
+def test_the_emitter_refuses_a_vs_expiry_outside_the_closed_set(vs_expiry: Any) -> None:
+    shape = {
+        "kind": "hole",
+        "vs_marks": "after-last-bar",
+        "vs_retention": "older",
+        "vs_expiry": vs_expiry,
+    }
+    with pytest.raises(ValueError):
+        probe.emit_record({**_honest_record(), "refusal_shape": shape})

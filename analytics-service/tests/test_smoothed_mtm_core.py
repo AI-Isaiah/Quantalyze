@@ -1549,3 +1549,67 @@ def test_the_smoothed_control_raises_each_new_refusal_on_the_same_rows(
             monkeypatch, btc_rows=rows, summaries=summaries, charts=charts,
             pnl_basis="smoothed_mtm",
         )
+
+
+# --- plan 07 round 1 (SFH LOW-4): ``vs_expiry`` splits the two causes behind ``after-last-bar``
+# The marks fetch is capped at expiry, so a position replayed as still nonzero after the
+# instrument's expiry (no closing row) always reads ``after-last-bar``, exactly like marks that
+# stop early inside the life. ``vs_expiry`` is the word that separates them in one PROD run.
+
+from services.deribit_txn import HOLE_VS_EXPIRY_WORDS  # noqa: E402 - appended block
+
+
+def _open_positions(instrument: str, positions: dict[str, float], last_day: str) -> dict[str, dict[str, Any]]:
+    return {
+        instrument: {
+            "currency": "BTC",
+            "first_day": min(positions),
+            "last_day": last_day,
+            "positions": positions,
+        }
+    }
+
+
+def test_a_position_still_open_after_expiry_reads_after_last_bar_and_past_expiry() -> None:
+    """Marks run through the expiry day (the fetch cap) and the replay never closed the
+    position, so 07-01 is a hole strictly after the 06-30 expiry. Cause (b), not cause (a)."""
+    marks = {_HOLE_I: {"2023-06-28": 0.01, "2023-06-29": 0.02, "2023-06-30": 0.03}}
+    with pytest.raises(OptionMarkHoleError) as caught:
+        option_mtm_daily(
+            _open_positions(_HOLE_I, {"2023-06-28": 1.0}, last_day="2023-07-02"), marks
+        )
+    exc = caught.value
+    assert (exc.vs_marks, exc.vs_expiry) == ("after-last-bar", "past-expiry")
+    assert exc.vs_expiry in HOLE_VS_EXPIRY_WORDS
+    assert str(exc) == _hole_message("2023-07-01")
+
+
+@pytest.mark.parametrize(
+    "marks_end,hole_day",
+    [("2023-06-28", "2023-06-29"), ("2023-06-29", "2023-06-30")],
+    ids=["gap-inside-life", "hole-on-the-expiry-day-itself"],
+)
+def test_a_tail_gap_inside_the_life_reads_after_last_bar_and_not_past_expiry(
+    marks_end: str, hole_day: str
+) -> None:
+    """Cause (a): marks stop before the end of the held life. The expiry day itself is NOT past
+    expiry (strictly after only): a ``>=`` would call the last held day a post-expiry replay."""
+    marks = {_HOLE_I: {"2023-06-28": 0.01, marks_end: 0.02}}
+    with pytest.raises(OptionMarkHoleError) as caught:
+        option_mtm_daily(
+            _open_positions(_HOLE_I, {"2023-06-28": 1.0, "2023-07-01": 0.0}, last_day="2023-07-01"),
+            marks,
+        )
+    exc = caught.value
+    assert (exc.vs_marks, exc.vs_expiry) == ("after-last-bar", "not-past-expiry")
+    assert str(exc) == _hole_message(hole_day)
+
+
+def test_an_instrument_name_with_no_expiry_reads_unknown() -> None:
+    perp = "BTC-PERPETUAL"
+    with pytest.raises(OptionMarkHoleError) as caught:
+        option_mtm_daily(
+            _open_positions(perp, {"2023-06-28": 1.0, "2023-07-01": 0.0}, last_day="2023-07-01"),
+            {perp: {"2023-06-28": 0.01}},
+        )
+    assert caught.value.vs_expiry == "unknown"
