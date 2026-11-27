@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.107.3] - 2026-11-27 — records: Phase 242 SECRETSHYGIENE closed (verification passed)
+
+### Changed
+- Phase 242 SECRETSHYGIENE (v1.23) is closed. Its artifacts (CONTEXT through VERIFICATION, six plans and summaries, three review rounds, SECURITY) come onto `main`, `ROADMAP.md` ticks the phase and its six plans, and `REQUIREMENTS.md` marks SECR-03 and SECR-04 Complete. `STATE.md` keeps its Current Position (the `phase complete` handler's move to Phase 228 and its `state.json` status resets were reverted by hand); only its last-activity lines name 242.
+- `242-VERIFICATION.md` is `passed` at `verified_at_sha` `9f0fb9e6`, its migration name corrected from `20261127120000` to the shipped `20261127130000`, and its four post-merge items filled with evidence: the first dispatched `secret-scan-full-history.yml` run `46037489748` (green, 2764 commits scanned, no leaks found); `supabase-migrate.yml` push run `46035189697` (`apply-test` and PROD `apply` success) with a PROD read of the two-origin CHECK and the four `c_allowed_origins` bodies; re-dump PR #1401 merged at `9f0fb9e6` with `baseline-content-drift` reading `DRIFT 3` (the four 242 rows cleared); and `sql-mutation` FULL on the PR head, `arms: 1110/1110/0`, `biting: 1110`.
+- `.planning/WINDOWS.md` entry 61 half (c) is marked answered by Phase 242; half (b) stays open.
+
+### Notes
+- The code shipped in #1394 (v0.133.106.0) and the baseline re-dump in #1401 (v0.133.107.2). Recorded, not fixed: the first `redump-pr` job failed on a transient HTTP 403 in its open-PR lookup and the re-dump needed a `workflow_dispatch` re-run; the bot PR's checks then needed a close and reopen to run, and the PR was re-based twice onto a moving `main`.
+
 ## [0.133.107.2] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 1863fe80
 
 ### Changed
