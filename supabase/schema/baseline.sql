@@ -4224,7 +4224,7 @@ COMMENT ON FUNCTION "public"."create_wizard_strategy_for_key"("p_user_id" "uuid"
 CREATE OR REPLACE FUNCTION "public"."cron_sync_tick"() RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $_$
+    AS $$
 DECLARE
   v_key TEXT;
   -- ⛔ DECLAREd because plpgsql compiles the body WHOLE: a missing DECLARE does
@@ -4233,12 +4233,12 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression on system_settings and to the constant in
-  --    match_engine_cron_tick(). The constraint is one ALTER TABLE away from
-  --    gone, and this is what still refuses the POST when it is.
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits and the same two the three sibling ticks carry.
+  --    The constraint is one ALTER TABLE away from gone, and this is what
+  --    still refuses the POST when it is.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- THE VAULT READ — ONE statement, count and value off the SAME scan.
   -- Not `INTO STRICT`: STRICT would replace the by-name absent-key message with
@@ -4251,10 +4251,11 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  -- btrim() with no character set trims SPACES ONLY. A key of tabs or newlines
-  -- still passes and still produces a header the analytics service answers 401
-  -- to. Recorded, not closed: widening it is a decision with its own evidence.
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  -- The trim names its character set: space, tab, carriage return and newline.
+  -- btrim() with no set trims spaces only, so a key of tabs or newlines would
+  -- pass and produce a header the analytics service answers 401 to behind a
+  -- green tick. Widened in Phase 242 (SECR-04).
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -4273,8 +4274,8 @@ BEGIN
   -- job-run row, the Postgres log and whatever ships those onward; echoing an
   -- attacker-chosen string writes their collector's hostname into every
   -- downstream reader. Name the SETTING, never its value (T-161.1-10).
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
@@ -4295,7 +4296,7 @@ BEGIN
          ) INTO v_req;
   RETURN v_req;
 END
-$_$;
+$$;
 
 
 ALTER FUNCTION "public"."cron_sync_tick"() OWNER TO "postgres";
@@ -8954,7 +8955,7 @@ COMMENT ON FUNCTION "public"."mark_compute_job_kept_figures"("p_job_id" "uuid") 
 CREATE OR REPLACE FUNCTION "public"."match_engine_cron_tick"() RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $_$
+    AS $$
 DECLARE
   v_key TEXT;
   -- ⛔ DECLAREd because plpgsql compiles the body WHOLE: a missing DECLARE does
@@ -8963,14 +8964,14 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression in STEP 1b, and STEP 3 check 7 asserts that the
-  --    two really are the same string by reading pg_get_constraintdef and this
-  --    body back out of the catalogue. Two copies of one rule is the point: the
-  --    constraint is one ALTER TABLE away from gone, and this is what still
-  --    refuses the POST when it is.
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits. The Phase 242 migration's verify block reads the
+  --    constraint and every body that posts the key back out of the catalogue
+  --    and asserts both origins are present in each. Two copies of one rule is
+  --    the point: the constraint is one ALTER TABLE away from gone, and this is
+  --    what still refuses the POST when it is.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- THE VAULT READ — ONE statement, count and value off the SAME scan.
   -- ⛔ Not `INTO STRICT`, and the choice is not a style preference. STRICT
@@ -8987,12 +8988,11 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  -- ⚠️ btrim() with no character set trims SPACES ONLY. A key of tabs or
-  --    newlines still passes this guard and still produces a header the
-  --    analytics service answers 401 to. RECORDED, not closed: the criterion
-  --    text is btrim(v_key) = '' and widening it to E' \t\r\n' is a decision
-  --    with its own evidence, not a silent improvement here.
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  -- The trim names its character set: space, tab, carriage return and newline.
+  -- btrim() with no set trims spaces only, so a key of tabs or newlines would
+  -- pass and produce a header the analytics service answers 401 to behind a
+  -- green tick. Widened in Phase 242 (SECR-04).
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -9015,8 +9015,8 @@ BEGIN
   -- writes their collector's hostname into every downstream reader of this
   -- project's logs, and an operator who needs the value can SELECT it. Same rule
   -- as the two RAISEs above (T-161.1-10): name the SETTING, never its value.
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an
@@ -9036,7 +9036,7 @@ BEGIN
          ) INTO v_req;
   RETURN v_req;
 END
-$_$;
+$$;
 
 
 ALTER FUNCTION "public"."match_engine_cron_tick"() OWNER TO "postgres";
@@ -9049,7 +9049,7 @@ COMMENT ON FUNCTION "public"."match_engine_cron_tick"() IS 'Phase 164.7 / SC-2 /
 CREATE OR REPLACE FUNCTION "public"."ops_staleness_check"() RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $_$
+    AS $$
 DECLARE
   -- ══════════════════════════════════════════════════════════════════════
   -- THE CONSTANTS. Each is declared ONCE, here. Every other reference in this
@@ -9080,11 +9080,10 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression on system_settings and to the constant in
-  --    cron_sync_tick() and match_engine_cron_tick().
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits and the same two the other three ticks carry.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- ----- ARM 1: the cron_sync heartbeat --------------------------------
   -- Narrowed by cron_name, and by a CLOSED row: a heartbeat is a completed run.
@@ -9199,7 +9198,7 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -9218,8 +9217,8 @@ BEGIN
   -- job-run row, the Postgres log and whatever ships those onward; echoing an
   -- attacker-chosen string writes their collector's hostname into every
   -- downstream reader. Name the SETTING, never its value (T-161.1-10).
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT it returns is a REQUEST ID, not an HTTP
@@ -9267,7 +9266,7 @@ BEGIN
 
   RETURN v_posts;
 END
-$_$;
+$$;
 
 
 ALTER FUNCTION "public"."ops_staleness_check"() OWNER TO "postgres";
@@ -9554,7 +9553,7 @@ COMMENT ON FUNCTION "public"."prevent_profile_role_change"() IS 'Locks profiles.
 CREATE OR REPLACE FUNCTION "public"."prod_prober_cadence_check"() RETURNS bigint
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $_$
+    AS $$
 DECLARE
   -- ══════════════════════════════════════════════════════════════════════
   -- c_contact_ceiling (D-04) — DERIVED, dated, and named rather than chosen.
@@ -9590,8 +9589,7 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- 1. Read the contact. Narrowed by cron_name — never an unfiltered scan over
   --    public.cron_runs.
@@ -9658,7 +9656,7 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -9675,8 +9673,8 @@ BEGIN
   -- The message deliberately does not echo the offending url (T-161.1-10):
   -- RAISE text lands in cron.job_run_details, the Postgres log, and downstream
   -- shippers, and this repo is public.
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⛔ NOTHING BELOW IS WRAPPED IN AN EXCEPTION HANDLER THAT SWALLOWS. If
@@ -9702,7 +9700,7 @@ BEGIN
          ) INTO v_req;
   RETURN v_req;
 END
-$_$;
+$$;
 
 
 ALTER FUNCTION "public"."prod_prober_cadence_check"() OWNER TO "postgres";
@@ -16141,7 +16139,7 @@ CREATE TABLE IF NOT EXISTS "public"."system_settings" (
     "value" "text" NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_by" "uuid",
-    CONSTRAINT "system_settings_analytics_service_url_allowed" CHECK ((("key" <> 'analytics_service_url'::"text") OR ("value" ~ '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$'::"text")))
+    CONSTRAINT "system_settings_analytics_service_url_allowed" CHECK ((("key" <> 'analytics_service_url'::"text") OR ("value" = ANY (ARRAY['https://quantalyze-analytics-production.up.railway.app'::"text", 'http://127.0.0.1:9'::"text"]))))
 );
 
 
@@ -16152,7 +16150,7 @@ COMMENT ON TABLE "public"."system_settings" IS 'Phase 164.7 / SC-2: NON-SECRET o
 
 
 
-COMMENT ON CONSTRAINT "system_settings_analytics_service_url_allowed" ON "public"."system_settings" IS 'T-164.7-06: pins the analytics_service_url row to an https host under .up.railway.app (plus the loopback discard literal the gate uses), because system_settings_admin_all is FOR ALL TO authenticated and an app-admin can therefore PATCH that row through PostgREST — one tick later the Vault-held analytics service key arrives at whatever host it names. Requiring a migration to change WHERE a live secret is sent is the desired property, not a limitation: every hostname a real redeploy of this service can have is already inside the allow-list. public.match_engine_cron_tick() re-tests the SAME expression before posting, so dropping this constraint does not open the route.';
+COMMENT ON CONSTRAINT "system_settings_analytics_service_url_allowed" ON "public"."system_settings" IS 'T-164.7-06 / Phase 242: pins the analytics_service_url row to EXACTLY two origins, the production analytics origin and the loopback discard literal, compared by equality and never by pattern. system_settings_admin_all is FOR ALL TO authenticated, so an app-admin can PATCH that row through PostgREST, and one tick later the Vault-held analytics service key arrives at whatever origin it names. A suffix wildcard let another Railway subdomain through. Moving the analytics host now needs a forward migration that edits this constraint and the four bodies that re-test it (match_engine_cron_tick, prod_prober_cadence_check, cron_sync_tick, ops_staleness_check) first, which is the intended cost.';
 
 
 
