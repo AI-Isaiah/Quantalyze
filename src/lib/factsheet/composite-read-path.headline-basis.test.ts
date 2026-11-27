@@ -24,12 +24,16 @@ const SPARSE_ROWS = [
   { date: "2025-08-02", daily_return: 0.02 },
 ];
 
-function mockAdmin(): SupabaseClient {
+function mockAdmin(smoothedSeriesPayload: unknown = null): SupabaseClient {
   // Honours the keyset cursor, as PostgREST does, so the paged read terminates.
   let after: string | null = null;
+  let kind: string | null = null;
   const chain = {
     select: () => chain,
-    eq: () => chain,
+    eq: (column: string, value: string) => {
+      if (column === "kind") kind = value;
+      return chain;
+    },
     gt: (_column: string, value: string) => {
       after = value;
       return chain;
@@ -40,7 +44,14 @@ function mockAdmin(): SupabaseClient {
         data: SPARSE_ROWS.filter((r) => after === null || r.date > after),
         error: null,
       }),
-    maybeSingle: () => Promise.resolve({ data: null, error: null }),
+    maybeSingle: () =>
+      Promise.resolve({
+        data:
+          kind === "smoothed_mtm_daily_returns" && smoothedSeriesPayload !== null
+            ? { payload: smoothedSeriesPayload }
+            : null,
+        error: null,
+      }),
   };
   return { from: () => chain } as unknown as SupabaseClient;
 }
@@ -594,8 +605,19 @@ describe("G252-MTM-PROMOTION — a promoted composite through the read path and 
     value: 0.001 + Math.sin(i * 0.3) * 0.004,
   }));
 
-  async function run(dqf: Record<string, unknown>, byBasis: Record<string, unknown>) {
-    const out = await readCompositeFactsheet(mockAdmin(), {
+  // The smoothed series a promoted row stores beside its scalars: two or more valid rows.
+  const SMOOTHED_SERIES = {
+    basis: "smoothed_mtm",
+    rows: ROWS.slice(0, 5).map((r) => ({ date: r.date, return: r.value })),
+    gap_spans: [],
+  };
+
+  async function run(
+    dqf: Record<string, unknown>,
+    byBasis: Record<string, unknown>,
+    smoothedSeriesPayload: unknown = SMOOTHED_SERIES,
+  ) {
+    const out = await readCompositeFactsheet(mockAdmin(smoothedSeriesPayload), {
       strategyId: "s1",
       dqf,
       metricsJsonByBasis: byBasis,
@@ -625,6 +647,7 @@ describe("G252-MTM-PROMOTION — a promoted composite through the read path and 
   it("(a) a promoted row names the smoothed headline and withholds the cash object by name", async () => {
     const { payload } = await run(PROMOTED_DQF, { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ });
     expect(payload.headlineBasis).toBe("smoothed_mtm");
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeDefined();
     expectCashWithheldWithTheOptionsSentence(payload);
     // The chain flags describe the SMOOTHED series on a promoted row, never the cash object withheld here.
     expect(payload.dataQuality).not.toHaveProperty("twrChainBroken");
@@ -663,6 +686,28 @@ describe("G252-MTM-PROMOTION — a promoted composite through the read path and 
     expect(payload).not.toHaveProperty("headlineBasis");
     expectCashWithheldWithTheOptionsSentence(payload);
     expect(payload.smoothedGate?.available).toBe(false);
+  });
+
+  /**
+   * (c2) SFH-MEDIUM-1 (252 gap-2 review): a marker plus smoothed scalars but NO usable smoothed series
+   * (no stored row, or fewer than two valid rows, which `readSmoothedSeries` reads as null) must not
+   * seed the factsheet on the smoothed basis. `build-payload` emits `seriesByBasis.smoothed_mtm` only
+   * from such a series, so `useBasisSeriesView` would fall back to the cash payload and put cash-wallet
+   * charts under smoothed KPIs. The cash object stays withheld by name.
+   */
+  it.each([
+    ["the series row is missing", null],
+    ["the series has a single valid row", { basis: "smoothed_mtm", rows: [{ date: "2026-01-01", return: 0.01 }], gap_spans: [] }],
+  ])("(c2) a marker and smoothed scalars but %s: no headlineBasis, cash withheld", async (_label, series) => {
+    const { opts, payload } = await run(
+      PROMOTED_DQF,
+      { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ },
+      series,
+    );
+    expect("headlineBasis" in opts).toBe(false);
+    expect(payload).not.toHaveProperty("headlineBasis");
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeUndefined();
+    expectCashWithheldWithTheOptionsSentence(payload);
   });
 
   /**

@@ -415,10 +415,6 @@ export async function readCompositeFactsheet(
   const smoothedAvailable = hasBasisHeadline(
     (metricsByBasis as { smoothed_mtm?: unknown } | undefined)?.smoothed_mtm,
   );
-  // Phase 252 G252-MTM-PROMOTION: the stored headline is the smoothed basis only when the producer's
-  // marker says so (and the reason is absent) AND a valid smoothed object is stored to open on. A marker
-  // without one leaves the cash basis withheld and does not switch the basis.
-  const smoothedHeadline = isSmoothedHeadlineRow(dqf) && smoothedAvailable;
   const markers = deriveSegmentMarkers(dqf);
   const tinyBaseDays = readTinyBaseDays(dqf?.tiny_base_days);
   if (
@@ -474,6 +470,13 @@ export async function readCompositeFactsheet(
     returnsDenominatorConfig,
     strategyId,
   });
+  // Phase 252 G252-MTM-PROMOTION: the stored headline is the smoothed basis only when the producer's
+  // marker says so (and the reason is absent) AND a valid smoothed object AND a usable smoothed series
+  // are stored to open on. `readSmoothedSeries` is null below two valid daily returns, and
+  // `build-payload` emits `seriesByBasis.smoothed_mtm` only from such a series. Without it the basis
+  // view falls back to the cash payload, which would put cash-wallet charts under smoothed KPIs. A
+  // marker without both leaves the cash basis withheld and does not switch the basis.
+  const smoothedHeadline = isSmoothedHeadlineRow(dqf) && smoothedAvailable && smoothedSeries !== null;
 
   return {
     dailyReturns,
