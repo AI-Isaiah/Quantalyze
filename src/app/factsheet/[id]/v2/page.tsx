@@ -344,7 +344,8 @@ function buildFactsheetPayloadCached(
     // Bumped v26→v27 (Phase 237 CACHE-03, 2026-11-23): the payload shape is unchanged, and a failed BTC price read is no longer stored. An entry stored before the deploy may hold a `price_read_failed` payload (USD toggle disabled), which the throw above cannot evict, so under v26 it would keep serving for the 1 h TTL drain.
     // Bumped v27→v28 (Phase 252 DERIBITOPTIONS, 2026-11-25): for the same inputs, a row whose flags carry the options-book reason now reads withheld (seven scalars null, a named note), without a shape change beyond the widened cause; under v27 an entry built before the deploy would keep serving the cash-wallet headline for the 1 h TTL drain.
     // Bumped v28→v29 (Phase 236 FIGUREMATH, 2026-11-25, one bump for the phase): the payload's values change at deploy without a reshaping of existing fields, and it gains `cagrStart` / `cagrEnd`. Every engine now annualizes one way and CVaR is the historical figure, so a v28 entry built before the deploy would keep serving the old Sharpe, Sortino, volatility, CAGR and CVaR for the 1 h TTL drain, beside a fresh build and the OG card; and a v28 entry lacks the two new fields.
-    ["factsheet-v2-payload-v29", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Bumped v29→v30 (Phase 252 G252-MTM-PROMOTION, 2026-11-27): the payload gains `headlineBasis`, and for the same inputs a promoted composite (marker `headline_basis`, no reason) now opens on the smoothed basis with its cash object withheld; under v29 an entry built before the deploy would keep serving the withheld headline for the 1 h TTL drain.
+    ["factsheet-v2-payload-v30", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
