@@ -1120,10 +1120,15 @@ Plans:
 1. A scheduled workflow scans the full history and is green on its first run. Historical findings are suppressed by the method chosen at plan time, and no credential-shaped literal is re-published. (SECR-03)
 2. `cron_sync_tick` and `ops_staleness_check` post the service key only to exact named hosts; a SQL gate arm goes RED on a wildcard host. The entry's gate-arm and tab-key guard gaps are closed, each with an arm that goes RED. (SECR-04)
 3. PROOF-01: each gate above goes RED on a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. The new SQL arms carry `RED-UNDER` twins. The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 6 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 242-01-PLAN.md — SECR-03: commit-scoped `.gitleaksignore`, the scheduled full-history scan of main with its count-only dedup issue, the workflow and ignore-file pins, PROOF-01 for the scan (wave 1)
+- [ ] 242-02-PLAN.md — SECR-04 tracer: one migration narrows the CHECK and all four key-posting functions to the exact two origins and widens the key guard; cron_sync gate arms W1, K1 and P2 (wave 1)
+- [ ] 242-03-PLAN.md — SECR-04: the prober and ops gates repointed at the new bodies, with W1 and K1 in each (wave 2)
+- [ ] 242-04-PLAN.md — SECR-04: the analytics settings gate repointed, with U3 (the CHECK), W1 and K1, and the migration's tested manual rollback (wave 2)
+- [ ] 242-05-PLAN.md — SECR-04: ARMS_FLOOR and every arm census moved to measured values (wave 3)
+- [ ] 242-06-PLAN.md — Records and the phase gate: the two closed TODOS entries deleted, runbooks and WINDOWS entry 61 updated, all gates and a squash-shaped scan green (wave 4)
 
 ### Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock
 
