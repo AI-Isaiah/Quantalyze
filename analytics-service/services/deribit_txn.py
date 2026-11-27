@@ -98,6 +98,66 @@ class OptionRowFieldMissingError(LedgerValuationError):
     one."""
 
 
+# Gap G252-PROBE-M3 (Phase 252 plan 07). Three smoothed-only refusals used to print the same
+# class and the same redacted field, so a PROD probe reading could not tell them apart. Each
+# now raises its own subclass of ``LedgerValuationError`` (NOT of ``OptionRowFieldMissingError``,
+# whose subclasses the job worker's mark_to_market degrade maps to its own reason). The
+# refusals themselves are unchanged: the same rows refuse at the same point and ``str(exc)`` /
+# ``exc.args`` are byte-identical. The attributes below are CLOSED words and non-negative ints
+# computed at the raise, so a reader can print them without redaction: never a day, an
+# instrument or a row id. The probe imports these sets to validate what it prints.
+HOLE_VS_MARKS_NO_MARKS = "no-marks"
+HOLE_VS_MARKS_BEFORE_FIRST = "before-first-bar"
+HOLE_VS_MARKS_BETWEEN = "between-bars"
+HOLE_VS_MARKS_AFTER_LAST = "after-last-bar"
+HOLE_VS_MARKS_WORDS: frozenset[str] = frozenset(
+    {
+        HOLE_VS_MARKS_NO_MARKS,
+        HOLE_VS_MARKS_BEFORE_FIRST,
+        HOLE_VS_MARKS_BETWEEN,
+        HOLE_VS_MARKS_AFTER_LAST,
+    }
+)
+HOLE_VS_RETENTION_OLDER = "older"
+HOLE_VS_RETENTION_NOT_OLDER = "not-older"
+HOLE_VS_RETENTION_UNKNOWN = "unknown"
+HOLE_VS_RETENTION_WORDS: frozenset[str] = frozenset(
+    {HOLE_VS_RETENTION_OLDER, HOLE_VS_RETENTION_NOT_OLDER, HOLE_VS_RETENTION_UNKNOWN}
+)
+ROW_FIELD_ABSENT = "absent"
+ROW_FIELD_NON_NUMERIC = "non-numeric"
+ROW_FIELD_ZERO = "zero"
+ROW_FIELD_NONZERO = "nonzero"
+ROW_FIELD_SHAPE_WORDS: frozenset[str] = frozenset(
+    {ROW_FIELD_ABSENT, ROW_FIELD_NON_NUMERIC, ROW_FIELD_ZERO, ROW_FIELD_NONZERO}
+)
+# The type census keys of a refusing row's instrument. Every key is always present.
+ROW_SIBLING_TYPES: tuple[str, ...] = (
+    "trade",
+    "delivery",
+    "assignment",
+    "expiry",
+    "exercise",
+    "other",
+)
+ROW_SIBLING_KEYS: frozenset[str] = frozenset(ROW_SIBLING_TYPES)
+
+
+class OptionMarkHoleError(LedgerValuationError):
+    """The D-07 daily-mark hole in :func:`option_mtm_daily`: a day inside a held option's life
+    with a nonzero position and no daily mark. A subclass, so every existing ``except
+    LedgerValuationError`` and every permanent-ledger-error tuple still catches it, and the
+    message is the unchanged D-07 text. ``vs_marks`` is which side of the instrument's fetched
+    marks the missing day falls on and ``vs_retention`` whether that day is older than the hard
+    retention cutoff (``HOLE_VS_MARKS_WORDS`` / ``HOLE_VS_RETENTION_WORDS``). Closed words only:
+    never a day or an instrument."""
+
+    def __init__(self, message: str, *, vs_marks: str, vs_retention: str) -> None:
+        super().__init__(message)
+        self.vs_marks = vs_marks
+        self.vs_retention = vs_retention
+
+
 def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
     """Coerce an untrusted transaction-log numeric field to ``float``, raising
     ``LedgerValuationError`` (permanent, structural) — NOT a bare
@@ -2473,11 +2533,31 @@ def replay_option_positions(
     return out
 
 
+def _hole_vs_marks(instr_marks: Mapping[str, float], day: str) -> str:
+    """Which side of the instrument's fetched marks the missing ``day`` falls on. ISO day
+    strings order as calendar days."""
+    if not instr_marks:
+        return HOLE_VS_MARKS_NO_MARKS
+    if day < min(instr_marks):
+        return HOLE_VS_MARKS_BEFORE_FIRST
+    if day > max(instr_marks):
+        return HOLE_VS_MARKS_AFTER_LAST
+    return HOLE_VS_MARKS_BETWEEN
+
+
+def _hole_vs_retention(day: str, retention_cutoff: str | None) -> str:
+    """Whether the missing ``day`` is STRICTLY earlier than the hard retention cutoff."""
+    if retention_cutoff is None:
+        return HOLE_VS_RETENTION_UNKNOWN
+    return HOLE_VS_RETENTION_OLDER if day < retention_cutoff else HOLE_VS_RETENTION_NOT_OLDER
+
+
 def option_mtm_daily(
     positions: Mapping[str, Mapping[str, Any]],
     marks: Mapping[str, Mapping[str, float]],
     *,
     last_settled_day: str | None = None,
+    retention_cutoff: str | None = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, float]]:
     """Per-(currency, UTC-day) ΔMTM redistribution + terminal book from the replayed
     option ``positions`` (from :func:`replay_option_positions`) and per-instrument
@@ -2496,6 +2576,12 @@ def option_mtm_daily(
     the crawl-day (unsettled) cash already books on the cash channel; that day is
     simply never MTM-marked (it accrues from the next settlement onward). Default
     ``None`` = no cap (byte-identical for the pure-core direct callers, SC-4).
+
+    ``retention_cutoff`` (G252-PROBE-M3) is the hard mark-retention cutoff day (ISO
+    ``YYYY-MM-DD``) the caller already computed. It changes NOTHING about what refuses or
+    when: it is read only to fill ``OptionMarkHoleError.vs_retention`` (``older`` when the
+    missing day is strictly earlier than it, otherwise ``not-older``). Default ``None`` reads
+    ``unknown`` and is byte-identical for the pure-core direct callers.
 
     Day-grid convention (pinned 83-PLAN §2-Q1): ``mark[instr][D]`` is the close of
     the 1D bar whose tick falls on UTC day ``D`` (the bar Deribit stamps at ``D``
@@ -2552,11 +2638,13 @@ def option_mtm_daily(
                 continue
             mark = marks.get(instr, {}).get(day)
             if mark is None:
-                raise LedgerValuationError(
+                raise OptionMarkHoleError(
                     f"option daily-MTM hole: instrument={instr} carries a nonzero "
                     f"position on {day} but has NO daily mark (bar) — refusing to "
                     "interpolate or fall back to the session lump (D-07: a missing "
-                    "bar inside a listed instrument's life is structural, fail loud)"
+                    "bar inside a listed instrument's life is structural, fail loud)",
+                    vs_marks=_hole_vs_marks(marks.get(instr, {}), day),
+                    vs_retention=_hole_vs_retention(day, retention_cutoff),
                 )
             ccy = str(positions[instr]["currency"])
             book[ccy] = book[ccy] + pos * float(mark)

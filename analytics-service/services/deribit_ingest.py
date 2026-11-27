@@ -2678,7 +2678,10 @@ async def _build_smoothed_option_mtm(
     # naming the healthy instrument). The crawl-day cash already books on the
     # cash channel; that day is simply never MTM-marked.
     delta_mtm, terminal_book = option_mtm_daily(
-        kept_positions, marks, last_settled_day=last_settled
+        kept_positions,
+        marks,
+        last_settled_day=last_settled,
+        retention_cutoff=retention_cutoff,
     )
     return delta_mtm, terminal_book, sorted(pre_retention)
 
