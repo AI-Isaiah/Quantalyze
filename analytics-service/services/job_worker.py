@@ -14931,7 +14931,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     smoothed_member_metas: list[dict[str, Any]] = []
     # WR-01 (252 gap-2 review): the smoothed basis is additive (GLB-3), so a TRANSIENT
     # in its pass must never sink the cash composite on the job's LAST attempt. Earlier
-    # attempts keep surfacing it (a retry re-converges, and a published row is not
+    # attempts keep surfacing it (a retry re-converges, and a promoted row is not
     # flipped to the withheld cash headline by a single blip). Same final-attempt read
     # as the sibling handlers: a job row without both integer counts is not final.
     _sm_attempts = job.get("attempts")
@@ -15371,7 +15371,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         consequence="the composite persist writes its markers without it.",
     )
     # WR-02 (252 gap-2 review): a promoted headline demotes by itself later as option
-    # marks age past retention (P2 then P3). Make a withdrawn published headline loud:
+    # marks age past retention (P2 then P3). Make a withdrawn promoted headline loud:
     # WARNING plus a Sentry message carrying the cause literal only (no id, date or
     # amount). Reads the ``existing_flags`` this function already makes; no new query.
     if (
@@ -15380,7 +15380,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     ):
         _demote_cause = _not_promoted_cause if smoothed_ok else "not_option_active"
         logger.warning(
-            "run_stitch_composite_job: a PUBLISHED smoothed headline was withdrawn for "
+            "run_stitch_composite_job: a PROMOTED smoothed headline was withdrawn for "
             "strategy %s (%s) — the row reverts to the cash headline and the named "
             "withhold",
             strategy_id, _demote_cause,
@@ -15389,7 +15389,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             scope.set_tag("compute_job_id", str(job.get("id")))
             scope.set_tag("headline_demotion_cause", str(_demote_cause))
             sentry_sdk.capture_message(
-                "run_stitch_composite_job: a published smoothed headline was "
+                "run_stitch_composite_job: a promoted smoothed headline was "
                 f"withdrawn ({_demote_cause})",
                 level="warning",
             )
