@@ -5243,3 +5243,360 @@ async def test_g252_promoted_row_carries_smoothed_top_level_series_and_pops_cash
     dq = headline["data_quality_flags"]
     for stale in ("marks_since", "mark_gap_days", "marks_trailing_since"):
         assert stale not in dq, f"{stale} describes the cash basis and must be popped"
+
+
+# ── Fail-safe matrix: every path that misses P1..P4 keeps today's cash headline ──────
+async def _g252_build_structural(exchange: Any, *, account_state: Any, pnl_basis: str,
+                                 exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+    if pnl_basis == "smoothed_mtm":
+        raise LedgerValuationError("no smoothed mark at book-channel boundary")
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+async def _g252_build_slow(exchange: Any, *, account_state: Any, pnl_basis: str,
+                           exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+    if pnl_basis == "smoothed_mtm":
+        await asyncio.sleep(5)
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+async def _g252_build_retention(exchange: Any, *, account_state: Any, pnl_basis: str,
+                                exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+    if pnl_basis == "smoothed_mtm":
+        return (_stub_ledger(), CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=True,
+            pre_mark_retention_option_days=[("BTC", "2022-01-03")],
+        ))
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+def _g252_path(path: str, monkeypatch: pytest.MonkeyPatch) -> tuple[dict[str, Any], str]:
+    """The run kwargs and the expected not-promoted cause for one non-promoting path."""
+    nan = float("nan")
+    cause = "smoothed_basis_not_computed"
+    if path == "budget_refusal":
+        return {"extra_patches": [patch.object(_jw, "_MTM_SECOND_PASS_MIN_SECONDS", 1e9)]}, cause
+    if path == "bounded_timeout":
+        monkeypatch.setitem(_jw.TIMEOUT_PER_KIND, "stitch_composite", 1.0)
+        monkeypatch.setenv("COMPOSITE_MAX_MEMBERS", "10")
+        return {
+            "build_side_effect": _g252_build_slow,
+            "extra_patches": [patch.object(_jw, "_MTM_SECOND_PASS_MIN_SECONDS", 0.0)],
+        }, cause
+    if path == "structural_ledger_error":
+        return {"build_side_effect": _g252_build_structural}, cause
+    if path == "degenerate_length":
+        s1 = _returns([("2024-01-01", 0.10)])
+        s2 = pd.Series([nan], index=pd.DatetimeIndex(["2024-02-01"]).as_unit("us"),
+                       dtype="float64")
+        return {"smoothed": (s1, s2)}, cause
+    if path == "smoothed_overlap_error":
+        from services.stitch_composite import (
+            CompositeOverlapError, stitch_clipped_series as _real_stitch,
+        )
+        _n = {"i": 0}
+
+        def _stitch_side(clipped: Any) -> Any:
+            _n["i"] += 1
+            if _n["i"] >= 2:
+                raise CompositeOverlapError("smoothed post-clip day collision")
+            return _real_stitch(clipped)
+
+        return {"extra_patches": [patch(
+            "services.stitch_composite.stitch_clipped_series",
+            new=MagicMock(side_effect=_stitch_side),
+        )]}, cause
+    if path == "smoothed_derive_valueerror":
+        import services.basis_series as _bs
+        _real = _bs.derive_basis_series
+        _n2 = {"i": 0}
+
+        def _derive_side(*a: Any, **k: Any) -> Any:
+            _n2["i"] += 1
+            if _n2["i"] >= 2:
+                raise ValueError("interior chain-break")
+            return _real(*a, **k)
+
+        return {"extra_patches": [patch(
+            "services.basis_series.derive_basis_series",
+            new=MagicMock(side_effect=_derive_side),
+        )]}, cause
+    if path == "retention_bucketed":
+        return {"build_side_effect": _g252_build_retention}, "retention_bucketed_option_days"
+    if path == "chain_broken":
+        s1 = _returns([("2024-01-01", 0.07), ("2024-01-02", nan), ("2024-01-03", 0.04)])
+        return {"smoothed": (s1, _g252_smoothed()[1])}, "smoothed_chain_broken"
+    raise AssertionError(path)
+
+
+_G252_MATRIX = [
+    "budget_refusal", "bounded_timeout", "structural_ledger_error", "degenerate_length",
+    "smoothed_overlap_error", "smoothed_derive_valueerror", "retention_bucketed",
+    "chain_broken",
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", _G252_MATRIX)
+async def test_g252_non_promoting_path_keeps_the_cash_headline_and_the_named_withhold(
+    path: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fail-safe direction of the ruling ("only if it actually works"): an option-active
+    composite that misses any of P2..P4 is stored EXACTLY as before, top-level scalars
+    equal the cash by-basis object, mtm_gated_reason is unsmoothed_options_book, no
+    headline_basis, and the series-derived flags are the cash ones. If this goes red a
+    cash-wallet headline ships under a smoothed marker, or a withheld row publishes."""
+    kwargs, cause = _g252_path(path, monkeypatch)
+    with caplog.at_level(logging.INFO, logger=_G252_LOG):
+        fake, result, _ = await _g252_run(monkeypatch, **kwargs)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    headline = _headline_row(fake)
+    assert headline is not None
+    by_basis = headline["metrics_json_by_basis"]
+    assert _g252_equal_on_keys(headline, by_basis["cash_settlement"])
+    dq = headline["data_quality_flags"]
+    assert dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS
+    assert "headline_basis" not in dq
+    # The cash fixture has no break and a long-enough window: the series-derived flags
+    # are CASH-derived, so a chain break in the SMOOTHED series must not leak into them.
+    assert "headline_since" not in dq
+    assert "twr_chain_broken" not in dq
+    assert _g252_assert_exactly_one_marker(fake) == "cash_settlement"
+    expected = (
+        f"run_stitch_composite_job: smoothed headline not promoted for strategy "
+        f"{_STRATEGY_ID} ({cause})"
+    )
+    assert [r.getMessage() for r in caplog.records if "smoothed headline" in r.getMessage()] == [
+        expected
+    ]
+    # Siblings are the cash ones: the same cash input through the budget refusal path.
+    ref, _, _ = await _g252_run(
+        monkeypatch,
+        extra_patches=[patch.object(_jw, "_MTM_SECOND_PASS_MIN_SECONDS", 1e9)],
+    )
+    assert _g252_sibling_kinds(fake) == _g252_sibling_kinds(ref)
+
+
+@pytest.mark.asyncio
+async def test_g252_honest_smoothed_derive_reinstates_a_member_guard_break(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """T-252-26: an interior member-guard NaN day in a SMOOTHED member series is
+    reinstated as a chain break (scalar input zero_fill, NaN surfaced as nan_dates), not
+    bridged with an invented flat 0.0 day. The break is what P4 reads, so the row is NOT
+    promoted (smoothed_chain_broken). If this goes red a flat day is invented and a
+    chain-broken series is promoted with no 'measured since' note."""
+    kwargs, cause = _g252_path("chain_broken", monkeypatch)
+    with caplog.at_level(logging.INFO, logger=_G252_LOG):
+        fake, result, _ = await _g252_run(monkeypatch, **kwargs)
+    assert result.outcome == DispatchOutcome.DONE
+    from services.basis_series import KIND_SMOOTHED_MTM
+
+    smoothed_row = _g252_series_rpc(fake)[KIND_SMOOTHED_MTM]
+    assert smoothed_row["conventions"].get("densify") == "zero_fill"
+    assert "2024-01-02" in smoothed_row["nan_dates"], "the guard day must be reinstated"
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert "smoothed_mtm" in headline["metrics_json_by_basis"]
+    assert "headline_basis" not in headline["data_quality_flags"]
+    assert any(cause in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_g252_stale_promoted_marker_heals_on_a_non_promoting_option_stitch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row promoted once whose next stitch does NOT promote must lose the marker and
+    regain the named reason, else a stale marker over cash figures un-withholds a
+    cash-wallet headline."""
+    kwargs, _ = _g252_path("budget_refusal", monkeypatch)
+    fake, result, _ = await _g252_run(
+        monkeypatch, existing_flags={"headline_basis": "smoothed_mtm"}, **kwargs,
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    dq = _headline_row(fake)["data_quality_flags"]  # type: ignore[index]
+    assert "headline_basis" not in dq
+    assert dq["mtm_gated_reason"] == MTM_REASON_OPTIONS
+    assert _g252_assert_exactly_one_marker(fake) == "cash_settlement"
+
+
+@pytest.mark.asyncio
+async def test_g252_formerly_promoted_row_with_no_option_activity_is_an_ordinary_cash_composite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A formerly promoted composite re-stitched with NO option activity (smoothed_ok
+    False, MTM admitted) must lose the marker and carry no reason: the pop runs on every
+    non-promoting stitch, not only an option-active one. If this goes red a perp-only
+    composite carries a smoothed marker over cash figures forever."""
+    c1, c2 = _g252_cash()
+    fake, result, _ = await _g252_run(
+        monkeypatch,
+        has_option_activity=False,
+        combine_seq=[(c1, {}), (c2, {}), (c1, {}), (c2, {})],  # cash + MTM passes
+        existing_flags={"headline_basis": "smoothed_mtm"},
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    dq = _headline_row(fake)["data_quality_flags"]  # type: ignore[index]
+    assert "headline_basis" not in dq
+    assert "mtm_gated_reason" not in dq
+
+
+@pytest.mark.asyncio
+async def test_g252_withhold_reason_is_dropped_when_the_row_promotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mirror direction: a wave-1 row carrying the named reason loses it on the
+    promoting stitch. If this goes red the row says "withheld" and "smoothed headline"
+    at once and every list surface keeps hiding the figures."""
+    fake, result, _ = await _g252_run(
+        monkeypatch, existing_flags={"mtm_gated_reason": MTM_REASON_OPTIONS},
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    dq = _headline_row(fake)["data_quality_flags"]  # type: ignore[index]
+    assert "mtm_gated_reason" not in dq
+    assert dq["headline_basis"] == "smoothed_mtm"
+
+
+@pytest.mark.asyncio
+async def test_g252_transient_in_the_smoothed_pass_retries_the_job_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T-252-27: with the flag unset, a 429 in the SMOOTHED pass's member crawl returns a
+    transient DispatchResult (whole-job retry), never a degrade and never a promotion,
+    and writes nothing to the stored strategy_analytics row or csv_daily_returns, so a
+    seeded wave-1 row is byte-unchanged and still withheld. The api_keys 429 stamp that
+    path makes is expected and recorded (the _stamp_429 spy). If this goes red a
+    rate-limit silently promotes or sinks the published row."""
+    import ccxt
+
+    async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
+                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+        if pnl_basis == "smoothed_mtm":
+            raise ccxt.RateLimitExceeded("429 too many requests")
+        return (_stub_ledger(), _G252_OPT_REPORT)
+
+    stamp_spy = AsyncMock()
+    seeded = {"csv_source": True, "composite": True, "mtm_gated_reason": MTM_REASON_OPTIONS}
+    fake, result, _ = await _g252_run(
+        monkeypatch,
+        build_side_effect=_build,
+        existing_flags=dict(seeded),
+        extra_patches=[patch("services.job_worker._stamp_429", new=stamp_spy)],
+    )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    stamp_spy.assert_awaited()  # the expected api_keys 429 stamp
+    assert not [u for u in fake.upserts if u[0] in ("strategy_analytics", "csv_daily_returns")]
+    assert not [d for d in fake.deletes if d[0] == "csv_daily_returns"]
+    assert fake.existing_flags == seeded
+
+
+@pytest.mark.asyncio
+async def test_g252_failure_after_promotion_keeps_the_marker_beside_the_scalars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A promoted row whose next stitch ends in _stamp_failed keeps headline_basis and
+    gains no mtm_gated_reason, and the failure stamp omits the scalar columns (M-2:
+    omission preserves them), so marker and figures stay together. If this goes red a
+    failed re-stitch leaves smoothed figures with the marker stripped, which reads as a
+    cash headline."""
+    promoted_flags = {
+        "csv_source": True, "composite": True, "headline_basis": "smoothed_mtm",
+        "per_key": {"key-1": {"present": 40, "gap": 3}}, "gap_day_count": 3,
+    }
+    fake, result, _ = await _g252_run(
+        monkeypatch,
+        existing_flags=dict(promoted_flags),
+        strategy_row={
+            "id": _STRATEGY_ID, "asset_class": "traditional",  # clock disagreement arm
+            "returns_denominator_config": _TEST_CONFIG,
+        },
+    )
+    assert result.outcome == DispatchOutcome.FAILED
+    failed = [
+        p for t, p, _ in fake.upserts
+        if t == "strategy_analytics" and isinstance(p, dict)
+        and p.get("computation_status") == "failed"
+    ]
+    assert failed
+    dq = failed[-1]["data_quality_flags"]
+    assert dq.get("headline_basis") == "smoothed_mtm"
+    assert "mtm_gated_reason" not in dq
+    assert "cumulative_return" not in failed[-1]
+    assert "metrics_json_by_basis" not in failed[-1]
+
+
+async def _g252_no_option_run(
+    monkeypatch: pytest.MonkeyPatch, kind: str, flag: str | None,
+    caplog: pytest.LogCaptureFixture,
+) -> tuple[_FakeSupabase, AsyncMock, list[str]]:
+    if flag is None:
+        monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("SMOOTHED_MTM_ENABLED", flag)
+    c1, c2 = _g252_cash()
+    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=False,
+    )))
+    if kind == "perp_only_deribit":
+        fake = _FakeSupabase(
+            members=_g252_members(), strategy_row=dict(_G252_STRATEGY_ROW),
+        )
+        patches = _deribit_patches(
+            fake, combine_returns=[(c1, {}), (c2, {}), (c1, {}), (c2, {})],
+            has_option_activity=False,
+        )
+    else:  # ccxt member composite: Deribit perp-only seq 1 + Bybit seq 2, no options
+        fake = _FakeSupabase(
+            members=[
+                _member(1, "2026-05-01", "2026-05-10"),
+                _member(2, "2026-06-01", None),
+            ],
+            strategy_row=dict(_G252_STRATEGY_ROW),
+        )
+        m1 = _returns([("2026-05-01", 0.02), ("2026-05-02", 0.01)])
+        patches = _deribit_patches(
+            fake, combine_returns=[(m1, {})], has_option_activity=False,
+            preflight_side_effect=[_ctx("deribit"), _ctx("bybit")],
+        ) + _ccxt_fetch_patches(realized=_CCXT_REALIZED, funding=_CCXT_FUNDING)
+    with caplog.at_level(logging.INFO, logger=_G252_LOG):
+        caplog.clear()
+        with _apply(patches), patch(
+            "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
+        ):
+            result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    return fake, build_spy, [
+        r.getMessage() for r in caplog.records if "smoothed headline" in r.getMessage()
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["perp_only_deribit", "ccxt_member"])
+async def test_g252_no_option_composite_is_byte_identical_with_the_flag_unset_and_set(
+    kind: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """155.2 and SC-4: a composite with no option activity (perp-only Deribit, or a ccxt
+    member) runs no smoothed pass, writes no headline_basis and no smoothed_mtm key,
+    emits no promotion line, and writes the same headline payload and flags with the
+    flag unset and set. An MT5 key cannot be a composite member (see the SUMMARY grep),
+    so no MT5 number can move. If this goes red a no-option composite changes with a
+    Railway variable, or a smoothed marker appears on a book that has nothing to smooth."""
+    unset_fake, unset_build, unset_lines = await _g252_no_option_run(
+        monkeypatch, kind, None, caplog)
+    set_fake, set_build, set_lines = await _g252_no_option_run(
+        monkeypatch, kind, "true", caplog)
+    for fake, build, lines in (
+        (unset_fake, unset_build, unset_lines), (set_fake, set_build, set_lines),
+    ):
+        assert not any(
+            c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build.await_args_list
+        )
+        headline = _headline_row(fake)
+        assert headline is not None
+        assert "headline_basis" not in headline["data_quality_flags"]
+        assert "smoothed_mtm" not in headline["metrics_json_by_basis"]
+        assert lines == []
+    assert _headline_row(unset_fake) == _headline_row(set_fake)
