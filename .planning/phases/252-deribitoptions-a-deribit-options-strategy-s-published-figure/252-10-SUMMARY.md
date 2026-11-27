@@ -16,11 +16,11 @@ provides:
   - "payload cache key factsheet-v2-payload-v30"
 affects: [post-deploy owner check, G252-MTM-PROMOTION closure]
 plan_head_before: 7fbbf0c94c92d2e78db68f7ea9f6f86dd3136de4
-plan_head_after: 7cc7e7a7b9a1585c7b77b8341ef0c79164de5198
+plan_head_after: 73b3500d9a20d8d046a650f539afb0174d49ed21
 actuals:
-  tokens: 7800     # chars/4 over the added lines of the realized src diff (31322 chars)
+  tokens: 8300     # chars/4 over the added lines of the realized src diff (33303 chars)
   tasks: 3
-  commits: 3       # MEASURED: git rev-list --count plan_head_before..plan_head_after (code commits; the SUMMARY docs commit follows)
+  commits: 5       # MEASURED: git rev-list --count plan_head_before..plan_head_after: 4 code commits plus the first SUMMARY commit; the amending docs commit follows
 tech-stack:
   added: []
   patterns:
@@ -70,11 +70,12 @@ A promoted composite's factsheet now opens on the "Smoothed mark-to-market" basi
 | 1 (tracer) | `39f97ba26` | predicate, applyHeadlineBasis branch, readCompositeFactsheet opts, payload field, cases (a) to (e) |
 | 2 | `013cfd225` | initialBasis, segment condition, docblocks, five factsheet cases |
 | 3 | `7cc7e7a7b` | census arms 2b and 1b, cache key v30 |
+| 3a | `73b3500d9` | per-seam promoted-row census cases; a smoothed rail window case with the stored smoothed series (advisor review) |
 
 ## Verification results
 
 - Task 1 verify command (5 files): `Test Files 5 passed (5)`, `Tests 356 passed (356)`.
-- Task 2 verify command (5 files): `Test Files 5 passed (5)`, `Tests 195 passed (195)`.
+- Task 2 verify command (5 files): `Test Files 5 passed (5)`, `Tests 195 passed (195)` (measured before the rail case was added; the killswitch file alone is now `Tests 8 passed (8)` and the census `Tests 39 passed (39)`).
 - Task 3 verify command (the vitest part, directory runs included): `Test Files 1 failed | 225 passed (226)`, `Tests 2 failed | 4269 passed (4271)`. The two failures are the known local-only ones: `src/lib/factsheet/compute.conventions.test.ts` fixture B and fixture C (Node 25 float, a `skew` last-digit snapshot mismatch). The base showing them red is recorded in `252-VERIFICATION.md`; I did not re-run the base. `RiskTabPanel.book-series.test.tsx` is not under any directory in this command and did not run.
 - `npm run typecheck`: exit 0. `npm run lint`: exit 0. `node scripts/verify-plan-anchors.mjs --pending`: exit 0 (`claims: 33 checked`, `OK: 9 plan file(s), no stale claims.`).
 
@@ -154,7 +155,7 @@ restore cmp exit 0
       Tests  7 passed (7)
 ```
 
-RED at HEAD for Task 2 (before the implementation): the three-segment case, the headline-strip case and the cash-view case failed (`Tests 3 failed | 4 passed (7)`); the cash-view case was then re-pointed from `getAllByText("Cum. Return")[0]` to the strip's `factsheet-kpi-value` cells and the fixture rebuilt through the real `buildFactsheetPayload`, because a hand-built scenario payload carried the client-computed cash figure the strict overlay would otherwise null.
+RED at HEAD for Task 2 (before the implementation): the three-segment case, the headline-strip case and the cash-view case failed (`Tests 3 failed | 4 passed (7)`); the cash-view case was then re-pointed from `getAllByText("Cum. Return")[0]` to the strip's `factsheet-kpi-value` cells and the fixture rebuilt through the real `buildFactsheetPayload`, because a hand-built scenario payload carried the client-computed cash figure the strict overlay would otherwise null. After the advisor review the fixture also carries a stored `smoothedSeries`, as the plan specifies, and a rail case asserts the 3 Month and 6 Month windows show figures on the smoothed basis and dashes on the withheld cash basis (it fails without the series, shown above).
 
 Task 3, cross-language pin (`HEADLINE_BASIS_SMOOTHED` value changed to `"smoothed"` in `stitch_composite.py`; file `options-cash-wallet-withhold.census.test.ts`):
 
@@ -165,18 +166,32 @@ Task 3, cross-language pin (`HEADLINE_BASIS_SMOOTHED` value changed to `"smoothe
 restore cmp exit 0
 ```
 
-Task 3, agreement (`isOptionsCashWalletBook` also true for a row carrying the marker):
+Task 3, agreement (`isOptionsCashWalletBook` also true for a row carrying the marker), after splitting the promoted-row arm into one case per seam:
 
 ```
-=== NEUTER agreement: isOptionsCashWalletBook also true for a row with the marker
-     × a promoted row (marker, no reason) shows the stored figures through the verdict, shaper, record, constituent and card seams 6ms
-      Tests  1 failed | 34 passed (35)
+=== NEUTER agreement (per-seam cases)
+     × the predicate reads the promoted row as promoted, and the verdict is clean (not withheld) 9ms
+     × the card prints the stored figures 2ms
+      Tests  2 failed | 37 passed (39)
 restore cmp exit 0
 === GREEN
-      Tests  35 passed (35)
+      Tests  39 passed (39)
 ```
 
-Honest gaps against the plan's wording: (1) the promoted-row seams are one `it`, so the neuter reports one failing case; its first assertion (the verdict) is the one that throws, so the list and card assertions are not separately named by a run. (2) The plan names "the three-segment case" and "the Smoothed active case" as separate cases; they are one `it` here, so both Task 2 neuters fail that one case by name.
+Measured, not a wording gap: the neuter reaches the verdict and the card, which both read the flags blob. It cannot reach the list shaper, the record carrier or the constituent parser by construction, because those take the reason ALIAS (null on a promoted row), never the marker; their per-seam cases are pinned by the fail-safe case (marker plus reason withholds through all of them) rather than by this neuter. The plan's "list" row is therefore unreachable by this neuter; the list seam's agreement is carried by its own case and by the fail-safe case.
+
+Task 2, rail windows (fixture without `smoothedSeries`, to show the new case discriminates):
+
+```
+=== NEUTER: fixture without smoothedSeries
+     × the rail's trailing windows show figures on the smoothed basis and dashes on the withheld cash basis 278ms
+AssertionError: 3 Month on smoothed: expected '—' to match /^[+-]?\d/
+      Tests  1 failed | 7 passed (8)
+restore cmp exit 0
+      Tests  8 passed (8)
+```
+
+Honest gap against the plan's wording: the plan names "the three-segment case" and "the Smoothed active case" as separate cases; they are one `it` here, so both Task 2 neuters fail that one case by name.
 
 ## Reader audit
 
@@ -187,13 +202,14 @@ Classes: (i) basis-keyed, follows the selected basis; (ii) cash-only and still w
 | `MetricsColumn.tsx` `isHeadlineWithheld`, `isRangeWithheld`, `useFullHistoryWithheld` | `dataQuality.headlineWithheld` and cause, ANDed with `basis === "cash_settlement"` | (i) | Withheld only on the cash basis; on a promoted row's smoothed basis the strip and rail show figures. |
 | `FactsheetView.tsx` rail, EOY bars, range, relative cells | the three functions above | (i) | Same discriminator, no edit. |
 | `basis-context.tsx` window gate (`headlineWithheld !== true` term) | `dataQuality.headlineWithheld` | (i) | Keyed by the active basis through the functions above. |
-| `build-payload.ts` `noWindows` branch | `headlineWithheld` | (ii) | Nulls the CASH base windows on a withheld payload. The smoothed view reads its own bundle. Known limit: with no smoothed series bundle the smoothed view's windows are dashes (the safe direction) and its charts fall back to the cash curve beneath smoothed figures, the existing "Charts show the cash-settlement series" caption state. |
+| `build-payload.ts` `noWindows` branch | `headlineWithheld` | (ii) | Nulls the CASH base windows on a withheld payload. The smoothed view reads its own bundle. The `noWindows` branch does NOT leak onto the smoothed view: measured by the rail case above (figures on smoothed, dashes on cash). Known limit: with no smoothed series bundle (a malformed series row; a failed read throws instead) the smoothed view's windows are dashes, the safe direction, and its charts fall back to the cash curve beneath smoothed figures, the existing "Charts show the cash-settlement series" caption state. |
 | `composite-read-path.ts` `applyHeadlineBasis` (composite arm) | stored cash object | (ii) | The only place the cash object is withheld; this plan's new branch. The single-key arm never sees a promoted row. |
 | `page.tsx`, `types.ts` | comments and the type | n/a | No decision. |
 | `src/app/api/og/factsheet/[id]/route.tsx` | `BY_BASIS_ALIASES` for the applicability question only; prints from top-level `returns_series` and the stored scalars | (iii) | Stored top-level figures, so the card shows the smoothed figures on a promoted row. No code change. |
 | `og-metrics.ts` `computeOgHeadline` | top-level stored scalars, `headlineVerdict` | (iii) | Census arm 1b: finite smoothed figures for a promoted row, NaN for marker plus reason. |
 | `fetch-and-build-payload.ts`, `by-basis-projection.ts` | the `BY_BASIS_ALIASES` fragment, feeds `readCompositeFactsheet` | (i) | Source of the by-basis objects; the effective flags (live or snapshot) carry the whole blob, marker included. |
 | `src/lib/factsheet/json-ld.ts` | `payload.strategyMetrics.cagr` (the cash base overlay) | (iv), known safe-direction limit | On a promoted row the cash overlay is NaN, so CAGR is omitted from the structured data. Not fixed, as the plan directs. It is not a named ruling surface. |
+| Wave-1 seam and raw-reason callers: `queries.ts` (`shapeRowAnalytics`, ranking skips at the two `isOptionsCashWalletReason` sites, `figure_withheld_by`), `figure-record-scalars.ts`, `(dashboard)/compare/page.tsx`, `api/strategies/[id]/returns/route.ts` (`figure_withheld_by`), `api/og/factsheet/[id]/route.tsx` (`isOptionsCashWalletBook(effectiveFlags)`), `recommendations/page.tsx`, `allocations/lib/constituent-figure.ts`, `strategies-row-adapter.ts`, `HoldingsTable.tsx`, `annualized-cell.tsx`, `StrategyTable.tsx`, `CompareEquityOverlay.tsx`, `figure-gate.ts` | the reason alias or `headline_withheld_cause` / `withheldBy` derived from it; the figures they print are the stored TOP-LEVEL scalars | (iii) | With no reason on a promoted row each reads "not the book" and prints the stored (smoothed) top-level figures; none prints a cash by-basis figure. The census arm 1b cases drive the verdict, shaper, record, constituent and card seams on one promoted row. A promoted row now also enters the ranking sets the reason used to exclude it, which is the intended consequence of publishing its headline. |
 | `(dashboard)/strategies/page.tsx`, `finalize-rerun.ts` | mention the by-basis column in comments only | n/a | No reader. |
 | `SyncPreviewStep.tsx` (wizard preview) | `metrics_json_by_basis.smoothed_mtm` availability | out of scope | CONTEXT excludes the wizard preview. |
 | `compositeAttribution.ts` | only `attributionBasisFromConfig` is imported (by `composite-read-path.ts` and the wizard) | n/a | No live attribution panel prints a cash by-basis figure outside the wizard. |
@@ -206,9 +222,13 @@ Classes: (i) basis-keyed, follows the selected basis; (ii) cash-only and still w
 
 New printer of the cash by-basis object: none outside the factsheet composite arm (the OG route reads it for applicability only; the wizard preview is out of scope). No STOP.
 
+## Same-payload confirmation
+
+Read, not assumed: `FactsheetView` hands its NATIVE `payload` to `FactsheetShell`, which mounts `FactsheetBody payload={payload}`; the provider seed reads that prop. The control reads `gatePayload`, which is `unitView.nativePayload` in a USD view (never reached by a composite) and `usePayload()` otherwise, and `usePayload()` is the native payload in the native view (`SelectedPayloadProvider` feeds `unitView.selectedPayload`, which is the native payload there). Mounts with no `UnitViewProvider` (the composer, `/strategy/[id]/v2`) feed `FactsheetBody` and `FactsheetProvider` the same payload. So the seed and the segment condition always read the same object.
+
 ## resetView confirmation
 
-`resetView` in `FactsheetView.tsx` calls `resetXRange()`, `setComparator(payload.activeComparator)`, dispatches `COLLAPSIBLE_OPEN_ALL_EVENT` and tracks the event. It never touches the basis, so "Reset view" leaves a promoted row on whichever basis the viewer picked, and it needed no change. Separately, the existing line that forces `setBasis("cash_settlement")` when the viewer switches Units to USD is unchanged: on a promoted row the USD view therefore lands on the withheld cash basis, with the segment still rendered (it reads the native payload's marker).
+`resetView` in `FactsheetView.tsx` calls `resetXRange()`, `setComparator(payload.activeComparator)`, dispatches `COLLAPSIBLE_OPEN_ALL_EVENT` and tracks the event. It never touches the basis, so "Reset view" leaves a promoted row on whichever basis the viewer picked, and it needed no change. Composites never get a USD view: `fetch-and-build-payload.ts` returns the native payload early (`if (unit === null || isComposite) return nativePayload;`), and the `returnsUnit` that shows the Units toggle is set only on the single-key arm. So the USD-view interplay (the line that forces `setBasis("cash_settlement")` when a viewer switches Units to USD) cannot arise for a promoted composite.
 
 ## Existing tests whose intent changed
 
@@ -244,6 +264,6 @@ After plan 09's post-deploy re-stitch reads "Pass", open the owner factsheet of 
 
 ## Self-Check: PASSED
 
-- FOUND commits `39f97ba26`, `013cfd225`, `7cc7e7a7b`, all ancestors of HEAD.
+- FOUND commits `39f97ba26`, `013cfd225`, `7cc7e7a7b`, `73b3500d9`, all ancestors of HEAD.
 - FOUND all 14 plan files modified, none outside the write scope; `queries.ts`, `figure-record-scalars.ts`, the Compare page, `og-metrics.ts` and the OG route are untouched.
 - `STATE.md` and `ROADMAP.md` untouched.
