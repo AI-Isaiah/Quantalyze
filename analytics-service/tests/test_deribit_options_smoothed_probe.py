@@ -43,6 +43,8 @@ from services.deribit_txn import (
     PNL_BASIS_CASH_SETTLEMENT,
     PNL_BASIS_SMOOTHED_MTM,
     LedgerValuationError,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
     OptionRowFieldMissingError,
 )
 from services.nav_twr import NavReconstructionError
@@ -941,13 +943,15 @@ async def _measure_real(
     return {r["basis"]: r for r in records}, [probe.emit_record(r) for r in records]
 
 
-def _assert_no_row_text_in(lines: list[str]) -> None:
+def _assert_no_row_text_in(
+    lines: list[str], row_ids: tuple[int, ...] = _HOLE_ROW_IDS
+) -> None:
     """Nothing the real refusal message carries may reach a line: not the instrument, not a day,
     not a row id."""
     for line in lines:
         assert _HOLE_INSTR not in line and "BTC-" not in line
         assert not _DATE_RE.search(line)
-        for row_id in _HOLE_ROW_IDS:
+        for row_id in row_ids:
             assert str(row_id) not in line
 
 
@@ -1086,3 +1090,102 @@ def test_the_emitter_refuses_a_refusal_shape_outside_the_closed_set(shape: Any) 
 def test_the_emitter_prints_each_closed_refusal_shape(shape: Any) -> None:
     line = probe.emit_record({**_honest_record(), "refusal_shape": shape})
     assert json.loads(line)["refusal_shape"] == shape
+
+
+# --- plan 07: the two D-09 row refusals, through the real smoothed build --------
+
+_ROW_INSTR = "BTC-17JAN26-50000-P"
+_ROW_IDS = (7401, 7402, 7403)
+_ROW_SIBLING_ZERO = {"trade": 0, "delivery": 0, "assignment": 0, "expiry": 0, "exercise": 0, "other": 0}
+
+
+def _d09_rows(close_type: str, **overrides: Any) -> list[dict[str, Any]]:
+    """A long put opened on 01-15, then a zero-cash ``close_type`` row on 01-17. Both pass the
+    cash twins, so only the smoothed replay can refuse them."""
+    opening = _opt_row(
+        instrument=_ROW_INSTR, day="2026-01-15", change=-0.04, position=1.0, id=_ROW_IDS[0]
+    )
+    closing: dict[str, Any] = {
+        "type": close_type,
+        "instrument_name": _ROW_INSTR,
+        "currency": "BTC",
+        "change": 0.0,
+        "timestamp": _mk_ms("2026-01-17", 8),
+        "id": _ROW_IDS[1],
+    }
+    closing.update(overrides)
+    return [opening, closing]
+
+
+_D09_SUMMARIES = [{"currency": "BTC", "equity": -0.04, "session_upl": 0.0, "options_value": 0.0}]
+
+
+async def _measure_d09(
+    monkeypatch: Any, rows: list[dict[str, Any]]
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    _patch_real_crawl(monkeypatch, rows)
+    stub = _OptionsAdapterStub(_D09_SUMMARIES, {})
+    records = await probe.measure_member_live(stub, "m1", None, sleep=_no_sleep)
+    return {r["basis"]: r for r in records}, [probe.emit_record(r) for r in records]
+
+
+async def test_an_exercise_ledger_reads_its_own_class_and_the_row_shape(
+    monkeypatch: Any,
+) -> None:
+    """The exercise refusal fires before any mark is fetched. The record names it and prints the
+    refusing row's change and position shape and the same-instrument type census, and the real
+    message (instrument, id) reaches no line. Red means a PROD reading cannot tell an
+    unmeasured exercise row from a retention hole."""
+    recs, lines = await _measure_d09(monkeypatch, _d09_rows("exercise"))
+    smoothed, cash = recs[_SMOOTHED], recs[_CASH]
+    assert smoothed["build"] == "build-error:OptionExerciseRowError"
+    assert smoothed["build_error_detail"] == "OptionExerciseRowError:position"
+    assert smoothed["refusal_shape"] == {
+        "kind": "exercise",
+        "change": "zero",
+        "position": "absent",
+        "siblings": {**_ROW_SIBLING_ZERO, "trade": 1, "exercise": 1},
+    }
+    assert smoothed["member_verdict"] == "fail"
+    assert cash["refusal_shape"] is None
+    _assert_no_row_text_in(lines, _ROW_IDS)
+
+
+async def test_an_expiry_with_a_position_reads_its_own_class_and_the_row_shape(
+    monkeypatch: Any,
+) -> None:
+    recs, lines = await _measure_d09(monkeypatch, _d09_rows("expiry", position=-1.0))
+    smoothed = recs[_SMOOTHED]
+    assert smoothed["build"] == "build-error:OptionExpiryRowError"
+    assert smoothed["build_error_detail"] == "OptionExpiryRowError:position"
+    assert smoothed["refusal_shape"] == {
+        "kind": "expiry",
+        "change": "zero",
+        "position": "nonzero",
+        "siblings": {**_ROW_SIBLING_ZERO, "trade": 1, "expiry": 1},
+    }
+    assert recs[_CASH]["refusal_shape"] is None
+    _assert_no_row_text_in(lines, _ROW_IDS)
+
+
+@pytest.mark.parametrize("cls", [OptionExerciseRowError, OptionExpiryRowError])
+@pytest.mark.parametrize(
+    "attrs",
+    [
+        {"change_shape": "2023-06-20", "position_shape": "absent", "siblings": _ROW_SIBLING_ZERO},
+        {"change_shape": "zero", "position_shape": ["absent"], "siblings": _ROW_SIBLING_ZERO},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {"trade": 1}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": True}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": -1}},
+        {"change_shape": "zero", "position_shape": "absent", "siblings": {**_ROW_SIBLING_ZERO, "trade": 1.0}},
+    ],
+    ids=["date-word", "unhashable-word", "short-census", "bool-count", "negative-count", "float-count"],
+)
+async def test_an_off_set_row_attribute_degrades_to_unreadable_and_still_prints(
+    monkeypatch: Any, cls: Any, attrs: dict[str, Any]
+) -> None:
+    """Degrade, never refuse: whatever is wrong with an attribute, the record prints as
+    ``unreadable`` (a float count would otherwise make the emitter refuse the whole record)."""
+    recs = await _measure(monkeypatch, {**_fixture_pair(), _SMOOTHED: cls("x", **attrs)})
+    assert recs[_SMOOTHED]["refusal_shape"] == "unreadable"
+    probe.emit_record(recs[_SMOOTHED])

@@ -158,6 +158,76 @@ class OptionMarkHoleError(LedgerValuationError):
         self.vs_retention = vs_retention
 
 
+class OptionExerciseRowError(LedgerValuationError):
+    """The D-09 ``exercise`` refusal in :func:`replay_option_positions`: the exercise row shape
+    is unmeasured. A subclass of ``LedgerValuationError`` with the unchanged message.
+    ``change_shape`` and ``position_shape`` are ``ROW_FIELD_SHAPE_WORDS`` words for the
+    refusing row; ``siblings`` is the per-type count of every row on the same instrument,
+    keyed by ``ROW_SIBLING_TYPES``. Closed words and non-negative ints only."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        change_shape: str,
+        position_shape: str,
+        siblings: Mapping[str, int],
+    ) -> None:
+        super().__init__(message)
+        self.change_shape = change_shape
+        self.position_shape = position_shape
+        self.siblings = dict(siblings)
+
+
+class OptionExpiryRowError(LedgerValuationError):
+    """Every D-09 ``expiry`` refusal in :func:`_expiry_close`: a nonzero change, a nonzero
+    position, or a change or position that is not numeric. A subclass of
+    ``LedgerValuationError`` with the unchanged message; the attributes are those of
+    :class:`OptionExerciseRowError`. Closed words and non-negative ints only."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        change_shape: str,
+        position_shape: str,
+        siblings: Mapping[str, int],
+    ) -> None:
+        super().__init__(message)
+        self.change_shape = change_shape
+        self.position_shape = position_shape
+        self.siblings = dict(siblings)
+
+
+def _row_field_shape(row: Mapping[str, Any], field: str) -> str:
+    """The closed shape word of one raw row field, for a refusal's attributes. NEVER raises.
+    ``absent`` is a missing key, ``None`` or a blank string (the reading ``_expiry_close``
+    already applies to ``position``); ``non-numeric`` is what ``float()`` refuses."""
+    value = row.get(field)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return ROW_FIELD_ABSENT
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return ROW_FIELD_NON_NUMERIC
+    return ROW_FIELD_ZERO if number == 0.0 else ROW_FIELD_NONZERO
+
+
+def _same_instrument_census(
+    rows: Sequence[Mapping[str, Any]], instrument: str
+) -> dict[str, int]:
+    """Count every row whose ``instrument_name`` equals ``instrument`` by ``type`` (any type off
+    ``ROW_SIBLING_TYPES`` counts as ``other``). Every key is always present. Computed only
+    when refusing."""
+    census = {key: 0 for key in ROW_SIBLING_TYPES}
+    for r in rows:
+        if str(r.get("instrument_name", "")) != instrument:
+            continue
+        row_type = str(r.get("type", ""))
+        census[row_type if row_type in ROW_SIBLING_KEYS else "other"] += 1
+    return census
+
+
 def _coerce_float(value: Any, *, field: str, row: Mapping[str, Any]) -> float:
     """Coerce an untrusted transaction-log numeric field to ``float``, raising
     ``LedgerValuationError`` (permanent, structural) — NOT a bare
@@ -2392,27 +2462,57 @@ assert not (_OPTION_BOOK_CLOSE_TYPES & CASH_BEARING_TYPES), (
 _OPTION_EXERCISE_TYPE: str = "exercise"
 
 
-def _expiry_close(row: Mapping[str, Any]) -> float:
+def _expiry_refusal(
+    message: str, row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> OptionExpiryRowError:
+    """The ``OptionExpiryRowError`` for a refusing ``expiry`` row: the unchanged ``message`` and
+    the closed shape of the row's change and position plus the same-instrument type census over
+    ``rows``. Built only when refusing."""
+    return OptionExpiryRowError(
+        message,
+        change_shape=_row_field_shape(row, "change"),
+        position_shape=_row_field_shape(row, "position"),
+        siblings=_same_instrument_census(rows, str(row.get("instrument_name", ""))),
+    )
+
+
+def _expiry_close(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> float:
     """The post-event position of a D-09 ``expiry`` row: always 0.0 (an expired
     option is no longer held). Fails closed on the shapes the documentation does
     not describe: a nonzero ``change`` (the documented OTM expiry carries no
     cash) or a present, nonzero ``position`` (the option did not close). An
     absent or null ``position`` is accepted, because whether Deribit's expiry row
-    carries one is unmeasured and the close does not depend on it."""
-    change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    carries one is unmeasured and the close does not depend on it.
+
+    Every refusal raises :class:`OptionExpiryRowError` (a ``LedgerValuationError``) with the
+    unchanged message, including the two non-numeric paths ``_coerce_float`` refuses: those
+    keep its exact text and are re-raised as the subclass, chained. ``rows`` is the replay's
+    full row list, read only for the refusal's same-instrument census."""
+    try:
+        change = _coerce_float(row.get("change", 0.0) or 0.0, field="change", row=row)
+    except LedgerValuationError as e:
+        raise _expiry_refusal(str(e), row, rows) from e
     if change != 0.0:
-        raise LedgerValuationError(
+        raise _expiry_refusal(
             f"option Deribit row id={row.get('id')!r}: expiry row carries nonzero "
             "cash — the documented out-of-the-money expiry is zero-cash, so this "
-            "shape is unobserved; refusing to guess (D-09)"
+            "shape is unobserved; refusing to guess (D-09)",
+            row,
+            rows,
         )
     raw_pos = row.get("position")
     if raw_pos is not None and not (isinstance(raw_pos, str) and not raw_pos.strip()):
-        if _coerce_float(raw_pos, field="position", row=row) != 0.0:
-            raise LedgerValuationError(
+        try:
+            position = _coerce_float(raw_pos, field="position", row=row)
+        except LedgerValuationError as e:
+            raise _expiry_refusal(str(e), row, rows) from e
+        if position != 0.0:
+            raise _expiry_refusal(
                 f"option Deribit row id={row.get('id')!r}: expiry row carries a "
                 "nonzero position — an expired option is no longer held, so this "
-                "shape is unobserved; refusing to guess (D-09)"
+                "shape is unobserved; refusing to guess (D-09)",
+                row,
+                rows,
             )
     return 0.0
 
@@ -2469,11 +2569,14 @@ def replay_option_positions(
             # expiry is logged as `exercise`, and no census has measured its row
             # shape. A zero-change one passes both cash twins, so without this it
             # would leave the long open in the book. Named, never guessed.
-            raise LedgerValuationError(
+            raise OptionExerciseRowError(
                 f"option Deribit row id={row.get('id')!r} type='exercise': the "
                 "exercise row shape is unmeasured (no census), so the smoothed "
                 "option book cannot tell whether it closes the position; refusing "
-                "to guess (D-09)"
+                "to guess (D-09)",
+                change_shape=_row_field_shape(row, "change"),
+                position_shape=_row_field_shape(row, "position"),
+                siblings=_same_instrument_census(rows, instrument),
             )
         per_instr.setdefault(instrument, []).append(row)
         # WR-03: UPPERCASE like every other currency read site in this module —
@@ -2500,7 +2603,7 @@ def replay_option_positions(
         positions: dict[str, float] = {}
         for r in ordered:
             if str(r.get("type", "")) in _OPTION_BOOK_CLOSE_TYPES:
-                positions[_row_utc_day(r.get("timestamp"))] = _expiry_close(r)
+                positions[_row_utc_day(r.get("timestamp"))] = _expiry_close(r, rows)
                 continue
             raw_pos = r.get("position", _MISSING)
             if raw_pos is _MISSING or raw_pos is None or (

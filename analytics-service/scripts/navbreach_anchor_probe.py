@@ -103,6 +103,8 @@ from services.deribit_txn import (
     PNL_BASIS_MARK_TO_MARKET,
     PNL_BASIS_SMOOTHED_MTM,
     LedgerValuationError,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
     OptionMarkHoleError,
     OptionRowFieldMissingError,
 )
@@ -164,6 +166,8 @@ LEDGER_ERROR_CLASSES: frozenset[str] = frozenset(
         *_BUILD_ERRORS,
         OptionRowFieldMissingError,
         OptionMarkHoleError,
+        OptionExerciseRowError,
+        OptionExpiryRowError,
     )
 )
 LEDGER_ERROR_FIELDS: frozenset[str] = frozenset(

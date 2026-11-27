@@ -141,6 +141,8 @@ from services.deribit_txn import (
     PNL_BASIS_SMOOTHED_MTM,
     ROW_FIELD_SHAPE_WORDS,
     ROW_SIBLING_KEYS,
+    OptionExerciseRowError,
+    OptionExpiryRowError,
     OptionMarkHoleError,
 )
 from services.nav_twr import PNL_DOM_RATIO, NavReconstructionError
@@ -411,6 +413,17 @@ def _refusal_shape(exc: BaseException) -> Any:
             "vs_retention": getattr(exc, "vs_retention", None),
         }
         return hole if _is_refusal_shape(hole) else UNREADABLE
+    if isinstance(exc, (OptionExerciseRowError, OptionExpiryRowError)):
+        siblings = getattr(exc, "siblings", None)
+        row = {
+            "kind": "exercise" if isinstance(exc, OptionExerciseRowError) else "expiry",
+            "change": getattr(exc, "change_shape", None),
+            "position": getattr(exc, "position_shape", None),
+            "siblings": siblings,
+        }
+        if not (_is_refusal_shape(row) and isinstance(siblings, Mapping)):
+            return UNREADABLE
+        return {**row, "siblings": dict(siblings)}
     return None
 
 

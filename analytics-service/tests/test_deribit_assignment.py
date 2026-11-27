@@ -1183,3 +1183,89 @@ def test_d09_both_twins_agree_on_an_expiry_row(
     assert twin([opening, quiet]) == alone, twin_name
     with pytest.raises(LedgerValuationError, match="unknown Deribit transaction-log type 'expiry'"):
         twin([opening, dict(quiet, change=0.002)])
+
+
+# ---------------------------------------------------------------------------
+# Phase 252 plan 07 (gap G252-PROBE-M3): each D-09 refusal raises its own subclass of
+# LedgerValuationError and carries a CLOSED row-shape census. The refusals themselves are
+# unchanged (the two D-09 tests above stay byte-identical). If these go red a PROD probe
+# reading can no longer tell an unmeasured exercise or expiry row from a retention hole,
+# or an attribute could carry text it must not.
+# ---------------------------------------------------------------------------
+
+from services.deribit_txn import (  # noqa: E402 - appended after the plan-07 comment block
+    OptionExerciseRowError,
+    OptionExpiryRowError,
+)
+
+_NO_SIBLINGS = {
+    "trade": 0, "delivery": 0, "assignment": 0, "expiry": 0, "exercise": 0, "other": 0,
+}
+
+
+def _long_opening() -> dict[str, Any]:
+    return _opt_row(instrument=OTM_PUT, day="2026-01-15", change=-0.04, position=1.0, id=1)
+
+
+def test_d09_exercise_refusal_is_its_own_class_with_the_same_instrument_census() -> None:
+    """The exercise row on the refused instrument is counted with its trade; a trade on ANOTHER
+    instrument is not (the census is per instrument, not per ledger)."""
+    other = _opt_row(instrument=LATER_PUT, day="2026-01-20", change=0.01, position=-1.0, id=3)
+    with pytest.raises(OptionExerciseRowError) as caught:
+        replay_option_positions([_long_opening(), _otm_expiry(type="exercise"), other])
+    exc = caught.value
+    assert isinstance(exc, LedgerValuationError)
+    assert not isinstance(exc, OptionRowFieldMissingError)
+    assert (exc.change_shape, exc.position_shape) == ("zero", "absent")
+    assert exc.siblings == {**_NO_SIBLINGS, "trade": 1, "exercise": 1}
+
+
+@pytest.mark.parametrize(
+    "overrides,change,position",
+    [
+        ({"position": -1.0}, "zero", "nonzero"),
+        ({"change": 0.002}, "nonzero", "absent"),
+    ],
+    ids=["nonzero_position", "nonzero_change"],
+)
+def test_d09_expiry_refusals_are_their_own_class_with_the_row_shape(
+    overrides: dict[str, Any], change: str, position: str
+) -> None:
+    with pytest.raises(OptionExpiryRowError) as caught:
+        replay_option_positions([_long_opening(), _otm_expiry(**overrides)])
+    exc = caught.value
+    assert isinstance(exc, LedgerValuationError)
+    assert not isinstance(exc, OptionRowFieldMissingError)
+    assert (exc.change_shape, exc.position_shape) == (change, position)
+    assert exc.siblings == {**_NO_SIBLINGS, "trade": 1, "expiry": 1}
+
+
+def test_d09_non_numeric_expiry_position_keeps_the_coerce_float_text_and_the_subclass() -> None:
+    """The non-numeric path inside ``_expiry_close`` is the one most easily left raising the base
+    class. It must raise the subclass AND keep the exact text ``_coerce_float`` writes."""
+    with pytest.raises(OptionExpiryRowError) as caught:
+        replay_option_positions([_long_opening(), _otm_expiry(position="abc")])
+    exc = caught.value
+    assert str(exc) == "Deribit row id=2 type='expiry' has a non-numeric position 'abc'"
+    assert exc.args == (str(exc),)
+    assert (exc.change_shape, exc.position_shape) == ("zero", "non-numeric")
+
+
+def test_d09_non_numeric_expiry_change_keeps_the_coerce_float_text_and_the_subclass() -> None:
+    with pytest.raises(OptionExpiryRowError) as caught:
+        replay_option_positions([_long_opening(), _otm_expiry(change="abc")])
+    exc = caught.value
+    assert str(exc) == "Deribit row id=2 type='expiry' has a non-numeric change 'abc'"
+    assert (exc.change_shape, exc.position_shape) == ("non-numeric", "absent")
+
+
+def test_d09_a_row_of_an_unlisted_type_on_the_instrument_is_counted_as_other() -> None:
+    settlement = {
+        "type": "settlement", "instrument_name": OTM_PUT, "currency": "BTC",
+        "change": 0.0, "timestamp": _mk_ms("2026-01-16", 8), "id": 9,
+    }
+    with pytest.raises(OptionExpiryRowError) as caught:
+        replay_option_positions(
+            [_long_opening(), settlement, _otm_expiry(position=-1.0)]
+        )
+    assert caught.value.siblings == {**_NO_SIBLINGS, "trade": 1, "expiry": 1, "other": 1}
