@@ -32,6 +32,14 @@
  * `src/__tests__/gitleaks-allowlist.test.ts`. The repo's workflow-wiring tests are
  * deliberately self-contained: a shared helper module couples pins that must be able
  * to fail independently.
+ *
+ * ⛔ CORRECTED 2026-11-27 (Phase 258 REDUMPDIRECT) — the text above is kept as lineage.
+ * `redump-pr` became `redump-push`, which pushes one bot commit STRAIGHT TO main: there is
+ * no bot branch, no PR and no human step. The one push now lives in the script's frozen
+ * PUSH_ARGV, so this file pins it by importing PUSH_ARGV and by reading the script text
+ * (the production region's one quoted push literal and one spread, and the token being
+ * taken out of process.env first in main()), while the workflow pins say that no git push
+ * and no gh pr line remain. The job's permissions are {contents: write} alone.
  */
 import { describe, expect, it } from "vitest";
 import { existsSync, readFileSync } from "node:fs";
@@ -39,8 +47,8 @@ import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
-  BOT_BRANCH,
   GITLEAKS_VERSION,
+  PUSH_ARGV,
   SECRET_SCAN_PATTERN,
 } from "../../scripts/baseline-redump.mjs";
 
@@ -53,12 +61,13 @@ const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
 const BASELINE_MD = read(BASELINE_MD_PATH);
+const SCRIPT_TEXT = read(SCRIPT);
 
 const DIVERGENCE_JOB = "prod-credential-divergence-verdict";
 const DUMP_JOB = "redump-dump";
-const PR_JOB = "redump-pr";
+const PUSH_JOB = "redump-push";
 const APPLY_JOB = "apply";
-const REDUMP_JOBS = [DUMP_JOB, PR_JOB] as const;
+const REDUMP_JOBS = [DUMP_JOB, PUSH_JOB] as const;
 
 // ---------------------------------------------------------------------------
 // Copied helpers (see the header). Every predicate takes TEXT, so it can run on a mutant.
@@ -213,7 +222,7 @@ function jobKeys(text: string): string[] {
 
 function jobOrderHolds(text: string): boolean {
   const keys = jobKeys(text);
-  const at = [DIVERGENCE_JOB, DUMP_JOB, PR_JOB, APPLY_JOB].map((k) =>
+  const at = [DIVERGENCE_JOB, DUMP_JOB, PUSH_JOB, APPLY_JOB].map((k) =>
     keys.indexOf(k),
   );
   if (at.some((i) => i < 0)) return false;
@@ -236,16 +245,16 @@ function jobKeyLine(text: string, job: string, key: string): string {
 const DUMP_NEEDS = "needs: [apply]";
 const DUMP_IF =
   "if: needs.apply.result == 'success' && github.ref == 'refs/heads/main'";
-const PR_NEEDS = "needs: [redump-dump]";
-const PR_IF =
+const PUSH_NEEDS = "needs: [redump-dump]";
+const PUSH_IF =
   "if: needs.redump-dump.result == 'success' && needs.redump-dump.outputs.changed == 'true' && github.ref == 'refs/heads/main'";
 
 function gatesHold(text: string): boolean {
   return (
     jobKeyLine(text, DUMP_JOB, "needs") === DUMP_NEEDS &&
     jobKeyLine(text, DUMP_JOB, "if") === DUMP_IF &&
-    jobKeyLine(text, PR_JOB, "needs") === PR_NEEDS &&
-    jobKeyLine(text, PR_JOB, "if") === PR_IF
+    jobKeyLine(text, PUSH_JOB, "needs") === PUSH_NEEDS &&
+    jobKeyLine(text, PUSH_JOB, "if") === PUSH_IF
   );
 }
 
@@ -260,10 +269,10 @@ function environmentsHold(text: string): boolean {
   const dump = environmentLines(text, DUMP_JOB);
   return (
     jobBlock(text, DUMP_JOB) !== "" &&
-    jobBlock(text, PR_JOB) !== "" &&
+    jobBlock(text, PUSH_JOB) !== "" &&
     dump.length === 1 &&
     dump[0] === "    environment: Production" &&
-    environmentLines(text, PR_JOB).length === 0
+    environmentLines(text, PUSH_JOB).length === 0
   );
 }
 
@@ -281,7 +290,7 @@ function jobPermissions(
 }
 
 const DUMP_PERMISSIONS = { contents: "read", packages: "read" };
-const PR_PERMISSIONS = { contents: "write", "pull-requests": "write" };
+const PUSH_PERMISSIONS = { contents: "write" };
 
 function sameMap(
   a: Record<string, string> | null,
@@ -296,7 +305,7 @@ function sameMap(
 function permissionsHold(text: string): boolean {
   return (
     sameMap(jobPermissions(text, DUMP_JOB), DUMP_PERMISSIONS) &&
-    sameMap(jobPermissions(text, PR_JOB), PR_PERMISSIONS)
+    sameMap(jobPermissions(text, PUSH_JOB), PUSH_PERMISSIONS)
   );
 }
 
@@ -307,6 +316,9 @@ function readsCredentialContext(line: string): boolean {
   }
   return false;
 }
+
+/** The one live line that hands the job token to the `--compose-and-push` step (10-space step env child). */
+const TOKEN_LINE = "          GH_TOKEN: ${{ github.token }}";
 
 /** The exact shape of a step-level `env:` child carrying one secret or var. */
 const STEP_ENV_CREDENTIAL_RE =
@@ -320,8 +332,8 @@ const STEP_ENV_CREDENTIAL_RE =
  * would hand the PROD credential to every step, including the third-party actions; a
  * `with:` would hand it to that action; a `run:` body would print it into the script.
  *
- * `redump-pr`: no live line reads `secrets`/`vars` or names `SUPABASE_`, and the job
- * token appears on exactly ONE live line, the push step's `GH_TOKEN`.
+ * `redump-push`: no live line reads `secrets`/`vars` or names `SUPABASE_`, and the job
+ * token appears on exactly ONE live line, the `--compose-and-push` step's `GH_TOKEN`.
  */
 function credentialOffenders(text: string): string[] {
   const out: string[] = [];
@@ -352,19 +364,23 @@ function credentialOffenders(text: string): string[] {
       out.push(`${DUMP_JOB}: reads NO credential at all — the placement scan proved nothing`);
     }
   }
-  const pr = jobBlock(text, PR_JOB);
+  const pr = jobBlock(text, PUSH_JOB);
   if (pr === "") {
-    out.push(`${PR_JOB}: JOB IS MISSING (the scan over it proved nothing)`);
+    out.push(`${PUSH_JOB}: JOB IS MISSING (the scan over it proved nothing)`);
   } else {
     for (const l of liveLines(pr)) {
-      if (readsCredentialContext(l)) out.push(`${PR_JOB}: reads a credential: ${l.trim()}`);
-      if (l.includes("SUPABASE_")) out.push(`${PR_JOB}: names SUPABASE_: ${l.trim()}`);
+      if (readsCredentialContext(l)) out.push(`${PUSH_JOB}: reads a credential: ${l.trim()}`);
+      if (l.includes("SUPABASE_")) out.push(`${PUSH_JOB}: names SUPABASE_: ${l.trim()}`);
     }
     const token = liveLines(pr).filter((l) => l.includes("github.token"));
-    if (token.length !== 1 || token[0] !== "          GH_TOKEN: ${{ github.token }}") {
+    if (token.length !== 1 || token[0] !== TOKEN_LINE) {
       out.push(
-        `${PR_JOB}: the job token must appear on exactly one live line, the push step's GH_TOKEN; found ${JSON.stringify(token.map((l) => l.trim()))}`,
+        `${PUSH_JOB}: the job token must appear on exactly one live line, the --compose-and-push step's GH_TOKEN; found ${JSON.stringify(token.map((l) => l.trim()))}`,
       );
+    }
+    const pushStep = stepMatching(pr, /--compose-and-push/);
+    if (pushStep === null || !liveLines(pushStep).includes(TOKEN_LINE)) {
+      out.push(`${PUSH_JOB}: the job token is not inside the one --compose-and-push step`);
     }
   }
   return out;
@@ -492,12 +508,12 @@ const SELF_TEST_PLAIN = "node scripts/baseline-redump.mjs --self-test";
 const SELF_TEST_GITLEAKS = `${SELF_TEST_PLAIN} --with-gitleaks`;
 
 /**
- * `redump-dump` runs the gitleaks form; `redump-pr` runs the plain form and names
+ * `redump-dump` runs the gitleaks form; `redump-push` runs the plain form and names
  * gitleaks on NO live line (its comments legitimately say it runs no scanner binary).
  */
 function selfTestFormsHold(text: string): boolean {
   const dump = jobBlock(text, DUMP_JOB);
-  const pr = jobBlock(text, PR_JOB);
+  const pr = jobBlock(text, PUSH_JOB);
   return (
     dump !== "" &&
     pr !== "" &&
@@ -557,7 +573,7 @@ function checkoutsHold(text: string): boolean {
 // Task 1 — the job shape.
 // ---------------------------------------------------------------------------
 describe("164.9.5-09 — the two redump jobs keep their credential split and their gates", () => {
-  it("job order: divergence verdict < redump-dump < redump-pr < apply, and apply is last", () => {
+  it("job order: divergence verdict < redump-dump < redump-push < apply, and apply is last", () => {
     expect(
       jobOrderHolds(WF),
       `job order in ${WF_PATH} is ${JSON.stringify(jobKeys(WF))}. Both redump jobs must sit ` +
@@ -565,9 +581,9 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
         "Move the job back; do not reorder this test.",
     ).toBe(true);
     calibrate(
-      "moving redump-pr after apply",
+      "moving redump-push after apply",
       (s) => {
-        const b = jobBlock(s, PR_JOB);
+        const b = jobBlock(s, PUSH_JOB);
         return s.replace(b, "") + b.slice(1) + "\n";
       },
       jobOrderHolds,
@@ -580,24 +596,24 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       jobKeyLine(WF, DUMP_JOB, "if"),
       `${DUMP_JOB} must run only after a SUCCEEDED apply, on main. A softer if: re-dumps PROD after a failed apply or from another ref.`,
     ).toBe(DUMP_IF);
-    expect(jobKeyLine(WF, PR_JOB, "needs")).toBe(PR_NEEDS);
+    expect(jobKeyLine(WF, PUSH_JOB, "needs")).toBe(PUSH_NEEDS);
     expect(
-      jobKeyLine(WF, PR_JOB, "if"),
-      `${PR_JOB} must run only on a succeeded dump that CHANGED, on main. Dropping a clause opens a PR on every apply or from another ref.`,
-    ).toBe(PR_IF);
+      jobKeyLine(WF, PUSH_JOB, "if"),
+      `${PUSH_JOB} must run only on a succeeded dump that CHANGED, on main. Dropping a clause opens a PR on every apply or from another ref.`,
+    ).toBe(PUSH_IF);
     calibrate(
       "redump-dump if: without its ref clause",
       (s) => mutateInJob(s, DUMP_JOB, " && github.ref == 'refs/heads/main'", ""),
       gatesHold,
     );
     calibrate(
-      "redump-pr if: without its ref clause",
-      (s) => mutateInJob(s, PR_JOB, " && github.ref == 'refs/heads/main'", ""),
+      "redump-push if: without its ref clause",
+      (s) => mutateInJob(s, PUSH_JOB, " && github.ref == 'refs/heads/main'", ""),
       gatesHold,
     );
     calibrate(
-      "redump-pr if: without its changed clause",
-      (s) => mutateInJob(s, PR_JOB, " && needs.redump-dump.outputs.changed == 'true'", ""),
+      "redump-push if: without its changed clause",
+      (s) => mutateInJob(s, PUSH_JOB, " && needs.redump-dump.outputs.changed == 'true'", ""),
       gatesHold,
     );
     calibrate(
@@ -607,12 +623,12 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
     );
   });
 
-  it("redump-dump runs in environment Production and redump-pr in none (D-03, D-21)", () => {
+  it("redump-dump runs in environment Production and redump-push in none (D-03, D-21)", () => {
     expect(environmentLines(WF, DUMP_JOB)).toEqual(["    environment: Production"]);
-    expect(jobBlock(WF, PR_JOB), `${PR_JOB} is missing from ${WF_PATH}`).not.toBe("");
+    expect(jobBlock(WF, PUSH_JOB), `${PUSH_JOB} is missing from ${WF_PATH}`).not.toBe("");
     expect(
-      environmentLines(WF, PR_JOB),
-      `${PR_JOB} holds the WRITE token; it must not also be granted the Production environment's secrets.`,
+      environmentLines(WF, PUSH_JOB),
+      `${PUSH_JOB} holds the WRITE token; it must not also be granted the Production environment's secrets.`,
     ).toEqual([]);
     calibrate(
       "redump-dump without its environment",
@@ -620,34 +636,39 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       environmentsHold,
     );
     calibrate(
-      "redump-pr given the Production environment",
-      (s) => mutateInJob(s, PR_JOB, "    timeout-minutes: 15\n", "    timeout-minutes: 15\n    environment: Production\n"),
+      "redump-push given the Production environment",
+      (s) => mutateInJob(s, PUSH_JOB, "    timeout-minutes: 15\n", "    timeout-minutes: 15\n    environment: Production\n"),
       environmentsHold,
     );
   });
 
-  it("permissions are exactly {contents: read, packages: read} and {contents: write, pull-requests: write} (D-05)", () => {
+  it("permissions are exactly {contents: read, packages: read} and {contents: write} (D-05, D-21)", () => {
     expect(
       jobPermissions(WF, DUMP_JOB),
       `${DUMP_JOB} holds the PROD credential, so its token must stay read-only.`,
     ).toEqual(DUMP_PERMISSIONS);
     expect(
-      jobPermissions(WF, PR_JOB),
-      `${PR_JOB} gets exactly what pushing the bot branch and opening its PR needs. No actions: write (D-12).`,
-    ).toEqual(PR_PERMISSIONS);
+      jobPermissions(WF, PUSH_JOB),
+      `${PUSH_JOB} gets exactly what pushing one bot commit to main needs: contents: write. No pull-requests scope, since no PR is opened, and no actions: write.`,
+    ).toEqual(PUSH_PERMISSIONS);
     calibrate(
       "actions: write added to redump-dump",
       (s) => mutateInJob(s, DUMP_JOB, "      packages: read\n", "      packages: read\n      actions: write\n"),
       permissionsHold,
     );
     calibrate(
-      "actions: write added to redump-pr",
-      (s) => mutateInJob(s, PR_JOB, "      pull-requests: write\n", "      pull-requests: write\n      actions: write\n"),
+      "actions: write added to redump-push",
+      (s) => mutateInJob(s, PUSH_JOB, "      contents: write\n", "      contents: write\n      actions: write\n"),
+      permissionsHold,
+    );
+    calibrate(
+      "pull-requests: write re-added to redump-push",
+      (s) => mutateInJob(s, PUSH_JOB, "      contents: write\n", "      contents: write\n      pull-requests: write\n"),
       permissionsHold,
     );
   });
 
-  it("credentials: step-level env: only in redump-dump; none in redump-pr but its one GH_TOKEN (D-03, D-05)", () => {
+  it("credentials: step-level env: only in redump-dump; none in redump-push but its one GH_TOKEN (D-03, D-05)", () => {
     expect(
       credentialOffenders(WF),
       "A PROD credential outside a step-level env:, or any credential in the write-token job, " +
@@ -655,11 +676,11 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
     ).toEqual([]);
     const ok = (s: string) => credentialOffenders(s).length === 0;
     calibrate(
-      "a PROD secret seeded into redump-pr",
+      "a PROD secret seeded into redump-push",
       (s) =>
         mutateInJob(
           s,
-          PR_JOB,
+          PUSH_JOB,
           "          GH_TOKEN: ${{ github.token }}\n",
           "          GH_TOKEN: ${{ github.token }}\n          SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}\n",
         ),
@@ -687,15 +708,16 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
         ),
       ok,
     );
+    const SELF_TEST_RUN = "        run: node scripts/baseline-redump.mjs --self-test\n";
+    const TOKEN_ENV = "        env:\n          GH_TOKEN: ${{ github.token }}\n";
     calibrate(
-      "the job token exposed to the compose step too",
-      (s) =>
-        mutateInJob(
-          s,
-          PR_JOB,
-          "        id: compose\n",
-          "        id: compose\n        env:\n          GH_TOKEN: ${{ github.token }}\n",
-        ),
+      "the job token exposed to the self-test step too (two token lines)",
+      (s) => mutateInJob(s, PUSH_JOB, SELF_TEST_RUN, `${TOKEN_ENV}${SELF_TEST_RUN}`),
+      ok,
+    );
+    calibrate(
+      "the job token moved from the --compose-and-push step to the self-test step (one line, wrong step)",
+      (s) => mutateInJob(mutateInJob(s, PUSH_JOB, TOKEN_ENV, ""), PUSH_JOB, SELF_TEST_RUN, `${TOKEN_ENV}${SELF_TEST_RUN}`),
       ok,
     );
   });
@@ -713,8 +735,8 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       ok,
     );
     calibrate(
-      "an expression seeded into redump-pr's flow-scalar compose line",
-      (s) => mutateInJob(s, PR_JOB, '--in "${RUNNER_TEMP}/redump-in"', '--in "${{ runner.temp }}/redump-in"'),
+      "an expression seeded into redump-push's flow-scalar --compose-and-push line",
+      (s) => mutateInJob(s, PUSH_JOB, '--in "${RUNNER_TEMP}/redump-in"', '--in "${{ runner.temp }}/redump-in"'),
       ok,
     );
     calibrate(
@@ -729,8 +751,8 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       ok,
     );
     calibrate(
-      "redump-pr deleted (an absent job is an offender, not a clean scan)",
-      (s) => s.replace(jobBlock(s, PR_JOB), "\n"),
+      "redump-push deleted (an absent job is an offender, not a clean scan)",
+      (s) => s.replace(jobBlock(s, PUSH_JOB), "\n"),
       ok,
     );
   });
@@ -782,11 +804,11 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
     );
   });
 
-  it("redump-dump runs the gitleaks self-test; redump-pr the plain one, with no gitleaks on a live line", () => {
+  it("redump-dump runs the gitleaks self-test; redump-push the plain one, with no gitleaks on a live line", () => {
     expect(
       selfTestFormsHold(WF),
-      `${DUMP_JOB} must run \`${SELF_TEST_GITLEAKS}\` and ${PR_JOB} \`${SELF_TEST_PLAIN}\`. ` +
-        `${PR_JOB} installs no scanner binary, so gitleaks on any of its live lines is a regression.`,
+      `${DUMP_JOB} must run \`${SELF_TEST_GITLEAKS}\` and ${PUSH_JOB} \`${SELF_TEST_PLAIN}\`. ` +
+        `${PUSH_JOB} installs no scanner binary, so gitleaks on any of its live lines is a regression.`,
     ).toBe(true);
     calibrate(
       "redump-dump self-test without --with-gitleaks",
@@ -794,8 +816,8 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       selfTestFormsHold,
     );
     calibrate(
-      "redump-pr self-test with --with-gitleaks",
-      (s) => mutateInJob(s, PR_JOB, `run: ${SELF_TEST_PLAIN}\n`, `run: ${SELF_TEST_GITLEAKS}\n`),
+      "redump-push self-test with --with-gitleaks",
+      (s) => mutateInJob(s, PUSH_JOB, `run: ${SELF_TEST_PLAIN}\n`, `run: ${SELF_TEST_GITLEAKS}\n`),
       selfTestFormsHold,
     );
   });
@@ -852,8 +874,8 @@ describe("164.9.5-09 — the two redump jobs keep their credential split and the
       checkoutsHold,
     );
     calibrate(
-      "persist-credentials removed from redump-pr's checkout",
-      (s) => mutateInJob(s, PR_JOB, "          persist-credentials: false\n", ""),
+      "persist-credentials removed from redump-push's checkout",
+      (s) => mutateInJob(s, PUSH_JOB, "          persist-credentials: false\n", ""),
       checkoutsHold,
     );
   });
@@ -897,24 +919,134 @@ function mergeTokenOffenders(text: string): string[] {
 const GIT_PUSH_RE = /\bgit\b.*\spush(\s|$)/;
 
 /**
- * The file's push lines must be exactly ONE, ending in `origin HEAD:refs/heads/<BOT_BRANCH>`,
- * and every `refs/heads/X` on it (the lease names the ref too) must be the bot branch
- * (D-25). Branch protection is off, so this refspec is the whole bound on `contents: write`.
+ * Phase 258: the workflow makes NO push of its own. The one push lives in the script's
+ * frozen PUSH_ARGV (pinned below by import and by reading the script text), so a live
+ * `git ... push` line anywhere in the workflow is a second, unpinned write to main.
+ * Branch protection is off, so this is the whole bound on `contents: write`.
  */
-function pushOffenders(text: string): string[] {
-  const pushes = liveLines(text).filter((l) => GIT_PUSH_RE.test(l));
-  if (pushes.length !== 1) {
-    return [`expected exactly one git push line, found ${pushes.length}: ${JSON.stringify(pushes.map((l) => l.trim()))}`];
-  }
-  const line = pushes[0].trim();
+function workflowPushOffenders(text: string): string[] {
+  if (jobKeys(text).length === 0) return ["the workflow has no jobs: the scan proved nothing"];
+  return liveLines(text)
+    .filter((l) => GIT_PUSH_RE.test(l))
+    .map((l) => `a live git push line: ${l.trim()}`);
+}
+
+/** The one live command of the push job's last step: a flow-scalar `run:` over the one mode. */
+const PUSH_RUN_LINE =
+  'run: node scripts/baseline-redump.mjs --compose-and-push --in "${RUNNER_TEMP}/redump-in"';
+
+function pushStepHolds(text: string): boolean {
+  const block = jobBlock(text, PUSH_JOB);
+  return (
+    block !== "" &&
+    liveLineCount(block, PUSH_RUN_LINE) === 1 &&
+    liveLines(block).filter((l) => l.includes("--compose-and-push")).length === 1
+  );
+}
+
+/** No live line of the workflow runs `gh pr`: nothing opens, edits, lists or merges a PR (CONTEXT). */
+function ghPrOffenders(text: string): string[] {
+  if (jobKeys(text).length === 0) return ["the workflow has no jobs: the scan proved nothing"];
+  return liveLines(text)
+    .filter((l) => /\bgh\s+pr\b/.test(l))
+    .map((l) => `a live gh pr line: ${l.trim()}`);
+}
+
+const PUSH_FORBIDDEN_FLAGS = [
+  "--force",
+  "--force-with-lease",
+  "--mirror",
+  "--all",
+  "--tags",
+  "--delete",
+  "--prune",
+];
+
+/** The frozen push argv: exactly the seven elements, one push, no plus prefix, no force-like flag. */
+function pushArgvOffenders(argv: readonly string[]): string[] {
   const out: string[] = [];
-  if (!line.endsWith(` origin HEAD:refs/heads/${BOT_BRANCH}`)) {
-    out.push(`the push does not end in origin HEAD:refs/heads/${BOT_BRANCH}: ${line}`);
+  const expected = [
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.helper=!gh auth git-credential",
+    "push",
+    "origin",
+    "HEAD:refs/heads/main",
+  ];
+  if (JSON.stringify(argv) !== JSON.stringify(expected)) out.push("not the seven expected elements");
+  for (const a of argv) {
+    if (a.startsWith("+")) out.push(`a plus-prefixed element: ${a}`);
+    if (PUSH_FORBIDDEN_FLAGS.some((f) => a === f || a.startsWith(`${f}=`))) {
+      out.push(`a force-like flag: ${a}`);
+    }
   }
-  for (const m of line.matchAll(/refs\/heads\/([^\s:"']+)/g)) {
-    if (m[1] !== BOT_BRANCH) out.push(`the push names refs/heads/${m[1]}: ${line}`);
-  }
+  const pushes = argv.filter((a) => a === "push").length;
+  if (pushes !== 1) out.push(`expected one push element, found ${pushes}`);
+  if (argv[argv.length - 1] !== "HEAD:refs/heads/main") out.push("the last element is not HEAD:refs/heads/main");
   return out;
+}
+
+/**
+ * The script's PRODUCTION region: the text before the line starting `// ── self-test`
+ * plus the text from the line starting `// ── CLI` to the end. The self-test makes many
+ * local pushes of its own and is excluded by this split. null unless each marker occurs
+ * exactly once, self-test first.
+ */
+function scriptProductionRegion(text: string): string | null {
+  const selfs = [...text.matchAll(/^\/\/ ── self-test/gm)];
+  const clis = [...text.matchAll(/^\/\/ ── CLI/gm)];
+  if (selfs.length !== 1 || clis.length !== 1) return null;
+  const a = selfs[0].index ?? -1;
+  const b = clis[0].index ?? -1;
+  if (a < 0 || b <= a) return null;
+  return text.slice(0, a) + text.slice(b);
+}
+
+/**
+ * In the production region the push exists once: ONE quoted push literal, and it is the
+ * PUSH_ARGV array element; and the argv constant is spread exactly once (pushToMain's spawn).
+ */
+function scriptPushOffenders(text: string): string[] {
+  const region = scriptProductionRegion(text);
+  if (region === null) {
+    return ["the self-test and CLI section markers must each occur exactly once, self-test first"];
+  }
+  const out: string[] = [];
+  const quoted = [...region.matchAll(/(["'`])push\1/g)];
+  if (quoted.length !== 1) {
+    out.push(`expected exactly one quoted push literal, found ${quoted.length}`);
+  } else {
+    const declStart = region.indexOf("export const PUSH_ARGV = Object.freeze([");
+    const declEnd = declStart < 0 ? -1 : region.indexOf("]);", declStart);
+    const at = quoted[0].index ?? -1;
+    if (declStart < 0 || at < declStart || at > declEnd) {
+      out.push("the one quoted push literal is not inside the PUSH_ARGV declaration");
+    }
+  }
+  const spreads = region.split("..." + "PUSH_ARGV").length - 1;
+  if (spreads !== 1) out.push(`expected the argv constant spread exactly once, found ${spreads}`);
+  return out;
+}
+
+/**
+ * main()'s --compose-and-push branch takes the token out of process.env FIRST: the
+ * statement exists, runs through takePushToken on process.env itself (not a copy), and
+ * precedes both cwdRepoRoot() (which spawns git) and composeAndPush(.
+ */
+function tokenTakenFirst(text: string): boolean {
+  const cliAt = text.search(/^\/\/ ── CLI/m);
+  if (cliAt < 0) return false;
+  const cli = text.slice(cliAt);
+  const from = cli.indexOf('argv[0] === "--compose-and-push"');
+  if (from < 0) return false;
+  const end = cli.indexOf("return 0;", from);
+  if (end < 0) return false;
+  const branch = cli.slice(from, end);
+  const t = branch.indexOf("const token = takePushToken(process.env);");
+  const c = branch.indexOf("cwdRepoRoot()");
+  const p = branch.indexOf("composeAndPush(");
+  return t >= 0 && c >= 0 && p >= 0 && t < c && t < p;
 }
 
 /**
@@ -953,30 +1085,30 @@ function selfTestPassed(r: ReturnType<typeof spawnScript>): boolean {
   return r.error === undefined && r.status === 0 && SELF_TEST_OK_RE.test(r.stdout ?? "");
 }
 
-describe("164.9.5-09 — no merge path, one push, one scan pattern, and a self-test that runs", () => {
+describe("164.9.5-09 / 258 — no merge path, no workflow push, one scan pattern, and a self-test that runs", () => {
   it("the workflow carries no PR merge, auto-merge or approval token on any live line (D-13)", () => {
     expect(
       mergeTokenOffenders(WF),
-      `Nothing in ${WF_PATH} may merge, enable auto-merge on, or approve the re-dump PR. ` +
-        "A human reviews and merges every re-dump; remove the line rather than widening this test.",
+      `Nothing in ${WF_PATH} may merge, enable auto-merge on, or approve a PR. ` +
+        "The re-dump is pushed straight to main and nothing merges, auto-merges or approves anything; remove the line rather than widening this test.",
     ).toEqual([]);
     const ok = (s: string) => mergeTokenOffenders(s).length === 0;
-    const PUSH_BODY_TAIL = '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n';
+    const PUSH_STEP_TAIL = '--compose-and-push --in "${RUNNER_TEMP}/redump-in"\n';
     calibrate(
-      "a PR merge command seeded into redump-pr",
+      "a PR merge command seeded into redump-push",
       (s) =>
-        mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr ${MERGE} -` + `-squash "${BOT_BRANCH}"\n`),
+        mutateInJob(s, PUSH_JOB, PUSH_STEP_TAIL, `${PUSH_STEP_TAIL}          gh pr ${MERGE} -` + `-squash "main"\n`),
       ok,
     );
     calibrate(
-      "an auto-merge flag seeded into redump-pr",
-      (s) => mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr edit -` + `-auto "${BOT_BRANCH}"\n`),
+      "an auto-merge flag seeded into redump-push",
+      (s) => mutateInJob(s, PUSH_JOB, PUSH_STEP_TAIL, `${PUSH_STEP_TAIL}          gh pr edit -` + `-auto "main"\n`),
       ok,
     );
     calibrate(
-      "a review approval seeded into redump-pr",
+      "a review approval seeded into redump-push",
       (s) =>
-        mutateInJob(s, PR_JOB, PUSH_BODY_TAIL, `${PUSH_BODY_TAIL}          gh pr review -` + `-approve "${BOT_BRANCH}"\n`),
+        mutateInJob(s, PUSH_JOB, PUSH_STEP_TAIL, `${PUSH_STEP_TAIL}          gh pr review -` + `-approve "main"\n`),
       ok,
     );
     calibrate(
@@ -984,41 +1116,164 @@ describe("164.9.5-09 — no merge path, one push, one scan pattern, and a self-t
       (s) =>
         mutateInJob(
           s,
-          PR_JOB,
-          PUSH_BODY_TAIL,
-          `${PUSH_BODY_TAIL}      - uses: example/enable-pull-request-auto${MERGE}@v3\n`,
+          PUSH_JOB,
+          PUSH_STEP_TAIL,
+          `${PUSH_STEP_TAIL}      - uses: example/enable-pull-request-auto${MERGE}@v3\n`,
         ),
       ok,
     );
   });
 
-  it(`exactly one live git push in the file, to HEAD:refs/heads/${BOT_BRANCH} (D-25)`, () => {
+  it("the workflow has no live git push and no live gh pr line; its one push step runs the --compose-and-push mode (D-25, CONTEXT A6)", () => {
     expect(
-      pushOffenders(WF),
-      `The only push ${WF_PATH} may make is the bot branch ${BOT_BRANCH}. Branch protection is off, ` +
-        "so a second push target is a write to main with no human in front of it.",
+      workflowPushOffenders(WF),
+      `${WF_PATH} may not push by itself. The one push is the script's frozen PUSH_ARGV, to ` +
+        "HEAD:refs/heads/main. Branch protection is off, so a second push line is an unpinned write to main.",
     ).toEqual([]);
-    const ok = (s: string) => pushOffenders(s).length === 0;
+    expect(
+      ghPrOffenders(WF),
+      `No gh pr call of any kind may remain in ${WF_PATH}: there is no PR to open, edit, list or merge.`,
+    ).toEqual([]);
+    expect(
+      pushStepHolds(WF),
+      `${PUSH_JOB} must hold exactly one live \`${PUSH_RUN_LINE}\` line, and no other line naming --compose-and-push.`,
+    ).toBe(true);
+    const noPush = (s: string) => workflowPushOffenders(s).length === 0;
+    const noGhPr = (s: string) => ghPrOffenders(s).length === 0;
+    const PUSH_STEP_TAIL = '--compose-and-push --in "${RUNNER_TEMP}/redump-in"\n';
     calibrate(
-      "the bot push retargeted to main",
-      (s) => mutateInJob(s, PR_JOB, `origin HEAD:refs/heads/${BOT_BRANCH}`, "origin HEAD:refs/heads/main"),
-      ok,
-    );
-    calibrate(
-      "a second push to main seeded into redump-pr",
+      "a live git push seeded after the push step's run line",
       (s) =>
-        mutateInJob(
-          s,
-          PR_JOB,
-          '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n',
-          '--body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"\n          git push origin HEAD:refs/heads/main\n',
-        ),
-      ok,
+        mutateInJob(s, PUSH_JOB, PUSH_STEP_TAIL, `${PUSH_STEP_TAIL}          git push origin HEAD:refs/heads/main\n`),
+      noPush,
     );
     calibrate(
       "a push seeded into another job (the scan is file-wide)",
       (s) => `${s}          git push origin HEAD:main\n`,
-      ok,
+      noPush,
+    );
+    calibrate(
+      "a gh pr list line seeded into redump-push",
+      (s) => mutateInJob(s, PUSH_JOB, PUSH_STEP_TAIL, `${PUSH_STEP_TAIL}          gh pr list --head main\n`),
+      noGhPr,
+    );
+    calibrate(
+      "a gh pr line appended file-wide",
+      (s) => `${s}          gh pr list --head main\n`,
+      noGhPr,
+    );
+    calibrate(
+      "the mode flag mutated to the retired --compose",
+      (s) => mutateInJob(s, PUSH_JOB, "--compose-and-push --in", "--compose --in"),
+      pushStepHolds,
+    );
+  });
+
+  it("PUSH_ARGV is the one frozen plain push of HEAD:refs/heads/main, and the script issues no other (D-25, CONTEXT A6)", () => {
+    expect(
+      pushArgvOffenders(PUSH_ARGV),
+      "PUSH_ARGV must stay the seven elements ending in HEAD:refs/heads/main, with no plus prefix, force, lease, mirror, all, tags, delete or prune.",
+    ).toEqual([]);
+    expect(Object.isFrozen(PUSH_ARGV), "PUSH_ARGV must be frozen").toBe(true);
+    const argvText = JSON.stringify(PUSH_ARGV);
+    const argvOk = (s: string) => pushArgvOffenders(JSON.parse(s) as string[]).length === 0;
+    const mutateArgv = (f: (a: string[]) => string[]) => (s: string) =>
+      JSON.stringify(f(JSON.parse(s) as string[]));
+    calibrate(
+      "a plus-prefixed refspec",
+      mutateArgv((a) => [...a.slice(0, -1), "+HEAD:refs/heads/main"]),
+      argvOk,
+      argvText,
+    );
+    calibrate(
+      "--force-with-lease inserted",
+      mutateArgv((a) => [...a.slice(0, 5), "--force-with-lease", ...a.slice(5)]),
+      argvOk,
+      argvText,
+    );
+    calibrate(
+      "the refspec retargeted to the retired bot branch",
+      mutateArgv((a) => [...a.slice(0, -1), "HEAD:refs/heads/automation/baseline-redump"]),
+      argvOk,
+      argvText,
+    );
+    calibrate(
+      "a second push element",
+      mutateArgv((a) => [...a, "push"]),
+      argvOk,
+      argvText,
+    );
+
+    expect(
+      scriptPushOffenders(SCRIPT_TEXT),
+      "The script's production region (before the self-test marker and from the CLI marker on) may carry ONE quoted push literal, the PUSH_ARGV element, and ONE spread of the constant, pushToMain's spawn.",
+    ).toEqual([]);
+    const scriptOk = (s: string) => scriptPushOffenders(s).length === 0;
+    calibrate(
+      "a second argv carrying a quoted push seeded at the top of main(argv)",
+      (s) =>
+        s.replace(
+          "function main(argv) {\n",
+          'function main(argv) {\n  const rogue = ["push", "origin", "HEAD:refs/heads/other"];\n',
+        ),
+      scriptOk,
+      SCRIPT_TEXT,
+    );
+    calibrate(
+      "a quoted push seeded just above the self-test marker",
+      (s) => s.replace("\n// ── self-test", '\nconst rogue = ["push"];\n// ── self-test'),
+      scriptOk,
+      SCRIPT_TEXT,
+    );
+    calibrate(
+      "a second spawn of the argv constant seeded in main",
+      (s) =>
+        s.replace(
+          "function main(argv) {\n",
+          'function main(argv) {\n  spawnSync("git", [...' + "PUSH_ARGV]);\n",
+        ),
+      scriptOk,
+      SCRIPT_TEXT,
+    );
+    calibrate(
+      "the self-test marker renamed",
+      (s) => s.replace("\n// ── self-test", "\n// ── selftest"),
+      scriptOk,
+      SCRIPT_TEXT,
+    );
+    // NOT a flip: the self-test makes many local pushes of its own, and the split excludes them.
+    const belowMarker = SCRIPT_TEXT.replace(
+      /(\n\/\/ ── self-test[^\n]*\n)/,
+      '$1g(["push", "-q"]);\n',
+    );
+    expect(belowMarker, "the seeded self-test push produced an identical string").not.toBe(SCRIPT_TEXT);
+    expect(
+      scriptPushOffenders(belowMarker),
+      "a push inside the self-test region is not production code; the region split must exclude it",
+    ).toEqual([]);
+  });
+
+  it("main()'s --compose-and-push branch takes the token out of process.env before anything else (T-258-01)", () => {
+    expect(
+      tokenTakenFirst(SCRIPT_TEXT),
+      "`const token = takePushToken(process.env);` must be the first statement of the --compose-and-push branch, before cwdRepoRoot() and composeAndPush(: " +
+        "every gate child inherits process.env, so a token still in it is handed to code that must never see it.",
+    ).toBe(true);
+    calibrate(
+      "the statement replaced by a plain read that strips nothing",
+      (s) => s.replace("const token = takePushToken(process.env);", "const token = process.env[\"GH_" + "TOKEN\"];"),
+      tokenTakenFirst,
+      SCRIPT_TEXT,
+    );
+    calibrate(
+      "takePushToken given a copy of the env",
+      (s) =>
+        s.replace(
+          "const token = takePushToken(process.env);",
+          "const token = takePushToken({ ...process.env });",
+        ),
+      tokenTakenFirst,
+      SCRIPT_TEXT,
     );
   });
 

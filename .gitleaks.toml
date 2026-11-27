@@ -419,6 +419,7 @@ regexes = ['''0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e''']
 # with gitleaks 8.30.1: exit 0, no finding). Both are RULES, not allowlist entries,
 # and neither widens any allowlist. Measured on 2026-09-26 over this working tree:
 # 0 findings from either rule.
+# ⛔ CORRECTED 2026-11-27 (Phase 258): the re-dump commit is now pushed straight to main of that PUBLIC repository, with no bot branch and no reviewer, so this gate in redump-dump is the last one before main.
 
 # Supabase's current secret-key format, which is not a JWT.
 [[rules]]

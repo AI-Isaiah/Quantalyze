@@ -1215,6 +1215,7 @@ describe("Critical regression guards", () => {
        * `permissions`/`on` children ABOVE `apply`, which is the last job in the file).
        * ⛔ CORRECTED 2026-09-26 (Phase 164.9.5): now 13 lines — the `redump-dump` and
        * `redump-pr` jobs sit ABOVE `apply`, which is still the last job.
+       * ⛔ CORRECTED 2026-11-27 (Phase 258): the second job is now redump-push; a rename leaves the 2-space key count unchanged.
        */
       const ANY_JOB_KEY_RE = /\n {2}[A-Za-z_][\w-]*:/;
       const applyJobBlock = (src: string, applyIdx: number): string => {
