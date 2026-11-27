@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.100.4] - 2026-11-27 — records: Phase 236 FIGUREMATH closed, FIG-05 fleet re-derive passed
+
+### Changed
+- Phase 236 FIGUREMATH verification moves from `human_needed` to `passed` (7/7). Its last open item was FIG-05, the coordinator's PROD fleet re-derive. The other human item, the CHANGELOG naming the moved figures, was already met by v0.133.82.0. `verified_at_sha` is set and `drift_subjects` is kept. ROADMAP, STATE and REQUIREMENTS record the close (FIG-01 to FIG-05 complete). `phase complete 236` ran, and its collateral was corrected by hand: the Progress-table Status prose is restored, STATE's Current Position is kept as it was (phases run in parallel), and the handler's `state.json` resets were reverted, leaving only 236 `complete`.
+- `236-09-SUMMARY.md` gains the FIG-05 run record from the phase branch: the 2026-11-26 first attempt that stopped at the 155.2 freeze precondition with no PROD write, the resume after the written confirmation, the three strategy batches (22 of 22 re-derived, `still_old` 0, number-to-null 0 on every figure), and the allocator gate read after the 2026-11-27 00:40Z cron tick.
+
+### Notes
+- **FIG-05 allocator gate PASSED:** `equity_curve_rows` 6 against a floor of 6, `not_rederived` 0, `guard_alloc` passed on 6 rows. Allocator MWR n=6, changed 3, min 0.999849, max 1.00015, number-to-null 0, null-to-number 0.
+- **Two runbook defects recorded, not fixed in `docs/runbooks/figuremath-fleet-rederive.md`:** the CLI prints a SQL NULL as the literal string `NULL`, so section 6's "an empty cell is null" counts must treat `NULL` as null too. The allocator cron `derive-allocator-key-dailies` runs at 00:40 UTC, not the 05:30 UTC section 4 says.
+- **Caveat, no open owner:** 4 `derive_broker_dailies` jobs end `failed_final` every day (2026-11-25, 11-26, 11-27) with `realized read incomplete (daily_pnl_non_usd_okx)`. That is the named refusal Phase 232 plan 03 (VREAD-06) designed for a non-USD OKX key, and its CONTEXT deferred a conversion path while exposure was nil. Exposure is no longer nil. No ROADMAP phase or `TODOS.md` entry owns a conversion or a retry policy. Not caused by Phase 236.
+- No `TODOS.md` entry was closed by this PR, so none is deleted.
+
 ## [0.133.100.3] - 2026-11-27 — records: Phase 225 plan 21 post-deploy poll cycle PASSED; Phase 225 verification moves to passed
 
 ### Changed

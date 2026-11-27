@@ -5,17 +5,17 @@ milestone_name: TRUTH — data you can trust
 current_phase: 233
 current_phase_name: DERIBITTRUTH
 status: executing
-stopped_at: Records PR: 235 HOLDINGSTRUTH and 241 DEMOCREDS closed (verification passed); 225 and 228 stay human_needed with partial PROD evidence
-last_updated: "2026-11-26T19:24:14.959Z"
-last_activity: 2026-11-26
-last_activity_desc: "Records PR: 235 and 241 closed, verification passed (390px item and Pair A reset done); 225 plan 18 control passed, 228 unchanged-password case seen; 225 and 228 stay human_needed"
-state_head: 917579c368824067a0489ce3ab4cf1c223b9f608
+stopped_at: Records PR: 236 FIGUREMATH closed (verification passed, FIG-05 fleet re-derive PASSED 2026-11-27); 225 and 228 stay human_needed
+last_updated: "2026-11-27T09:29:29.441Z"
+last_activity: 2026-11-27
+last_activity_desc: "Records PR: 236 closed, verification passed (FIG-05 strategy and allocator gates PASSED 2026-11-27); phases run in parallel"
+state_head: 45d7b4e5c701f5f924979b571021000b9550d7bb
 progress:
   total_phases: 23
-  completed_phases: 18
+  completed_phases: 19
   total_plans: 161
   completed_plans: 159
-  percent: 78
+  percent: 83
 ---
 
 ## ⭐ STATE lineage
@@ -146,7 +146,6 @@ silently absorbed by a later phase.
 |-------|--------|-----------|-------------|
 | ~~160~~ | 🟡 **PARTIAL 2026-08-25 21:38Z — arm PROVEN, 1 of 3 surfaces smoked** | **PROD persist smoke (Part A) PASSED.** Founder connected a real OKX read-only key through `ApiKeyManager` at `/strategies/<id>/edit` on production. BOTH confirmations hold: `api_keys` census 32 → 33 with the new row's `attested_venue` EQUAL to its `exchange` (`okx`/`okx` — the 160-02/RANK-03 invariant), and prod request logs show `/api/keys/validate-and-encrypt`, so the write went through the persist arm and not the Phase-156 RPC path. ⚠️ The gate was not merely untested — the arm was DEAD: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`, so every guarded analytics route refused and key-connect was impossible in production (TODOS 0.05, resolved; detection gap 0.04 → Phase 164.1). Evidence in `160-UAT.md`. ⚠️ NOT 32/32: the prescribed test names THREE converted surfaces; only `ApiKeyManager` was smoked. `StrategyForm` is un-smoked (own fetch at `StrategyForm.tsx:161`) and `AllocatorExchangeManager` is un-smoked. ⚠️ CORRECTED 2026-08-26: an earlier note here said it is UNREACHABLE and that no page mounts it. That is FALSE — `profile/page.tsx` populates `exchanges` for allocators, `ProfileTabs` renders `ExchangesTabContent`, and that renders `AllocatorExchangeManager`. The whole branch is `isAllocator`-gated and the 160 QA ran on a MANAGER account, which is almost certainly why it looked unmounted. It is a live surface and 160 can be closed by smoking it with an ALLOCATOR login — it does NOT need mounting, and the component must NOT be deleted. The shared arm is proven, which retires the large risk; per-surface payload risk remains unmeasured. NO LONGER SKIPPED on autonomous re-entry. | `/gsd-verify-work 160` for the remaining surfaces |
 | 252 | 🟡 **SHIPPED v0.133.80.0 (#1351), verification `human_needed`** — code verified 6/6 for the scope of this run (wave 1 named withhold, wave 2 read-only probe tooling); none of the open items is a gap | Four human items from `252-VERIFICATION.md`: (1) on the deployed build, the Quantum Drift owner factsheet, share card and OG image show the withheld headline with its named reason, never the cash-wallet cumulative, CAGR or Calmar (PROD); (2) the founder's copy and tone check on the factsheet, share card, Compare, Discovery, Holdings and the Compare overlay note (a draft owned by this check), plus whether the Monthly Returns heatmap (IN-06) needs a follow-up; (3) the founder-gated run of the wave-2 probe `scripts.deribit_options_smoothed_probe` in the worker against the evidence composite, whose pass is the only input to a later MTM promotion plan; (4) the ship-time PROD census re-take (marker first) pasted into the CHANGELOG. For (4), a PROD reading taken by the orchestrator on 2026-11-25 is recorded in `252-05-SUMMARY.md` (commit `ee599e6c3`, the commit the verifier ran at, which still listed this item open) and quoted in the v0.133.80.0 CHANGELOG entry; whether that counts as the ship-time re-take is left to the coordinator. | `/gsd-verify-work 252` |
-| 236 | 🟡 **SHIPPED v0.133.82.0 (#1354), verification `human_needed`** — 6/7 must-haves verified in code (conventions, pins, censuses, parity oracle, CVaR floor, span rule, quantstats 0.0.86 decision record, runbook, figures-moved list); no code gap | FIG-05 / SC-4: the coordinator's PROD fleet re-derive from `docs/runbooks/figuremath-fleet-rederive.md`, run after 233 DERIBITTRUTH merges and 236 is deployed (the runbook's precondition is 229, 233 and 234 merged), recorded with its section 5 closing read and a clean section 6 number-to-null report, and the 155.2 freeze side confirmed in writing. The second human item, the ship CHANGELOG naming the moved figures, is met by the v0.133.82.0 entry. | `/gsd-verify-work 236` |
 | 230 | 🟡 **SHIPPED v0.133.91.0 (#1358), verification `human_needed`**. Code verified 7/10. The cross-process MT5 terminal lease is deployed 2026-11-26, and migration `20261126140000` was applied to TEST and PROD in `supabase-migrate.yml` run 45807605366 | Items from `230-VERIFICATION.md`: (1) SC-2 / MT5D-02, seven consecutive clean nights, counted from the first 00:40Z derive after BOTH the backfill worker and the API service carry the lease (plan 09, runbook `docs/runbooks/mt5-terminal-lease.md` section 6); (2) plan 09's lane proof of the nightly query; (3) SC-3 / MT5D-03, the coordinator's read-only capture and the clock replay (plan 10, `docs/runbooks/mt5-clock-replay.md` section 10); (4) the post-deploy checks (a) to (d) of the lease runbook section 5. The CI readings at the PR head (run 45804955452) are recorded in the ship record of `230-VERIFICATION.md`; the items stay open for the verifier. | `/gsd-verify-work 230` |
 | 225 | 🟡 **IN PROGRESS 19/21; plan 21 SHIPPED v0.133.95.0 (#1374), verification `human_needed`** | (1) plan 21 Task 3: one post-deploy MT5 poll cycle read showing the three poll reads refuse a terminal session on another broker server (`225-21-SUMMARY.md`); (2) ~~the founder's plan 18 post-deploy positive control~~ PASSED on PROD 2026-11-26 (`225-VERIFICATION.md`); only (1) remains, the poll-cycle read on 2026-11-27 | finish both reads, update `225-VERIFICATION.md`, then `/gsd-verify-work 225` |
 | 228 | 🟡 **SHIPPED v0.133.98.0 (#1377), verification `human_needed`** — CONN-02 and CONN-04 verified in code | (1) a live MT5 reconnect with a changed investor password: the wizard says "updated" and the next sync signs in (the unchanged-password case was seen on PROD 2026-11-26; the changed, mistyped and master cases are open); (2) the connect-step wizard at 320px (`228-VERIFICATION.md`) | `/gsd-verify-work 228` |
@@ -181,11 +180,11 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 
 ## Current Position
 
-Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 235 (HOLDINGSTRUTH) and 241 (DEMOCREDS) closed in the 2026-11-26 records PR; v1.22 phases run in parallel
+Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 236 (FIGUREMATH) closed 2026-11-27 (FIG-05 passed); v1.22 phases run in parallel
 Plan: 7 of 7
 Status: Phases complete; 225 (ONEACCOUNTONCE) closed 2026-11-27 with verification passed (plan 18 control passed 2026-11-26, plan 21 post-deploy poll read passed 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stays human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
-Last activity: 2026-11-26 — records PR: 235 and 241 closed (verification passed), 225 and 228 partial PROD evidence
-Progress: [████████░░] 78%
+Last activity: 2026-11-27 — records PR: 236 closed (verification passed), 225 closed earlier the same day
+Progress: [████████░░] 83%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
 
@@ -1847,7 +1846,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-11-23T18:28:35.274Z
-**Stopped At:** Records PR: 225 closed (verification passed); 228 stays open
+**Stopped At:** Records PR: 236 closed (after 225); 228 stays open
 **Resume File:** None
 
 **Last Date:** 2026-11-14T07:30:26.000Z
