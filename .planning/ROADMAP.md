@@ -905,7 +905,8 @@ Plans:
 
 - ⭐ **FOUNDER DECISION 2026-11-26 (recorded in `252-CONTEXT.md` and `252-VERIFICATION.md`):** the OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld; both stay as they are. This narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Phase 252 stays `human_needed` (the founder still runs the PROD probe).
 - ⭐ **FOUNDER DECISION 2026-11-26 (AskUserQuestion via the coordinator), verbatim answer "Fix it inside 252" (recorded in `252-CONTEXT.md`):** the wave-2 probe read `fail` on PROD (member m3: smoothed build `LedgerValuationError:position`). The cause is fixed inside Phase 252, and 252 stays open until the probe passes. The fix invents no data and does not narrow the MTM span without a separate founder ruling.
-**Plans:** 7/7 plans executed
+- ⭐ **FOUNDER DECISION 2026-11-27 (AskUserQuestion via the coordinator), verbatim "Accept measured shape only (Recommended)"; partial reversal of D-09, recorded in `252-CONTEXT.md`:** a Deribit `exercise` row is accepted only as change 0 with position present and 0, closing the option to 0 that day like `expiry`. Every other exercise shape keeps refusing. Gap plan 252-08 carries the fix.
+**Plans:** 8/8 plans executed
 
 Plans:
 - [x] 252-01-PLAN.md — tracer: one predicate `isOptionsCashWalletBook`, a named withhold cause in the headline verdict, the factsheet read path and the share card name the reason (SC-2 RED fixture)
@@ -915,6 +916,7 @@ Plans:
 - [x] 252-05-PLAN.md — Compare, the completeness census test and cross-language pin, DEF-142.2-07 closed, the single-key follow-up booked
 - [x] 252-06-PLAN.md — wave 2 measurement tooling: the read-only smoothed MTM probe (the founder-gated run and any promotion follow the ship)
 - [x] 252-07-PLAN.md — name which smoothed-only refusal fired (G252-PROBE-M3, gap closure)
+- [x] 252-08-PLAN.md — accept the measured exercise shape (change 0, position 0) as an option close (G252-PROBE-M3, gap closure)
 
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - PROOF-01: each gate goes RED on a neutered copy with its arm named, is restored by cp from a byte backup with cmp exit 0, and goes GREEN; outputs verbatim in the SUMMARY
@@ -967,7 +969,7 @@ Plans:
 | 241. DEMOCREDS | 4/4 | Complete    | 2026-11-26 |
 | 250. BINANCEFILLS | 8/8 | Complete (shipped v0.133.84.0, #1355; verification passed, UAT 4/4; ⛔ corrected 2026-11-26: the switch is on in PROD and stays on by founder ruling, see 250-VERIFICATION) | 2026-11-26 |
 | 251. SYNCSTORE | 2/2 | Complete (shipped v0.133.87.0, #1359; verification passed 6/6, SECURITY 13/13 closed) | 2026-11-26 |
-| 252. DERIBITOPTIONS | 7/7 | Gaps found: the wave-2 probe reads fail (m3 smoothed build refuses on a D-09 exercise row, measured 2026-11-27 after gap plan 07 shipped in v0.133.101.0, #1390); founder decision 2026-11-26 keeps 252 open until the probe passes; accepting the measured exercise shape waits on a founder ruling | - |
+| 252. DERIBITOPTIONS | 8/8 | Human verification pending: the wave-2 probe PASSES on PROD (2026-11-27 18:36Z, 3/3 members, after gap plans 07 and 08, #1390 and #1400); next is the MTM promotion plan; the post-deploy PROD factsheet check and the ship-time census item stay open | - |
 | 253. BINANCECURSOR | 4/4 | Complete (shipped v0.133.93.0, #1367; migration 20261126150000 applied to TEST and PROD in supabase-migrate run 45824919779; re-dump #1369; verification passed after founder rulings 2026-11-26, "Keep it on, fix records" and "Accept both"; `USE_RAW_TRADE_INGESTION` stays on, and PROD has no Binance key) | 2026-11-26 |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
