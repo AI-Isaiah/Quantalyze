@@ -1,19 +1,6 @@
 # Changelog
 
-<<<<<<< HEAD
-## [0.133.109.1] - 2026-11-27 — records: Phase 254 OPENINGDEPOSIT closed (verification passed)
-
-### Changed
-- Phase 254 OPENINGDEPOSIT (v1.23) is closed. Its artifacts come onto `main`: CONTEXT, DISCUSSION-LOG, PLAN, SUMMARY, REVIEW, SECURITY and VERIFICATION. `ROADMAP.md` ticks the phase and its one plan, and its Progress row reads Complete.
-- `STATE.md` keeps its Current Position. The `phase complete` handler moved it to Phase 228, recomputed v1.22's `progress:` block and reset `state.json` statuses; all three were reverted by hand. Only the last-activity lines name 254.
-- `254-VERIFICATION.md` is `passed` (4/4), and `254-SECURITY.md` has 8/8 threats closed. The code shipped in #1407 (v0.133.109.0).
-
-### Notes
-- The discuss step ran autonomously (no founder question was needed). Every decision is recorded in `254-CONTEXT.md`.
-- Records only, no code. No `TODOS.md` entry is closed. The one PROD book's `out_of_window_flow` is expected to clear on its next daily derive. That is not yet measured.
-
-=======
-## [0.133.109.1] - 2026-11-27 — BASELINE: automated re-dump (composed as 0.133.108.2, re-based onto main ccacb376 by hand) after the PROD apply of 588d8869
+## [0.133.109.2] - 2026-11-27 — BASELINE: automated re-dump (composed as 0.133.108.2, re-based onto main 90bde12a by hand) after the PROD apply of 588d8869
 
 ### Changed
 - `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46057037202`, after the PROD apply of merge `588d8869`: sha256 `d2beb328…` → `ab1b1720…`.
@@ -28,7 +15,17 @@
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46057037202` succeeded, and this entry was composed by the `redump-pr` job. Run `46057037202` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
->>>>>>> 3d867efd7 (chore(release): v0.133.108.2 — baseline re-dump after the PROD apply of 588d8869)
+## [0.133.109.1] - 2026-11-27 — records: Phase 254 OPENINGDEPOSIT closed (verification passed)
+
+### Changed
+- Phase 254 OPENINGDEPOSIT (v1.23) is closed. Its artifacts come onto `main`: CONTEXT, DISCUSSION-LOG, PLAN, SUMMARY, REVIEW, SECURITY and VERIFICATION. `ROADMAP.md` ticks the phase and its one plan, and its Progress row reads Complete.
+- `STATE.md` keeps its Current Position. The `phase complete` handler moved it to Phase 228, recomputed v1.22's `progress:` block and reset `state.json` statuses; all three were reverted by hand. Only the last-activity lines name 254.
+- `254-VERIFICATION.md` is `passed` (4/4), and `254-SECURITY.md` has 8/8 threats closed. The code shipped in #1407 (v0.133.109.0).
+
+### Notes
+- The discuss step ran autonomously (no founder question was needed). Every decision is recorded in `254-CONTEXT.md`.
+- Records only, no code. No `TODOS.md` entry is closed. The one PROD book's `out_of_window_flow` is expected to clear on its next daily derive. That is not yet measured.
+
 ## [0.133.109.0] - 2026-11-27 — Phase 254 OPENINGDEPOSIT: a deposit dated the day before a key's first return is its opening deposit on every venue
 
 ### Fixed
