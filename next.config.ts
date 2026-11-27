@@ -107,6 +107,84 @@ function withConfiguredSupabaseOrigin(csp: string): string {
   );
 }
 
+/**
+ * Phase 221 SFH-M2: the ONE definition of a usable Sentry DSN, shared by the
+ * `env` inline and the CSP so they can never disagree. A DSN is usable when it
+ * parses, is http(s), and its host passes `DERIVED_CSP_HOST` (the same checks
+ * the Supabase derivation makes). Returns its parsed URL, or null.
+ */
+function sentryIngestUrl(dsn: string | undefined): URL | null {
+  if (!dsn) return null;
+  let url: URL;
+  try {
+    url = new URL(dsn);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (!DERIVED_CSP_HOST.test(url.hostname)) return null;
+  return url;
+}
+
+/**
+ * The first of `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_DSN` that is USABLE, with its
+ * parsed URL, or null. An unusable explicit value falls through to the next
+ * rather than shadowing it. Reads the env WHEN CALLED.
+ */
+function usableSentryDsn(): { dsn: string; url: URL } | null {
+  for (const dsn of [
+    process.env.NEXT_PUBLIC_SENTRY_DSN,
+    process.env.SENTRY_DSN,
+  ]) {
+    const url = sentryIngestUrl(dsn);
+    if (dsn && url) return { dsn, url };
+  }
+  return null;
+}
+
+/**
+ * Phase 221 SENTRYSCRUB2 / SCRB-02: append the ingest origin of the configured
+ * Sentry DSN to the `connect-src` directive of `csp`, so the browser SDK can
+ * reach Sentry. Added ONLY when a DSN is set (the CONTEXT CSP decision: no DSN,
+ * no client init, no CSP entry); a `tunnel` same-origin relay was rejected as a
+ * new public route. `url.origin` is scheme, host and port only, so the DSN's
+ * public key and project path never reach a response header.
+ *
+ * Follows `withConfiguredSupabaseOrigin` step for step and reads the env WHEN
+ * CALLED, like it. The DSN is the first USABLE of `NEXT_PUBLIC_SENTRY_DSN`,
+ * `SENTRY_DSN` (`usableSentryDsn`), the same pick the `env` block below inlines,
+ * so the CSP admits the origin of the DSN the bundle carries. A real host looks
+ * like `oNNN.ingest.de.sentry.io` for this EU org. Sentry ingest is fetch, so
+ * there is one candidate and no ws twin. With no usable DSN (unset, empty,
+ * unparseable, a scheme other than http/https, a host outside
+ * `DERIVED_CSP_HOST`) it returns `csp` unchanged. It never throws.
+ */
+function withConfiguredSentryOrigin(csp: string): string {
+  const url = usableSentryDsn()?.url;
+  if (!url) return csp;
+
+  const directive = /(^|;)(\s*connect-src\b[^;]*?)(\s*)(?=;|$)/.exec(csp);
+  if (!directive) return csp;
+  const sources = directive[2].trim().split(/\s+/).slice(1);
+
+  const scheme = url.protocol.slice(0, -1);
+  if (sources.some((s) => cspSourceAllows(s, scheme, url.hostname, url.port))) {
+    return csp;
+  }
+
+  const [whole, lead, body, trailing] = directive;
+  const start = directive.index;
+  return (
+    csp.slice(0, start) +
+    lead +
+    body +
+    " " +
+    url.origin +
+    trailing +
+    csp.slice(start + whole.length)
+  );
+}
+
 
 /**
  * Refuse a Vercel Production build whose `NEXT_PUBLIC_APP_URL` is not a
@@ -151,10 +229,40 @@ export function assertCanonicalAppUrl(
 
 assertCanonicalAppUrl(process.env.NEXT_PUBLIC_APP_URL, process.env.VERCEL_ENV);
 
+// Evaluated once, at config load (build time). Never prints the DSN or its key.
+const sentryBuildDsn = usableSentryDsn()?.dsn;
+if (
+  !sentryBuildDsn &&
+  (process.env.NEXT_PUBLIC_SENTRY_DSN || process.env.SENTRY_DSN)
+) {
+  console.warn(
+    "[next.config] a Sentry DSN is set but unusable for the browser (not an http(s) DSN with a [a-z0-9.-] host); browser reporting is off",
+  );
+}
+
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/api/factsheet/\\[id\\]/pdf": CHROMIUM_BIN,
     "/api/factsheet/\\[id\\]/tearsheet.pdf": CHROMIUM_BIN,
+  },
+  // Phase 221 SENTRYSCRUB2 / SCRB-02 (CONTEXT [DSN source]): inline the Sentry DSN
+  // and the build's environment name for browser code. Evaluated once, at
+  // config load, which is build time. Config `env` wins over process env, so the
+  // precedence (an explicit NEXT_PUBLIC_SENTRY_DSN over SENTRY_DSN) lives in the
+  // value. Next skips undefined values, so with no DSN nothing is inlined: no
+  // browser init and no CSP entry. The inlined DSN is public in the browser
+  // bundle by decision (a DSN authorises sending events, never reading them).
+  // The environment is the server init's expression, so the browser and server
+  // events of one deployment carry one name; without it the browser SDK files
+  // every preview event as "production".
+  // SFH-M2: the DSN inlined is the first USABLE one (`usableSentryDsn`), the same
+  // pick the CSP admits, so a DSN the CSP would block never starts a browser init
+  // and an unusable explicit value never shadows a valid SENTRY_DSN.
+  env: {
+    NEXT_PUBLIC_SENTRY_DSN: sentryBuildDsn,
+    NEXT_PUBLIC_SENTRY_ENVIRONMENT: sentryBuildDsn
+      ? (process.env.VERCEL_ENV ?? "development")
+      : undefined,
   },
   async redirects() {
     return [
@@ -327,6 +435,9 @@ const nextConfig: NextConfig = {
             // value with a scheme other than http/https, or a host carrying a
             // character outside [a-z0-9.-] (`;`, `'`, `,`, `*`), is refused,
             // so the env can never inject a directive or derive a wildcard.
+            // Phase 221 (SCRB-02): `headers()` then passes the result through
+            // `withConfiguredSentryOrigin`, which appends the origin of the
+            // configured Sentry DSN to `connect-src` ONLY when a DSN is set.
             // Pinned by csp-connect-src-supabase-origin.contract.test.ts.
             key: "Content-Security-Policy",
             value:
@@ -367,6 +478,9 @@ const nextConfig: NextConfig = {
     // Phase 164.9.4 (D-14): derive the configured Supabase origin into the
     // global CSP at return time, so the literal above stays the string after
     // `value:` and `NEXT_PUBLIC_SUPABASE_URL` is read when headers() is called.
+    // Phase 221 (SCRB-02): the same return-time pass then appends the Sentry
+    // DSN's ingest origin, when a DSN is configured, via
+    // `withConfiguredSentryOrigin`.
     return blocks.map((block) =>
       block.source !== "/(.*)"
         ? block
@@ -374,7 +488,7 @@ const nextConfig: NextConfig = {
             ...block,
             headers: block.headers.map((h) =>
               h.key === "Content-Security-Policy"
-                ? { ...h, value: withConfiguredSupabaseOrigin(h.value) }
+                ? { ...h, value: withConfiguredSentryOrigin(withConfiguredSupabaseOrigin(h.value)) }
                 : h,
             ),
           },

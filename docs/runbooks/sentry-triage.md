@@ -11,7 +11,12 @@ chasing ghosts. This procedure previously lived only in agent memory.
 | Region | **EU** — `https://de.sentry.io` (NOT the global `https://sentry.io`) |
 | API base | `SENTRY_API_BASE` must be `https://de.sentry.io/api/0/organizations` for the EU org |
 | DSN | `SENTRY_DSN` — wired in `src/instrumentation.ts` |
+| Browser DSN | `NEXT_PUBLIC_SENTRY_DSN`, inlined at `next build` by `next.config.ts` from `SENTRY_DSN` (an explicit `NEXT_PUBLIC_SENTRY_DSN` wins) and read by `src/instrumentation-client.ts`. A build that saw no DSN has no browser init and no CSP entry; after setting the variable, redeploy. |
+| Browser environment | `NEXT_PUBLIC_SENTRY_ENVIRONMENT`, the build's `VERCEL_ENV`, else `development`, so preview browser events are not filed under `environment:production`. |
+| Scrub | Both runtimes run `scrubSentryEvent` (`src/lib/sentry-scrub.ts`) as `beforeSend` and `beforeSendTransaction`. The browser init has no Replay, no tracing and no session envelopes, and drops every URL query. URL fragments are not scrubbed (accepted, PKCE-only app). |
 | Auth token | `SENTRY_AUTH_TOKEN` (scope `event:read`) |
+
+⭐ **2026-11-27 (Phase 221 SENTRYSCRUB2):** browser events exist from this phase on (before it the browser had no Sentry client). They are told apart in Sentry by the event's platform and SDK.
 
 **EU-region trap:** the default global host returns HTTP 200 + `{"data": []}`
 for an EU org — a silent empty result, not an error. Any script/query MUST point

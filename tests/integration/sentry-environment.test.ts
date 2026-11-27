@@ -105,7 +105,7 @@ describe("Phase 19 / H-6 — runtime smoke (instrumented register)", () => {
     process.env.VERCEL_ENV = "production";
     process.env.SENTRY_DSN = "https://fake@sentry.example/0";
     const initMock = vi.fn();
-    vi.doMock("@sentry/nextjs", () => ({ init: initMock }));
+    vi.doMock("@sentry/nextjs", () => ({ init: initMock, withStaticSpan: (cb: unknown) => cb }));
     const { register } = await import("../../src/instrumentation");
     await register();
     expect(initMock).toHaveBeenCalledTimes(1);
@@ -117,7 +117,7 @@ describe("Phase 19 / H-6 — runtime smoke (instrumented register)", () => {
     delete process.env.VERCEL_ENV;
     process.env.SENTRY_DSN = "https://fake@sentry.example/0";
     const initMock = vi.fn();
-    vi.doMock("@sentry/nextjs", () => ({ init: initMock }));
+    vi.doMock("@sentry/nextjs", () => ({ init: initMock, withStaticSpan: (cb: unknown) => cb }));
     const { register } = await import("../../src/instrumentation");
     await register();
     expect(initMock).toHaveBeenCalledTimes(1);
