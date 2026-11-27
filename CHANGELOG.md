@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.108.1] - 2026-11-27 — records: Phase 252 wave-2 probe PASSES on PROD after gap plan 08; founder decision 2026-11-27 recorded
+
+### Changed
+- `252-CONTEXT.md` and the ROADMAP 252 section record founder decision 2026-11-27 (AskUserQuestion via the coordinator, verbatim "Accept measured shape only (Recommended)"). It partially reverses D-09: a Deribit option `exercise` row is accepted only with change 0 and position present and 0, and every other shape still refuses.
+- Gap plan 08 is recorded with its PLAN, SUMMARY and REVIEW (0 MEDIUM or above). It shipped as v0.133.107.0 (#1400).
+- `252-VERIFICATION.md` records the PROD probe re-run of 2026-11-27 18:36Z verbatim: verdict pass, 3 members, 0 failed; m3 smoothed builds 1232 days with c3 and c4 pass. Gap G252-PROBE-M3 is closed and the status returns to `human_needed`.
+- ROADMAP Progress and STATE rows for 252 updated.
+
+### Notes
+- Per the 2026-11-25 ruling, the pass is the input to the MTM promotion plan. The headline stays withheld until that plan ships.
+- Records only, no code. No `TODOS.md` entry is closed.
+
 ## [0.133.108.0] - 2026-11-27 — Phase 256 OKXUNITSWITCH PR-1: `strategy_analytics.unit_segments`, the column that will hold a switched account's two native segments
 
 This is the first of two Phase 256 PRs. It carries only the migration, so that it applies to TEST and then PROD before the second PR's readers and writers select or upsert the column (a PostgREST request that names a column PROD lacks fails whole).

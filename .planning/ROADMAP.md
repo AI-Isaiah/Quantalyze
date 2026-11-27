@@ -969,7 +969,7 @@ Plans:
 | 241. DEMOCREDS | 4/4 | Complete    | 2026-11-26 |
 | 250. BINANCEFILLS | 8/8 | Complete (shipped v0.133.84.0, #1355; verification passed, UAT 4/4; ⛔ corrected 2026-11-26: the switch is on in PROD and stays on by founder ruling, see 250-VERIFICATION) | 2026-11-26 |
 | 251. SYNCSTORE | 2/2 | Complete (shipped v0.133.87.0, #1359; verification passed 6/6, SECURITY 13/13 closed) | 2026-11-26 |
-| 252. DERIBITOPTIONS | 7/7 | Gaps found: the wave-2 probe reads fail (m3 smoothed build refuses on a D-09 exercise row, measured 2026-11-27 after gap plan 07 shipped in v0.133.101.0, #1390); founder decision 2026-11-26 keeps 252 open until the probe passes; accepting the measured exercise shape waits on a founder ruling | - |
+| 252. DERIBITOPTIONS | 8/8 | Human verification pending: the wave-2 probe PASSES on PROD (2026-11-27 18:36Z, 3/3 members, after gap plans 07 and 08, #1390 and #1400); next is the MTM promotion plan; the post-deploy PROD factsheet check and the ship-time census item stay open | - |
 | 253. BINANCECURSOR | 4/4 | Complete (shipped v0.133.93.0, #1367; migration 20261126150000 applied to TEST and PROD in supabase-migrate run 45824919779; re-dump #1369; verification passed after founder rulings 2026-11-26, "Keep it on, fix records" and "Accept both"; `USE_RAW_TRADE_INGESTION` stays on, and PROD has no Binance key) | 2026-11-26 |
 
 ## 📋 v1.23 HARDEN — security, alerting, tooling (planned; starts after TRUTH closes)
