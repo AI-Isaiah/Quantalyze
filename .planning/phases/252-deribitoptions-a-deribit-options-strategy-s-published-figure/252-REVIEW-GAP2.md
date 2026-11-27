@@ -270,3 +270,90 @@ if _sm_degraded_seqs != {int(d["seq"]) for d in degraded_members}:
 **One MEDIUM open: R2-WR-01.** I found no CRITICAL or HIGH. WR-02 and SFH-MEDIUM-1 are closed. Round 1 found no other MEDIUM+ in the phase diff, and the fix diff introduces none beyond R2-WR-01, which is a gap left by the WR-01 fix, not a regression it caused: before the fix, these exits failed on every attempt.
 
 _Round 2 reviewed: 2026-11-28 · Reviewer: Claude (gsd-code-reviewer) · Depth: deep (fix diff), round-1 reliance for the rest of the phase diff_
+
+
+---
+
+## Round 3 (final re-review of the round-2 fix commits, 2026-11-28)
+
+**Scope.** Fix commits `9f81b9fa4` (R2-WR-01) and `a49d079e5` (SFH-R2-2): `git diff 1e3fe29a0..HEAD -- . ':!.planning'` touches `job_worker.py`, `test_stitch_composite_job.py`, `composite-read-path.ts` and its headline-basis test. The records commit `4dcb67d90` changes `.planning` only. For the whole-phase verdict on `33d4cf863..HEAD` I mapped every source commit to the round that reviewed it:
+
+| Source commits | Reviewed in |
+|---|---|
+| `a482c0c31`, `b9a0c4002` (plan 09), `39f97ba26`, `013cfd225`, `7cc7e7a7b`, `73b3500d9` (plan 10) | Round 1 (deep, at `5eb1fda9e`) |
+| `7be54fbf3`, `72a624982`, `6bbe725d5`, `301f5e2a8` | Round 2 |
+| `9f81b9fa4`, `a49d079e5` | Round 3 (this section) |
+
+No other commit in the range touches a path outside `.planning`.
+
+**Gates re-run at head `4dcb67d90`, in the phase worktree:**
+- `pytest tests/test_stitch_composite_job.py tests/test_stitch_composite.py tests/test_composite_headline_parity.py -q -p no:cacheprovider`: 178 passed.
+- `mypy --strict --follow-imports=silent --config-file=pyproject.toml services/job_worker.py services/stitch_composite.py`: no issues in 2 source files.
+- `vitest run src/lib/factsheet/composite-read-path.headline-basis.test.ts src/__tests__/options-cash-wallet-withhold.census.test.ts`: 92 passed.
+
+I did not re-run the fixer's neuters. Its PROOF-01 record names four for R2-WR-01 and two for SFH-R2-2, each RED then restored with `cmp` 0.
+
+**Frontmatter note.** The frontmatter counts are still the round-1 counts. The round-3 result is stated here.
+
+### Verdict per round-2 MEDIUM
+
+| Finding | Round-3 status |
+|---|---|
+| R2-WR-01 (exit 1, raw ccxt network error) | **Fixed.** |
+| R2-WR-01 (exit 2, degraded-member-set divergence) | **Fixed.** The guard cannot be bypassed, and a non-final attempt still returns transient (traced below). |
+| SFH-R2-2 | **Fixed.** |
+
+### What I verified
+
+**The divergence guard sits before the unpack. Can it be bypassed?** No. I traced every path from the smoothed call to the unpack (`run_stitch_composite_job`, step 6b):
+
+1. On entry to the guard (`if smoothed_result is not None and _smoothed_final_attempt:`), `smoothed_result` is either `None` or the 5-tuple. The `isinstance(smoothed_result, DispatchResult)` block just above either sets it to `None` (a final-attempt transient) or `return`s (every other `DispatchResult`). So `smoothed_result[4]` is the smoothed pass's `degraded` list, which is the element the unpack later names `_sm_degraded`.
+2. The guard compares `{int(d["seq"]) for d in smoothed_result[4]}` with `{int(d["seq"]) for d in degraded_members}`. That is the same expression as the existing check after the unpack. So on the final attempt:
+   - a mismatch degrades: `smoothed_result = None`, the unpack and derive are skipped, `smoothed_metrics_json` and `_smoothed_basis_result` stay `None`, and P2 fails with `smoothed_basis_not_computed`;
+   - a match means the later check also matches.
+   The later `return DispatchResult(... "transient")` is therefore unreachable on the final attempt. That is the intent.
+3. On a non-final attempt `_smoothed_final_attempt` is False, the guard is skipped, and the unchanged check after the unpack returns `error_kind="transient"`. `test_g252_divergent_member_sets_before_the_last_attempt_still_return_transient` pins this at attempt 1 of 3, including that no headline row is written. The fixer's neuter C (guard without the final-attempt term) turns it RED.
+4. `smoothed_member_metas = []` in the guard is a no-op, because the list is still the empty initialiser at that point. With no metas, the MED-01 `pre_mark_retention_option_dailies` caveat is dropped. Every other degrade drops it the same way.
+5. All three blocks are inside `if smoothed_ok:`, the same scope as the `smoothed_result` declaration. A no-option composite never reaches them.
+
+**The widened arm, `except (DeribitTransientReadError, ccxt.NetworkError)`.**
+- It wraps only the smoothed `_reconstruct_all` call, so the cash and MTM passes are unchanged.
+- Arm order is safe. `_PERMANENT_LEDGER_ERRORS` holds no `ccxt` class, and `DeribitTransientReadError` is a `RuntimeError`.
+- `ccxt.RateLimitExceeded` and `ccxt.DDoSProtection` are `NetworkError` subclasses. Both member arms of `_reconstruct_all` turn them into a transient `DispatchResult` before they can escape, so they reach the `DispatchResult` branch, never this arm.
+- On a non-final attempt it re-raises (`test_g252_ccxt_network_error_before_the_last_attempt_still_retries`, neuter D). A degrade never promotes: it sets `smoothed_result = None`, as in round 2.
+
+**Does a ccxt member's network failure actually arrive as `ccxt.NetworkError`?** The arm matches by type, so I checked each fetch `_reconstruct_ccxt_member` makes:
+- `fetch_ccxt_transfers` lets raw ccxt exceptions bubble (WR-04).
+- `funding_fetch` re-raises the ccxt exception unchanged on each venue.
+- `fetch_all_trades` → `fetch_daily_pnl`. The OKX and Bybit RPC paths raise or log the ccxt error. Binance's futures-income failure falls back to `fetch_my_trades`, which raises raw ccxt.
+- `_resolve_ccxt_flow_price_index`: `_fetch_ohlcv_daily` bubbles. The token-price cache read and write and the CoinGecko read are all fail-open (`except Exception` → empty).
+- The wrapper classes that do exist are not network wrappers. `BinancePerSymbolFetchError` and `ColdStartSymbolDiscoveryError` belong to `_fetch_raw_trades_binance`, which is not on this path. `TransferPageStalled` is a venue pagination defect.
+
+So a venue network failure in a ccxt member's smoothed re-crawl reaches the widened arm. Exit 1 is closed.
+
+**SFH-R2-2 (`composite-read-path.ts`).**
+- `promotedMarker` is read once and `smoothedHeadline` keeps its old value, so the seed and the redaction did not change.
+- The report fires only when the marker is set and either the smoothed object fails `hasBasisHeadline` or `readSmoothedSeries` parsed to `null`. A failed series read still throws `CompositeSeriesReadError` before this point, so an outage is not reported as an inconsistent row.
+- The shape matches the function's existing `tiny_base_days_malformed` report: `console.warn` plus `captureToSentry` at `level: "warning"`, with the strategy id as a tag and no amount in the message. The test asserts the message holds no digit.
+- `captureToSentry` was already imported.
+
+### Round-3 LOW / Info (recorded here only, not fixed, not booked)
+
+- **R3-IN-01 (LOW): non-venue transients in the smoothed pass still escape on the last attempt.** The third pass re-runs `_allocator_key_preflight` for every member. Its `db_execute(_load_key)` key-row read, the exchange build and, on a 429, `_stamp_429` can raise a raw PostgREST or `httpx` error. That escapes the smoothed call site, `classify_exception` files it as a retry, and on attempt 3/3 the job ends `failed_final`.
+  - **Why LOW, and not MEDIUM like R2-WR-01. The reason is not rarity.** The venue reads were the dependency the smoothed pass added: a third full crawl plus per-instrument chart reads. The Supabase dependency is not added. The same run already needs it for the cash pass's own preflights and for the persist that follows within seconds, and the persist writes the cash headline. A database outage that fails the smoothed preflight on the last attempt would therefore, in the dominant case, fail the cash persist too, so degrading the smoothed pass would not save the cash composite.
+  - **What stays open:** a database blip short enough to hit only the smoothed preflight read. If the founder wants that closed as well, change the final-attempt arm to `except Exception`. `asyncio.CancelledError` is a `BaseException`, so that arm would still let cancellation through. Today that would also degrade code bugs silently on the last attempt, after they surface as retries on earlier ones.
+- **R3-IN-02 (LOW, test fidelity).** `escaping_ccxt_network_error` injects `ccxt.RequestTimeout` through the Deribit member's ledger-build mock, not through a ccxt member's crawl. The fix report says this. Both member arms of `_reconstruct_all` end in the same bare `raise`, so the exit is the same call-site arm. No test drives a `RequestTimeout` from a binance, okx or bybit member's re-crawl.
+- **R3-IN-03 (Info).** The widened arm's WARNING still reads "hit a transient marks read". It now also fires for a ccxt member's network error, which is not a marks read, so the cause in the operator's log is slightly wrong.
+- **R3-IN-04 (Info).** The SFH-R2-2 report fires on every uncached build of an inconsistent promoted row. The public payload cache bounds this. It is noise at worst, never loss.
+
+### Whole-phase verdict (`33d4cf863..HEAD`, MEDIUM+ only)
+
+**No MEDIUM, HIGH or CRITICAL finding is open.**
+- R2-WR-01 and SFH-R2-2 are closed by `9f81b9fa4` and `a49d079e5`.
+- Round 2 closed WR-01, WR-02 and SFH-MEDIUM-1.
+- Round 1 found no other MEDIUM+ in the plan 09 and plan 10 commits.
+- The round-3 fix diff introduces no new MEDIUM+ finding. R3-IN-01 is the residual of the WR-01 class, held at LOW on the stated basis.
+
+The phase diff is clear on MEDIUM+ for ship. The round-1 Info items IN-01 through IN-08, R2-IN-01, R2-IN-02 and R3-IN-01 through R3-IN-04 stay recorded here only.
+
+_Round 3 reviewed: 2026-11-28 · Reviewer: Claude (gsd-code-reviewer) · Depth: deep (fix diff, with the ccxt member fetch surface traced); rounds 1 and 2 relied on for the rest of the phase diff, mapped per commit above_
