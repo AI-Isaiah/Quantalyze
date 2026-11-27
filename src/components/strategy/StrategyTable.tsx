@@ -65,14 +65,16 @@ import {
   useDiscoveryPrefs,
   type DiscoveryViewPreferences,
 } from "@/lib/discovery-prefs";
-import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import type { PublicStrategy, StrategyAnalytics } from "@/lib/types";
 // Type-only import — erased at compile so no server-only code from queries.ts
 // (createClient, etc.) leaks into this client bundle. The percentile VALUES are
 // produced by getPercentiles() on the server and passed down via the
 // `percentiles` prop; this component never recomputes them.
 import type { PercentileMap } from "@/lib/queries";
 
-type StrategyWithAnalytics = Strategy & {
+// Shared by the public category pages (key-free rows) and the owner /strategies list (key
+// present), so the key is optional here and only here; the owner type stays `Strategy`.
+type StrategyWithAnalytics = PublicStrategy & { api_key_id?: string | null } & {
   analytics: StrategyAnalytics & {
     /**
      * Phase 159 (159-03 / RANK-02) — the 3M advanced filter's ONE value,

@@ -689,10 +689,6 @@ export async function POST(request: Request): Promise<NextResponse> {
         policy: { mode: "create_or_resolve_pilot", partnerTag: partner_tag },
       });
 
-      // @audit-skip: bulk-import row; rolled up into a single
-      // admin.partner_import audit event after the whole import completes.
-      // Per-row events would generate O(N) audit log rows with no forensic
-      // gain over the summary event.
       // Audit-2026-05-07 P325: validate display_name BEFORE the upsert.
       // displayNameFromEmail() generates a clean string from the email
       // local-part for partner-import, but a malformed email column in
@@ -704,6 +700,10 @@ export async function POST(request: Request): Promise<NextResponse> {
       const managerDisplayName = validateDisplayName(
         displayNameFromEmail(row.manager_email),
       );
+      // @audit-skip: bulk-import row; rolled up into a single
+      // admin.partner_import audit event after the whole import completes.
+      // Per-row events would generate O(N) audit log rows with no forensic
+      // gain over the summary event.
       const { error: profileErr } = await admin.from("profiles").upsert(
         {
           id: userId,

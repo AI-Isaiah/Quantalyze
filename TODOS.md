@@ -1784,16 +1784,6 @@ actually secret. The local gate plus the structural rules is the right cost/bene
   this note. One env line plus one secret; no scanner change needed, the precedence chain
   already reads it first.
 
-### Phase 163 / SEC-03 — H-0001 census RE-MEASURED, and the debt is bigger than recorded (added 2026-08-26) (owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-05; tagged 2026-11-23)
-
-- **[H-0001] Bring the six `H_0001_UNCOVERED_ALLOWLIST` routes under the audit law**, one
-  per-site decision at a time, shrinking the allowlist as each lands. **Still open (re-measured
-  2026-11-14):** the detector half closed 2026-08-29 (Phase 164.3 plan 03), and
-  `src/__tests__/audit-coverage.test.ts` pins the six uncovered sites as an exact set in
-  `H_0001_UNCOVERED_ALLOWLIST`, so a seventh site goes red on arrival. The six allowlisted routes
-  are still unaudited; each needs a per-site compliance judgment (which actor, which event shape,
-  which failure mode), not a regex change.
-
 ### `secret-scan` is red on `workflow_dispatch` runs — full-history scan, no range (raised 2026-08-23, PR #705 review)
 
 **Priority:** P3 — noisy check, not a merge blocker (dispatch runs are not PR checks).
@@ -3129,15 +3119,22 @@ reason so an omission is a decision. Neuter each axis once and see it RED.
 **Owner / Trigger:** PR-B of this phase (it moves the census); otherwise the next phase that touches the pin
 or adds a public route prefix.
 
-### 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD — `Strategy.api_key_id` optional removes the compiler's guard on owner reads (booked 2026-10-14, SFH-5, MEDIUM, confidence 5) (owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-04; tagged 2026-11-23)
+### 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD — the shared strategy list components still type `api_key_id` optional (booked 2026-10-14, SFH-5, MEDIUM; narrowed by Phase 244 DBACC-04 on 2026-11-27 to the remainder below)
 
-**Why it is open.** Making the field optional lets owner-surface code that truth-tests `strategy.api_key_id`
-(`strategies/page.tsx`, `edit/page.tsx`) compile against a row that may be a public projection and silently read
-"no key". Latent today: those pages select the wildcard as the owner.
-**Fix.** A `PublicStrategy = Omit<Strategy, "api_key_id">` for the three public readers, keeping
-`Strategy.api_key_id` required so the owner path stays type-checked.
-**Owner / Trigger:** the next phase that touches `src/lib/types.ts`'s `Strategy`, or any owner page that
-reports "no key" for a connected strategy.
+**What Phase 244 closed.** `Strategy.api_key_id` is required again; the two public readers return
+`PublicStrategy` / `PublicRankedStrategyRow`, so a public row passed as a `Strategy` fails `tsc`
+(`src/__tests__/api-key-id-compile-guard.test.ts`). The four cast-typed owner reads (`getMyStrategies`,
+the `/strategies` list, `[id]/edit`, `/compare`) are held to `*` or a named `api_key_id` by the blocking
+source-scan pin `src/__tests__/api-key-id-owner-read-pin.test.ts`, with a cast-site census.
+**Why it is still open.** `StrategyTable` and `StrategyGrid` take `PublicStrategy & { api_key_id?: string | null }`
+because public and owner rows share them, so the verified-tick truth-test there accepts a key-free row from a
+future owner mount without complaint. The only owner mount today (`StrategiesSection`) passes `RankedStrategyRow`
+with the key required, so this is latent.
+**Fix.** Have the caller compute the verified flag (so the shared table never reads the key), or split the row
+type per mount. Also: owner reads typed by idioms the pin's cast regex does not name (`.maybeSingle<Strategy>()`,
+`.returns<…>()`) would escape the pin.
+**Owner / Trigger:** the next phase that touches `StrategyTable`/`StrategyGrid`'s row type, or adds an owner
+mount of either component.
 
 ### 170.6.1.1-GATE-HIDDEN-EXEMPTIONS-UNENFORCED — the gate's hidden-column exemption list is not asserted hidden (booked 2026-10-15, PR-B review WR-01, MEDIUM, confidence 7) (owned by Phase 248 SQLGATES2, v1.23; REQUIREMENTS.md SQLG-02; tagged 2026-11-23)
 
@@ -4028,11 +4025,6 @@ No spec below is a delete-candidate: every route they target still exists (verif
   Seed-contract-conformant and pins a DESIGN.md rule (DIFF-05 single-accent sparklines) that
   nothing else asserts; its 4 cases read live seeded rows, so it needs the seeded batch and a
   run against the shared TEST DB before it can gate PRs.
-- [ ] **[158-OPS-03] `discovery-watchlist.spec.ts` — wire-later (seeded list), HIGHEST value of
-  the 15.** 544 lines including two genuine RLS proofs (unauthenticated `PUT /api/watchlist`
-  → 401, and user-B cannot read user-A's favorites) plus an anon `/browse/[slug]` chrome
-  check — security assertions currently running nowhere. Prioritize this one.
-      ⭐ **Owned by Phase 244 ACCESSGUARDS, v1.23; REQUIREMENTS.md DBACC-06; tagged 2026-11-23.**
 - [ ] **[158-OPS-03] `for-quants-landing.spec.ts` — wire-later (seeded list).**
   Seed-contract-conformant; most of its 11 cases are anon (`/for-quants`, `/security`,
   `security.txt`) but one describe is logged-in-gated, so the seeded batch is the right home.
