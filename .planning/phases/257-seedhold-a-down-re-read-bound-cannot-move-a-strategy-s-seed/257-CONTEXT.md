@@ -85,3 +85,10 @@ Out of scope: `_fetch_raw_trades_okx` (editing it fires `[255-OKX-BEGIN-REACH-PR
 
 - The "one failed write is enough" premise was measured false: the epilogue write repairs a single failed provisional write. The ROADMAP goal bullet is corrected.
 - The escalation trigger FIRED for half 1 (`257-RESEARCH.md`, candidate table). The only existing non-anon-readable record that carries the span is the run's own `compute_jobs.metadata`, and a compliant write of it needs a new fenced merge RPC (Phase 191 REFUSALRACE convention), which is a migration. Planning stopped here pending a founder ruling. The Bybit half is prototyped and plannable.
+
+## Founder decision 2026-11-28 (AskUserQuestion, relayed by the coordinator)
+
+- Half 1 home, verbatim choice: **"Job's private record (Recommended)"**. That is Option 1 of `257-RESEARCH.md`: one additive, claim-token-fenced merge RPC writes a seed-hold mark into the running job's own `compute_jobs.metadata` (service-role only), and the next run reads the mark at seed time as a further seed term. Planned together with the Bybit half.
+- The migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding before merge, and its timestamp sorts after the PROD ledger tip and after the other open phases' migrations (243 uses `20261127220000`).
+- The two residuals (a double fault: the RPC down and the mark write failing in one run; the mark ageing out with the 30-day `done` reaper) are booked in `TODOS.md` only if rated MEDIUM or above.
+- Both TODOS entries are deleted at ship.
