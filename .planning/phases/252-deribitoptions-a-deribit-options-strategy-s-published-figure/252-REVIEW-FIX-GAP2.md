@@ -100,6 +100,71 @@ Run in the worktree (not the main checkout):
 - `npm run typecheck`: exit 0.
 - `npm run lint`: exit 0.
 
+## Round 2 (fix of the round-2 review, 2026-11-28)
+
+**Source:** `252-REVIEW-GAP2.md` "Round 2" (R2-WR-01) plus the silent-failure-hunter finding SFH-R2-2.
+**Isolation:** committed directly in the existing phase worktree (branch `gsd/phase-252-mtm`), as briefed. Gates ran in that worktree, not the main checkout.
+**Summary:** findings in scope 2 (both MEDIUM), fixed 2, skipped 0. No migration, no Railway, no PROD, no new abstractions. LOW/Info items (R2-IN-01, R2-IN-02) untouched.
+
+### R2-WR-01: the last-attempt degrade missed a raw ccxt network error and the degraded-member-set divergence
+
+**Status:** fixed: requires human verification (control-flow / retry-policy change)
+**Files modified:** `analytics-service/services/job_worker.py`, `analytics-service/tests/test_stitch_composite_job.py`
+**Commit:** `9f81b9fa4`
+
+**Applied fix.**
+- The WR-01 `except` arm at the smoothed call site is now `except (DeribitTransientReadError, ccxt.NetworkError)`, same final-attempt gate: re-raise when not final, degrade (`smoothed_result = None`, WARNING with the scrubbed text) when final. `RateLimitExceeded` is a `NetworkError` subclass but `_reconstruct_all` already turns it into a transient `DispatchResult`, so it never reaches the arm.
+- The divergence: on the final attempt, a block placed just before the existing unpack compares the smoothed pass's degraded seq-set with the cash pass's. On a mismatch it logs a WARNING (strategy id only), sets `smoothed_result = None` and clears `smoothed_member_metas`, so the derive is skipped, P2 fails and nothing promotes. The existing `return DispatchResult(... error_kind="transient")` is untouched and still serves every non-final attempt. This differs from the review's sketch only in where the guard sits: putting it first avoids re-indenting the whole derive block (smaller diff), with the same behaviour.
+
+**Tests added** (`tests/test_stitch_composite_job.py`):
+- `test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_composite[escaping_ccxt_network_error]` (a third parametrised exit; the case table is now `_G252_LAST_ATTEMPT_BUILDS`): attempt 3 of 3, a `ccxt.RequestTimeout` from the smoothed pass, outcome DONE, no `headline_basis`, `mtm_gated_reason == unsmoothed_options_book`, no `smoothed_mtm` key, headline equals `cash_settlement`.
+- `test_g252_ccxt_network_error_before_the_last_attempt_still_retries`: attempt 1 of 3, the `RequestTimeout` still escapes.
+- `test_g252_divergent_member_sets_on_the_last_attempt_ship_the_cash_composite`: a ccxt member degrades in the cash pass and reconstructs in the smoothed pass (the existing divergence seam), attempt 3 of 3: DONE, named withhold, no `headline_basis`, no `smoothed_mtm` key.
+- `test_g252_divergent_member_sets_before_the_last_attempt_still_return_transient`: same setup at attempt 1 of 3: FAILED, `error_kind == "transient"`, message contains `diverge`, no headline row written. (The older `test_smoothed_cash_degraded_member_divergence_fails_transient`, which uses a job row with no counts, is unchanged and still green.)
+- Note: the raw ccxt case drives the Deribit-member build with a `RequestTimeout`. `_reconstruct_all`'s Deribit and ccxt arms both end in the same bare `raise` for a non-429, non-geo-blocked exception, so this is the same exit the review names; the divergence test uses real ccxt members.
+
+**PROOF-01** (analytics-service, byte backup of `job_worker.py` in the session scratchpad, restored with `cp`, `cmp` exit 0 every time; command `pytest tests/test_stitch_composite_job.py -k g252`):
+- Neuter A (arm narrowed back to `except DeribitTransientReadError`):
+  `FAILED tests/test_stitch_composite_job.py::test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_composite[escaping_ccxt_network_error]` / `1 failed, 26 passed, 102 deselected`. Restore `cmp=0`.
+- Neuter B (divergence degrade guard forced off, `and False`):
+  `FAILED tests/test_stitch_composite_job.py::test_g252_divergent_member_sets_on_the_last_attempt_ship_the_cash_composite` (`assert <DispatchOutcome.FAILED> == <DispatchOutcome.DONE>`) / `1 failed, 26 passed, 102 deselected`. Restore `cmp=0`.
+- Neuter C (divergence degrade fires on every attempt, `_smoothed_final_attempt` dropped from the guard):
+  `FAILED tests/test_stitch_composite_job.py::test_g252_divergent_member_sets_before_the_last_attempt_still_return_transient` / `1 failed, 26 passed, 102 deselected`. Restore `cmp=0`.
+- Neuter D (widened arm degrades on every attempt, `if False:` for the final-attempt gate):
+  `FAILED tests/test_stitch_composite_job.py::test_g252_escaping_transient_read_before_the_last_attempt_still_retries` and `FAILED tests/test_stitch_composite_job.py::test_g252_ccxt_network_error_before_the_last_attempt_still_retries` / `2 failed, 25 passed, 102 deselected`. Restore `cmp=0`.
+- GREEN after the last restore: `27 passed, 102 deselected`.
+
+### SFH-R2-2: a promoted row with no usable smoothed headline or series stayed withheld silently
+
+**Status:** fixed
+**Files modified:** `src/lib/factsheet/composite-read-path.ts`, `src/lib/factsheet/composite-read-path.headline-basis.test.ts`
+**Commit:** `a49d079e5`
+
+**Applied fix.** In `readCompositeFactsheet`, the marker is read once (`promotedMarker = isSmoothedHeadlineRow(dqf)`). When `promotedMarker && !(smoothedAvailable && smoothedSeries !== null)` the reader logs `console.warn` and calls `captureToSentry` at `level: "warning"`, with tags `stage: factsheet-promoted-headline`, `reason: promoted_without_usable_smoothed` and `strategy_id`, the same shape as the `tiny_base_days_malformed` report in the same function. The message carries no amount. `smoothedHeadline` itself is unchanged.
+
+**Tests added** (`composite-read-path.headline-basis.test.ts`, describe `(c3)`):
+- two cases (series row missing; smoothed object missing): exactly one `console.warn` and exactly one report with `level: "warning"`, the three tags and strategy id `s1`; the error message holds no digit.
+- a valid promoted row (object and series both usable): no report and no warn.
+
+**PROOF-01** (byte backup of `composite-read-path.ts` in the scratchpad, restored with `cp`, `cmp` exit 0):
+- Neuter N1 (`if (false && promotedMarker && !smoothedHeadline)`):
+  `× the series row is missing: one warning-level report tagged with the strategy id, no amount`
+  `× the smoothed object is missing: one warning-level report tagged with the strategy id, no amount`
+  `Tests  2 failed | 51 passed (53)`. Restore `cmp=0`.
+- Neuter N2 (`if (promotedMarker)`, fires for every promoted row):
+  `× a valid promoted row (object and series both usable) reports nothing`
+  `Tests  1 failed | 52 passed (53)`. Restore `cmp=0`.
+- GREEN after restore: `Tests  53 passed (53)`.
+
+### Round 2 gates
+
+Run in the worktree (not the main checkout):
+- `pytest tests/test_stitch_composite_job.py tests/test_stitch_composite.py tests/test_composite_headline_parity.py -q -p no:cacheprovider`: `178 passed` (174 plus the 4 new tests; the `run_stitch_composite_job` source-scan test is green, comments and log text avoid the publish-status word).
+- `mypy --strict --follow-imports=silent --config-file=pyproject.toml services/job_worker.py services/stitch_composite.py`: Success, no issues found in 2 source files.
+- `vitest run src/lib/factsheet src/__tests__/options-cash-wallet-withhold.census.test.ts "src/app/factsheet/[id]/v2" --testTimeout=60000`: 3799 passed, 3 failed. Two are the known local-only `compute.conventions` fixtures B and C. The third is `FactsheetBody.advanced.test.tsx` ("writes 'open' and 'closed' ..."), the known load timeout; it passes 26 of 26 when run alone.
+- `npm run typecheck`: exit 0.
+- `npm run lint`: exit 0.
+
 ---
 
 _Fixed: 2026-11-27_
