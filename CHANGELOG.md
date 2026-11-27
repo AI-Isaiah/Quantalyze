@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.108.0] - 2026-11-27 — Phase 256 OKXUNITSWITCH PR-1: `strategy_analytics.unit_segments`, the column that will hold a switched account's two native segments
+
+This is the first of two Phase 256 PRs. It carries only the migration, so that it applies to TEST and then PROD before the second PR's readers and writers select or upsert the column (a PostgREST request that names a column PROD lacks fails whole).
+
+### Added
+- Migration `20261127200000_strategy_analytics_unit_segments.sql`: a nullable `jsonb` column `strategy_analytics.unit_segments` with no default and no backfill, and the CHECK `strategy_analytics_unit_segments_object_chk` (NULL or a JSON object). It will hold the two native unit segments (USD to the switch, the coin from the switch) of an OKX account that moved from USDT into a coin, per the founder ruling of 2026-11-27 "USD before 11-15, BTC after". The headline series columns stay whole-history USD. DDL only: no RLS, grant, function, trigger or schedule change; the post-verify reads only the catalogue and pins the three existing `strategy_analytics` policies by name.
+- Rollback `supabase/migrations/down/20261127200000-rollback.sql` (manual, off the auto-apply path).
+
+### Tests
+- `supabase/tests/test_strategy_analytics_unit_segments.sql`: nine twinned arms (1a, 1b, 1c, 2, 3, 4, 5a, 5b, 6) on the column's type, nullability, default, the object CHECK accepting and refusing, the policies unchanged and the anon/authenticated read path. Every arm went RED on its own twin (`arms: 9/9/0`, `biting: 9`).
+- Census moved with the new gate file, re-based onto Phase 242 on `main`: `FILES_FLOOR` 99 -> 100 and `ARMS_FLOOR` 1110 -> 1119 in `scripts/mutation-floors.mjs`, MEASURED `--parse-only` `coverage: files 100/127`, `arms: 0/1119/0`; the pins in `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts` (`armsSeen` 1119, `stepsSeen` and `needles.length` 1254), `gate-family-meta.test.ts` and `lint-sql-gates.test.ts` move with them.
+
+### Notes
+- migration-reviewer: 0 CRITICAL/HIGH/MEDIUM, one LOW (a comment said the CHECK reads no data; ADD CONSTRAINT scans the table, one row per strategy, milliseconds). rls-policy-auditor: 0 findings; the column inherits exactly the visibility of `returns_series` (published strategies to anyone, unpublished only to the owner), and no view, column-list grant or SECURITY DEFINER reader returns it.
+- The stamp was moved from a day-ahead `20261128120000` to `20261127200000` so it does not raise the remote migration tip past other phases' same-day migrations.
+- A baseline re-dump follows the PROD apply.
 ## [0.133.107.3] - 2026-11-27 — records: Phase 242 SECRETSHYGIENE closed (verification passed)
 
 ### Changed
