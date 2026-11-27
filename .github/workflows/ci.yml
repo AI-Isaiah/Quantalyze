@@ -5378,15 +5378,7 @@ jobs:
           # Re-measured 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02), one file GREW, read off its own
           #   first `ALL N ARMS EXECUTED` sentinel: test_insert_api_key_rpc.sql 8 -> 9 (R9, every parameter
           #   lands in its own column). No file joined, so SENTINEL_FLOOR stays 41 and ARMS_FLOOR 609 -> 610 (+1).
-          # Re-measured 2026-11-27 (Phase 243 DBBACKSTOP, plan 09), ONE file joined:
-          #   test_strategy_analytics_anon_grants.sql, NEW, 7 arms (GRANT 1, GRANT 2, GRANT 3, GRANT 4,
-          #   WRITE 1, WRITE 2, KEEP 1): anon cannot read strategy_analytics.metrics_json_by_basis and
-          #   holds no write privilege on strategy_analytics (migration 20261127220000). Read off the
-          #   file's own first `ALL N ARMS EXECUTED` sentinel with
-          #   `grep -a -o -m1 'ALL [0-9]* ARMS EXECUTED'` (`ALL 7 ARMS EXECUTED`). A new
-          #   sentinel-bearing file changes the FILE SET, so SENTINEL_FLOOR 41 -> 42 and ARMS_FLOOR
-          #   620 -> 627 (+7). The mutation runner's floors move in the same plan
-          #   (scripts/mutation-floors.mjs).
+          # 2026-11-27 Phase 243 plan 09: +1 file (anon_grants, 7), 41/620 -> 42/627.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_analytics_anon_grants.sql          7
           #   test_strategy_shares_rls.sql                    103
