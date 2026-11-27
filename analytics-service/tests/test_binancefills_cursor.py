@@ -346,9 +346,11 @@ class TestBinanceFillsCursorGate:
             f"stored fill ({HEALTHY_NEWER_MS})"
         )
 
-    async def test_an_okx_run_makes_no_bound_read_and_no_bound_write(self) -> None:
-        # D-04: the bound is Binance-only. An OKX key's run, even one that records a stop,
-        # reads no bound row and writes none, and `advance_sync_cursor` is called as before.
+    async def test_an_okx_run_makes_one_bound_read_and_two_bound_writes(self) -> None:
+        # Phase 255 NULLANCHOR (intent change, 2026-11-27): the bound now covers OKX, Bybit and
+        # Deribit, superseding Phase 253 D-04's "Binance-only". An OKX key's run, even one that
+        # records a stop, reads the bound once and writes it twice (the provisional row and the
+        # epilogue write), and `advance_sync_cursor` is called as before.
         bounds = RereadBounds()
         supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES, bounds=bounds)
         await _run_job(
@@ -360,8 +362,8 @@ class TestBinanceFillsCursorGate:
                 "binance_read_through_ms": SECOND_STOP_MS,
             },
         )
-        assert bounds.calls == []
-        assert bounds.reads == 0
+        assert bounds.reads == 1
+        assert len(bounds.calls) == 2
         assert _the_advance(rec)["p_last_fetched_ts"] == "2026-06-02T09:00:00+00:00"
 
     async def test_a_stop_below_a_column_set_by_another_strategy_is_flagged_and_warned(
@@ -480,8 +482,10 @@ class TestBinanceFillsCursorGate:
         ]
 
     async def test_a_raised_okx_read_never_sets_a_binance_flag(self) -> None:
-        # D-07: the flag and the bound are Binance's. The same raised read on an OKX key sets
-        # phase2_fill_ingestion_failed and nothing named binance_*.
+        # D-07: the flag is Binance's. The same raised read on an OKX key sets
+        # phase2_fill_ingestion_failed and nothing named binance_*. Phase 255 NULLANCHOR (intent
+        # change, 2026-11-27): the bound itself now covers OKX, so the run also reads it once and
+        # writes it twice, superseding Phase 253 D-04's "Binance-only".
         bounds = RereadBounds()
         supabase, rec = _make_supabase(trades_rows=DEFAULT_TRADES, bounds=bounds)
         await _run_job(
@@ -492,7 +496,8 @@ class TestBinanceFillsCursorGate:
         flags = rec.analytics_upserts[-1]["data_quality_flags"]
         assert flags["phase2_fill_ingestion_failed"] is True
         assert not [k for k in flags if k.startswith("binance_")]
-        assert bounds.calls == [] and bounds.reads == 0
+        assert bounds.reads == 1
+        assert len(bounds.calls) == 2
 
     @pytest.mark.parametrize(
         "bound_ms, flagged",
@@ -1039,7 +1044,9 @@ class TestRereadBoundAcrossRuns:
         self,
     ) -> None:
         # D-04: `advance_sync_cursor` is called exactly as before this phase: the same six keys,
-        # no bound term, whatever the venue. An OKX key makes no bound read and no bound write.
+        # no bound term, whatever the venue. Phase 255 NULLANCHOR (intent change, 2026-11-27): an
+        # OKX key now makes one bound read and two bound writes like Binance, superseding Phase 253
+        # D-04's "Binance-only".
         # (The values of `p_last_fetched_ts` are pinned by the Phase 250 arms above, which run
         # unchanged.)
         expected_keys = {
@@ -1067,10 +1074,7 @@ class TestRereadBoundAcrossRuns:
             params = _the_advance(rec)
             assert set(params) == expected_keys
             assert params["p_last_fetched_ts"] == "2026-06-02T09:00:00+00:00"
-            if exchange == "okx":
-                assert bounds.calls == [] and bounds.reads == 0
-            else:
-                assert len(bounds.calls) == 2
+            assert len(bounds.calls) == 2
 
 
 # THE SHARED CASE TABLE of 253-01-PLAN.md and 253-02-PLAN.md, hand-typed (never read from the

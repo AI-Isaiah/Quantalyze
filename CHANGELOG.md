@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.133.104.0] - 2026-11-27 — Phase 255 NULLANCHOR: an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips
+
+### Why
+- Phase 251 stores a run's daily P&L rows before the fills read. On OKX, Bybit and Deribit, a fills read that then raised, hit a 429 or was cancelled left nothing that named the unread span, while the daily high-water the next run seeds from had already moved. That held on a NULL `last_fetched_trade_timestamp` and on a set column with no stored fill alike. `USE_RAW_TRADE_INGESTION` is on in PROD (founder ruling 2026-11-26, "Keep it on, fix records"), so the loss was live. Measured on the pre-fix code: 26 of the 30 two-run arms were RED.
+
+### Added
+- **The Phase 253 per-strategy re-read bound now covers OKX, Bybit and Deribit** (`run_sync_trades_job`, `analytics-service/services/job_worker.py`). A new `_bound_read` gate drives the bound read, the provisional write at the seed before the daily store, the epilogue write and the orphan handling. A provisional write that fails or answers orphan skips the fills read and holds the daily store, as Binance does. The first-sync reach anchor is per venue, taken before the read: OKX `OKX_FILLS_REACH_DAYS` (93), Bybit its 365-day first-sync lookback (never the 730-day history cap, which a later run would refuse), Deribit epoch 0 (its read ignores the seed). Off Binance the bound is kept when Phase 2 failed or any `sync_truncated_*` flag is set. Every Binance-only predicate (`binance_read_through_ms`, the stop and partial symbols, `binance_stop_below_cursor`, the flag clear) stays on `_binance_read`. No migration: the table and RPC were already venue-agnostic.
+
+### Fixed
+- **The OKX fills pager pages by `billId`** (review round 2, R2-CR-01, HIGH, pre-existing). It sent `after=<tradeId>`; the OKX v5 docs define `after` on `fills-history` as a `billId` cursor, so page 2 could read as a natural stop and keep only the newest 100 fills per instType. `exchange_fill_id` stays the tradeId. A PROD read found OKX strategies holding exactly 100, 106 and 200 SWAP fills. Strategies whose cursor already moved past missing fills are not re-read by this change; see Notes.
+- **An OKX stop on a stuck cursor is an incomplete read** (review round 1, SFH-M1). A full page whose last cursor is missing or repeats used to end the walk as natural, so the bound was cleared and the cursor advanced past an unread span. It now records `sync_truncated_okx`, which keeps the bound and holds the cursor.
+- **A Bybit fills read refuses by name before the handler cancels it** (review rounds 1 and 2, WR-01, R2-WR-02 (b)). `_fetch_raw_trades_bybit` honours `read_deadline_s` and raises `BybitTradeWindowIncomplete("deadline")`; the worker passes it the handler budget remaining (840 s minus time already spent), so the run reaches its epilogue, keeps the bound and stamps `phase2_fill_ingestion_failed` instead of being cancelled silently on every run. Binance keeps its fixed 840 s.
+- **The OKX fills read never sends a `begin` older than the documented 3-month reach** (review rounds 1 to 3, WR-02, R2-WR-01). The floor is now minus three calendar months plus one day, and a clamp records the non-holding flag `okx_fills_reach_clamped`.
+
+### Removed
+- `TODOS.md` entry `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]` is closed by this phase and deleted.
+
+### Changed
+- `TODOS.md` `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` now covers OKX, Bybit and Deribit keys as well as Binance, with a founder-decision owner: the residual is reachable in PROD during an outage of the bound RPC.
+- Three hand-rolled RPC fakes (`test_sync_trades_resume_seed.py`, `test_sync_trades_store_truth.py`, `test_ana_recon_audit.py`) answer the bound RPC as owned, and three OKX assertions in `test_binancefills_cursor.py` now expect the bound read and two bound writes, each with a dated note.
+
+### Tests
+- New `analytics-service/tests/test_nullanchor_bound.py`: a 30-arm SC-1 two-run matrix (OKX, Bybit and Deribit x NULL / set column / first sync x 429 / cancel / plain raise, plus OKX truncated reads), a 28-arm SC-2 pin on the `advance_sync_cursor` parameters and the Binance-only flags with goldens measured on the pre-fix code, the off-Binance bound mechanism arms, and the review-fix arms (billId pager, stuck cursor, Bybit deadline, begin floor).
+- PROOF-01: ten neuters (N1 to N10), each turning its named arm RED and restored by byte backup and `cmp`, plus each review fix neutered RED and restored.
+
+### Notes
+- **SC-1 deviation:** four arms were GREEN on the pre-fix code (the three NULL-column plain-raise arms, through the Phase 232 bootstrap anchor, and `okx-null-trunc`). They stay as regression pins and were never forced RED.
+- **Booked, not fixed (survivors after three review rounds, and founder items):** `[255-OKX-PAGER-BACKFILL]` (time-sensitive: fills age out of OKX's 3-month reach daily), `[255-OKX-BEGIN-REACH-PROBE]` (the OKX begin floor is unmeasured, and the clamp flag is wiped by the derive with no log line) and `[255-BYBIT-DEADLINE-NO-PROGRESS]` (a deadline-refused Bybit read re-reads the same span every run).
+
 ## [0.133.103.3] - 2026-11-27 — records: Phase 256 OKXUNITSWITCH booked for v1.23 HARDEN
 
 ### Added

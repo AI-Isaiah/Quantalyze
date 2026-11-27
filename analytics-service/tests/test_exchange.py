@@ -1,4 +1,5 @@
 import asyncio
+import time
 import pytest
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1297,7 +1298,10 @@ class TestFetchRawTrades:
         mock_exchange.private_get_trade_fills_history = _capture_params
 
         mock_supabase = MagicMock()
-        since_ms = 1700000000000  # arbitrary timestamp
+        # Phase 255 WR-02 (2026-11-27): the OKX read never sends a `begin` older than 89 days, so
+        # the arbitrary 2023 timestamp this arm used would now be clamped. A since 30 days back is
+        # inside the reach; the assertion below is unchanged.
+        since_ms = int(time.time() * 1000) - 30 * 86_400_000
 
         await fetch_raw_trades(
             mock_exchange, "strat-1", mock_supabase, since_ms=since_ms
@@ -2259,9 +2263,10 @@ class TestG12BPaginationGuards:
                 "ts": "1700000000000",
                 "ordId": f"ord-{i}",
                 "tradeId": f"trade-{i}",
+                "billId": f"bill-{i}",
                 "execType": "T",
             })
-        # Tail row carries empty tradeId — that's the stuck signal.
+        # Tail row carries an empty cursor (billId, the OKX `after` key) — that's the stuck signal.
         fills.append({
             "instId": "BTC-USDT-SWAP",
             "side": "buy",
@@ -2271,7 +2276,8 @@ class TestG12BPaginationGuards:
             "feeCcy": "USDT",
             "ts": "1700000000000",
             "ordId": "ord-tail",
-            "tradeId": "",
+            "tradeId": "trade-tail",
+            "billId": "",
             "execType": "T",
         })
         # NEW-C13-02: use _okx_swap_only so FUTURES/SPOT/MARGIN return empty
@@ -3135,6 +3141,7 @@ class TestG12BOkxCursorAndBegin:
                 "ts": str(1700000000000 + i),
                 "ordId": f"ord-{i}",
                 "tradeId": f"trade-{i}",
+                "billId": f"bill-{i}",
                 "execType": "T",
             })
         page_2 = {"data": []}
@@ -3158,7 +3165,8 @@ class TestG12BOkxCursorAndBegin:
         assert "after" not in captured_params[0]
         assert "before" not in captured_params[0]
         # Page 2: must use ``after`` (old-direction), not ``before``.
-        assert captured_params[1].get("after") == "trade-99"
+        # Phase 255 R2-CR-01: OKX defines `after` as a billId (not a tradeId).
+        assert captured_params[1].get("after") == "bill-99"
         assert "before" not in captured_params[1], (
             "OKX must paginate with ``after`` to walk into older history; "
             "``before`` walks toward newer records and oscillates."
@@ -3173,7 +3181,7 @@ class TestG12BOkxCursorAndBegin:
         the single-page after-cursor test as long as `data[0]` happened
         to differ from `data[-1]`. This 3-page test pins the cursor
         source: every subsequent page's ``after`` must equal the OLDEST
-        ``tradeId`` from the prior page (last entry of DESC-sorted data),
+        ``billId`` from the prior page (last entry of DESC-sorted data),
         NOT the newest."""
         from services.exchange import fetch_raw_trades
 
@@ -3195,6 +3203,7 @@ class TestG12BOkxCursorAndBegin:
                     "ts": str(1700000000000 - (start_idx + i)),
                     "ordId": f"ord-{start_idx + i}",
                     "tradeId": f"trade-{start_idx + i}",
+                    "billId": f"bill-{start_idx + i}",
                     "execType": "T",
                 }
                 for i in range(count)
@@ -3231,14 +3240,14 @@ class TestG12BOkxCursorAndBegin:
         assert len(swap_params) == 4
         # Page 1: no cursor.
         assert "after" not in swap_params[0]
-        # Pages 2-4: cursor MUST be the OLDEST tradeId of the prior page
+        # Pages 2-4: cursor MUST be the OLDEST billId of the prior page
         # (last entry, DESC-sorted), NOT the newest (first entry).
-        assert swap_params[1]["after"] == "trade-99", (
+        assert swap_params[1]["after"] == "bill-99", (
             "page 2 cursor must be data[-1] (oldest); a regression that "
             "picked data[0] (newest) would oscillate"
         )
-        assert swap_params[2]["after"] == "trade-199"
-        assert swap_params[3]["after"] == "trade-299"
+        assert swap_params[2]["after"] == "bill-199"
+        assert swap_params[3]["after"] == "bill-299"
 
     @pytest.mark.asyncio
     async def test_okx_begin_sent_on_every_page(self) -> None:
@@ -3271,7 +3280,9 @@ class TestG12BOkxCursorAndBegin:
         mock_exchange.id = "okx"
         mock_exchange.private_get_trade_fills_history = _fills_history
 
-        since_ms = 1690000000000  # caller-supplied window
+        # Phase 255 WR-02 (2026-11-27): a caller-supplied window inside the OKX reach (the 2023
+        # value this arm used would now be clamped to 89 days). The assertions are unchanged.
+        since_ms = int(time.time() * 1000) - 30 * 86_400_000
         mock_supabase = MagicMock()
         await fetch_raw_trades(
             mock_exchange, "strat-1", mock_supabase, since_ms=since_ms
@@ -4965,6 +4976,7 @@ class TestClusterIPageCapTruncationFlag:
                 "ts": "1700000000000",
                 "ordId": f"ord-{idx}",
                 "tradeId": f"trade-{call_state['n']}-{idx}",
+                "billId": f"bill-{call_state['n']}-{idx}",
                 "execType": "T",
             }
 
@@ -5873,6 +5885,7 @@ class TestClusterIC1302OkxInstTypeFanOut:
                 "ts": "1700000000000",
                 "ordId": f"ord-{inst_type}-{idx}",
                 "tradeId": f"trade-{inst_type}-{call_n.get(inst_type, 0)}-{idx}",
+                "billId": f"bill-{inst_type}-{call_n.get(inst_type, 0)}-{idx}",
                 "execType": "T",
             }
 

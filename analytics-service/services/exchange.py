@@ -1,4 +1,5 @@
 import asyncio
+import calendar
 import ccxt.async_support as ccxt
 import logging
 import math
@@ -703,6 +704,28 @@ BINANCE_SPOT_FILLS_WINDOW_HOURS: int = 24
 #: too long and an out-of-reach start errors loudly and holds the cursor; too short and a
 #: 86 to 89 day old cursor is clamped (and flagged, never held) needlessly.
 BINANCE_FILLS_REACH_DAYS: int = 85
+#: Phase 255 NULLANCHOR: the first-sync reach anchor of the per-strategy re-read bound for an OKX
+#: fills read. 93 days is longer than any three calendar months (92 days at most), the documented
+#: reach of OKX `fills-history` ("last 3 months"), so the provisional bound row is never later than
+#: the walk's real start. It equals `OKX_BILLS_REACH_DAYS` by value but is a different endpoint's
+#: reach, hence its own constant. Bybit's anchor is `BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS` (the
+#: first-sync lookback), never the 730-day history cap.
+OKX_FILLS_REACH_DAYS: int = 93
+#: Phase 255 WR-02 (round 2, R2-WR-01): the oldest `begin` the OKX fills read sends. OKX documents
+#: `fills-history` as "the last 3 months" (https://www.okx.com/docs-v5/en/#order-book-trading-trade-get-transaction-details-last-3-months,
+#: read 2026-11-27) and says nothing about a `begin` older than that, so none is sent. The floor is
+#: now minus three CALENDAR months (day clamped to the shorter month) plus one day, so it sits inside
+#: the documented reach on every date and loses at most about one day of what the venue still
+#: serves; a flat 89 days lost up to three. The `OKX_FILLS_REACH_DAYS` anchor stays longer so the
+#: provisional bound is never later than the walk's real start; this is the clamp on what is SENT.
+def _okx_fills_begin_floor_ms(now_ms: int) -> int:
+    base = datetime.fromtimestamp(now_ms // 1000, tz=timezone.utc)
+    year, month = (base.year, base.month - 3) if base.month > 3 else (base.year - 1, base.month + 9)
+    day = min(base.day, calendar.monthrange(year, month)[1])
+    shifted = base.replace(year=year, month=month, day=day)
+    return int(shifted.timestamp()) * 1000 + now_ms % 1000 + 86_400_000
+
+
 #: Pages per WINDOW (it was a local inside the per-symbol read, per symbol). 20 x 1000 =
 #: 20K fills per window. Raising it is NOT a way to close the page-cap survivor (Phase 232
 #: precedent): a capped window stops that symbol's walk and carries a read-through bound.
@@ -799,7 +822,9 @@ class BybitTradeWindowIncomplete(RuntimeError):
     ``malformed_reply`` (a page with no ``result`` object or no ``list`` array, which reads as an
     empty window and would end the walk as complete) or ``unreadable_fill`` (a
     row whose ``execType`` is in ``BYBIT_FILL_EXEC_TYPES`` and whose time, price or quantity cannot
-    be read, which would be a fill missing from a read returned as complete).
+    be read, which would be a fill missing from a read returned as complete) or ``deadline``
+    (Phase 255 WR-01: the caller's ``read_deadline_s`` passed before a request, so the read stops
+    short of the handler's own timeout, which would cancel the run before its epilogue).
 
     The text is static per reason, with no digit and no venue text: ``run_sync_trades_job`` stores
     ``str(e)[:200]``. It is not a ``PaginationCeilingExceeded``, so no existing handler for that
@@ -812,12 +837,18 @@ class BybitTradeWindowIncomplete(RuntimeError):
         "start_too_old": "Bybit trade read refused: the start is older than the venue's execution history",
         "malformed_reply": "Bybit trade read refused: a page answer has no result list",
         "unreadable_fill": "Bybit trade read refused: an execution has no readable time, price or quantity",
+        "deadline": "Bybit trade read refused: the read budget passed before the walk finished",
     }
 
     def __init__(
         self,
         reason: Literal[
-            "page_cap", "cursor_stuck", "start_too_old", "malformed_reply", "unreadable_fill"
+            "page_cap",
+            "cursor_stuck",
+            "start_too_old",
+            "malformed_reply",
+            "unreadable_fill",
+            "deadline",
         ],
     ) -> None:
         self.reason = reason
@@ -2544,7 +2575,8 @@ async def fetch_raw_trades(
     Returns a list of dicts normalized to the trades table schema with
     is_fill=True. Overlap window: subtracts 1 hour from since_ms for
     late-arriving fills; dedup is handled by the DB partial unique index.
-    ``read_deadline_s`` bounds the Binance fills read only; the other venues ignore it.
+    ``read_deadline_s`` bounds the Binance and Bybit fills reads; OKX and Deribit ignore it. A
+    Bybit read past it raises ``BybitTradeWindowIncomplete("deadline")`` (Phase 255 WR-01).
     """
     from services.db import db_execute
 
@@ -2572,7 +2604,9 @@ async def fetch_raw_trades(
         elif exchange.id == "okx":
             fills = await _fetch_raw_trades_okx(exchange, effective_since)
         elif exchange.id == "bybit":
-            fills = await _fetch_raw_trades_bybit(exchange, effective_since)
+            fills = await _fetch_raw_trades_bybit(
+                exchange, effective_since, read_deadline_s=read_deadline_s
+            )
         elif exchange.id == "deribit":
             fills = await _fetch_raw_trades_deribit(exchange, effective_since)
         else:
@@ -3052,9 +3086,12 @@ async def _fetch_raw_trades_okx_inst_type(
     PAGE_CAP = 100
     for page in range(PAGE_CAP):
         params: dict[str, str] = {"instType": inst_type, "limit": "100"}
-        # OKX fills-history returns DESC-sorted data; ``after=<tradeId>``
+        # OKX fills-history returns DESC-sorted data; ``after=<billId>``
         # fetches records OLDER than the cursor (H-0665 — using ``before``
-        # oscillates until the page cap).
+        # oscillates until the page cap). The v5 docs define ``after`` as
+        # "records earlier than the requested billId" (GET /api/v5/trade/fills-history,
+        # read 2026-11-27); a tradeId is a different number space, and a tradeId sent as
+        # ``after`` risks an empty page 2 that reads as a natural end (Phase 255 R2-CR-01).
         if cursor:
             params["after"] = cursor
         # ``begin`` must be sent on every page — without it OKX falls back
@@ -3181,7 +3218,7 @@ async def _fetch_raw_trades_okx_inst_type(
                     position_direction=position_direction,
                 )))
 
-            new_cursor = data[-1].get("tradeId", "")
+            new_cursor = data[-1].get("billId", "")
 
             if len(data) < 100:
                 prev_cursor = new_cursor
@@ -3189,19 +3226,23 @@ async def _fetch_raw_trades_okx_inst_type(
                 natural_break = True
                 break
 
+            # Phase 255 (SFH-M1): a stop on a FULL page with no usable cursor left older records
+            # unread, so it is NOT a natural end. Returning it as incomplete makes
+            # `_fetch_raw_trades_okx` record `sync_truncated_okx`, which keeps the re-read bound
+            # and holds the cursor; a natural stop here cleared both over an unread span.
             if not new_cursor:
                 logger.warning(
                     "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
                     "terminating early", new_cursor, inst_type,
                 )
-                natural_break = True
+                natural_break = False
                 break
             if prev_cursor and new_cursor == prev_cursor:
                 logger.warning(
                     "Pagination stuck on cursor=%s for exchange=okx instType=%s; "
                     "terminating early", new_cursor, inst_type,
                 )
-                natural_break = True
+                natural_break = False
                 break
 
             prev_cursor = new_cursor
@@ -3228,6 +3269,16 @@ async def _fetch_raw_trades_okx(
     SPOT/FUTURES/MARGIN fills. Now fans out across _OKX_FILL_INST_TYPES.
     NEW-C13-01: SWAP/FUTURES fillSz is normalized from contracts to base units.
     """
+    if since_ms is not None:
+        # Phase 255 WR-02: never send a `begin` older than the documented reach (see
+        # `_okx_fills_begin_floor_ms`). A retry after a failed first sync seeds from a bound about
+        # 93 days old, and how OKX answers an out-of-reach `begin` is undocumented. A raised start
+        # is named with the non-holding `okx_fills_reach_clamped` (never `sync_truncated_*`, which
+        # would hold the cursor on every run the clamp recurs), like Binance's flag.
+        begin_floor_ms = _okx_fills_begin_floor_ms(_now_ms())
+        if since_ms < begin_floor_ms:
+            _record_dq_flag("okx_fills_reach_clamped", True)
+            since_ms = begin_floor_ms
     all_fills: list[dict[str, Any]] = []
     any_cap_hit = False
     total_cap_pages = 0
@@ -3256,6 +3307,7 @@ async def _fetch_raw_trades_bybit(
     category: str = "linear",
     now_ms: int | None = None,
     default_lookback_days: int = BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS,
+    read_deadline_s: float | None = None,
 ) -> list[dict[str, Any]]:
     """Bybit: private_get_v5_execution_list, every execution in ``[since_ms, now]`` or a refusal.
 
@@ -3269,6 +3321,12 @@ async def _fetch_raw_trades_bybit(
     window past the page cap, a cursor that does not advance on a page with rows, a start past the
     venue's two years) rather than return fewer executions than the window holds. ``now_ms`` is a
     clock seam (the wall clock when None).
+
+    ``read_deadline_s`` (Phase 255 WR-01, opt-in, None means no deadline): a wall-clock budget for
+    the whole walk, checked before EVERY request. Past it the read raises
+    ``BybitTradeWindowIncomplete("deadline")`` instead of running into the handler's
+    ``asyncio.wait_for``, whose cancel skips the epilogue that keeps the re-read bound and stamps
+    ``phase2_fill_ingestion_failed``.
 
     NEW-C13-01: ``category`` is asserted against ``_BYBIT_FILL_CATEGORIES``
     so a future caller (or a refactor) cannot quietly request inverse
@@ -3294,7 +3352,12 @@ async def _fetch_raw_trades_bybit(
         # Never clamped: a clamp would return a shorter history than the caller asked for.
         raise BybitTradeWindowIncomplete("start_too_old")
 
+    deadline = float("inf") if read_deadline_s is None else _monotonic() + read_deadline_s
+
     async def _fetch_page(req: PageRequest) -> PageResult[dict[str, Any]]:
+        if _monotonic() >= deadline:
+            logger.warning("Bybit fills read passed its %ss budget; refusing the read", read_deadline_s)
+            raise BybitTradeWindowIncomplete("deadline")
         params: dict[str, str] = {
             "category": category,
             "limit": str(BYBIT_EXECUTION_PAGE_SIZE),
