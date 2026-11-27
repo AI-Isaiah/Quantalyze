@@ -129,8 +129,10 @@ def _make_supabase(
     def _rpc(name: str, _payload: dict[str, Any]) -> MagicMock:
         stub = MagicMock()
         # advance_sync_cursor answers owned/written (True).
+        # Phase 255: the bound RPC now runs on OKX, Bybit and Deribit, and a falsy answer reads as an
+        # orphan claim token and skips the read.
         stub.execute.return_value = MagicMock(
-            data=True if name == "advance_sync_cursor" else 0
+            data=True if name in ("advance_sync_cursor", "set_strategy_fills_reread_bound") else 0
         )
         return stub
 

@@ -494,8 +494,10 @@ async def test_redteam_c1_phase1_failed_blocks_fetched_cursor_advance():
             if name == "sync_trades" and sync_trades_raises:
                 stub.execute.side_effect = RuntimeError("22023 simulated")
             else:
+                # Phase 255: the bound RPC now runs on OKX, Bybit and Deribit, and a falsy answer reads as an
+                # orphan claim token and skips the read.
                 stub.execute.return_value = MagicMock(
-                    data=True if name == "advance_sync_cursor" else 0
+                    data=True if name in ("advance_sync_cursor", "set_strategy_fills_reread_bound") else 0
                 )
             return stub
 

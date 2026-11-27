@@ -140,10 +140,11 @@ def load_strategy_fill_high_water(
 def load_strategy_fills_reread_bound(
     supabase: Any, strategy_id: str, api_key_id: str
 ) -> tuple[str | None, str | None]:
-    """This strategy's Binance fills re-read bound, or `None`. Returns `(unread_from, error)`.
+    """This strategy's fills re-read bound, or `None`. Returns `(unread_from, error)`.
 
     Phase 253 BINANCECURSOR. `strategy_fills_reread_bounds` holds, per strategy, the earliest
-    instant a stopped, failed or raised Binance fills read was complete through. The queued
+    instant a stopped, failed, truncated or raised ccxt raw fills read (Binance since Phase 253; OKX,
+    Bybit and Deribit since Phase 255) was complete through. The queued
     `sync_trades` job lowers its fills-read seed to it, so the span is read again whatever a
     sibling strategy on the same key did to the shared `api_keys.last_fetched_trade_timestamp`
     column. The seed that survives is read by `load_strategy_fill_high_water` and the column;
