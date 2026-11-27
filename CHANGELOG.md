@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.133.109.0] - 2026-11-27 — Phase 254 OPENINGDEPOSIT: a deposit dated the day before a key's first return is its opening deposit on every venue
+
+### Fixed
+- `replay_key_equity` (`analytics-service/services/allocator_equity_derive.py`): on a key whose history does not reach the account's start (`history_reaches_inception` False, every venue but Deribit and MT5), a day whose net flow is strictly positive and which is exactly the day before the key's first return day is the key's opening deposit. It is no longer counted in `out_of_window_flows`, so it no longer raises the blocking `out_of_window_flow` reason. A count flag `opening_deposit_exempted: 1` on `KeyEquity.flags` names it. It is the int 1, so `_bool_flag_tokens` keeps it out of the payload. Founder ruling 2026-11-26: "Exempt it, book for v1.23". The source case was an allocator book on PROD whose only `out_of_window_flow` is one Bybit key's opening deposit, dated one day before its first return. That book's reason clears on its next daily derive. Its other reason, `window_truncated`, is benign.
+- The exemption covers deposits only: a withdrawal or net-negative day, any earlier flow, and any flow after the last return day still count as `out_of_window_flow`. It applies to whichever flows the replay runs on (event flows, or the writer's composed flows in writer-basis mode). No curve level changes.
+
+### Changed
+- `FULL_HISTORY_VENUES`, `_opening_flow_run` and the D-13 zero-start band are byte-unchanged. A full-history key's day before its first return still ends the D-13 opening run and is judged by the band, never by the exemption. The comment above `FULL_HISTORY_VENUES`, the `replay_key_equity` docstring and the `compose_allocator_equity` `full_history_keys` paragraph now describe the exemption, each with a dated note.
+
+### Tests
+- `analytics-service/tests/test_allocator_equity_inception.py` covers: the SC-1 arms (a Bybit-shaped replay, the opening deposit not judged by the band, an end-to-end derive-job run on a `bybit` key); the SC-2 arms (day -2 alone; a two-day run where only day -1 is exempted; a post-window flow beside the exemption; a withdrawal and a net-negative day); the SC-3 arm (a full-history key's day -1 deposit is still judged by the band, and no flag is set); and a writer-basis arm.
+- Four tests that pinned the old rule were rewritten with a dated note, keeping what they test: `test_venue_without_full_history_is_unchanged`, `test_compose_passes_full_history_keys_to_the_replay`, and the `binance` and `okx` arms of `test_job_reads_the_venue_from_api_keys`. The compose and job wiring tests now use a two-day opening run, so a full-history key and any other key still give different results.
+- PROOF-01: ten neuters (N1 to N10) each turned their named arms RED (32 in total), were restored from a byte backup (`cmp` 0) and went GREEN. N9 (adding `bybit` to `FULL_HISTORY_VENUES`) and N10 (moving the band) prove the SC-3 pins can fail. The full analytics suite fails exactly the same ids as the base. All of them are local-only: the quantstats version and pytest-xdist missing on the local machine.
+
+### Notes
+- Known limit, accepted by the ruling's narrow scope: on a retention-capped venue (OKX, Bybit) a deposit on the day before the first return day is exempted even when the returns start at the retention edge rather than at the account's start.
+- Known edge: a later segment of a key split at an unpriced hole is replayed with `history_reaches_inception` False whatever its venue, so the day before that segment's first return day is exempted the same way. That segment never had the D-13 check, so no check is skipped.
+- Review: gsd-code-reviewer and silent-failure-hunter found nothing at MEDIUM or above. The LOW and Info notes are kept in the phase REVIEW only, among them a possible ledger double count on a hole re-entry segment, a class that already existed for a deposit on such a segment's first return day.
+- No migration, no reader or payload change, no `TODOS.md` entry closed. The 155.2 freeze window is not open (plan 12's recapture has not run), and no MT5 number can move: MT5 is a full-history venue and its path is unchanged.
+
 ## [0.133.108.1] - 2026-11-27 — records: Phase 252 wave-2 probe PASSES on PROD after gap plan 08; founder decision 2026-11-27 recorded
 
 ### Changed
