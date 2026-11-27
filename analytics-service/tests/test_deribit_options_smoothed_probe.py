@@ -1236,3 +1236,92 @@ def test_the_emitter_refuses_a_vs_expiry_outside_the_closed_set(vs_expiry: Any) 
     }
     with pytest.raises(ValueError):
         probe.emit_record({**_honest_record(), "refusal_shape": shape})
+
+
+# --- plan 08 (gap G252-PROBE-M3), Founder decision 2026-11-27 -----------------------------
+# The 2026-11-27 PROD probe named member m3's smoothed refusal as an `exercise` row with change
+# zero and position zero. That exact shape now closes the option (partial reversal of D-09), so
+# the member must pass the same way the same ledger passes when an accepted expiry row closes it.
+
+_M3_IDS = (7501, 7502, 7503, 7504, 7505)
+_M3_LATER = "BTC-30JAN26-50000-P"
+# Funded base: a member `pass` needs C4 (``combine_native_ledger``) to reconcile and
+# ``series_days`` above zero, which needs a day-0 deposit (as ``_fixture_pair`` carries).
+_M3_SUMMARIES = [{"currency": "BTC", "equity": 0.96, "session_upl": 0.0, "options_value": 0.0}]
+_M3_CHARTS = {
+    _ROW_INSTR: {"2026-01-15": 0.03, "2026-01-16": 0.05, "2026-01-17": 0.0},
+    _M3_LATER: {"2026-01-20": 0.02, "2026-01-21": 0.02},
+}
+
+
+def _m3_rows(close: dict[str, Any]) -> list[dict[str, Any]]:
+    """A funded long put, ``close`` as its close row on 01-17, then a later short on another put."""
+    deposit = {
+        "type": "deposit", "currency": "BTC", "change": 1.0,
+        "timestamp": _mk_ms("2026-01-14"), "id": _M3_IDS[4],
+    }
+    opening = _opt_row(
+        instrument=_ROW_INSTR, day="2026-01-15", change=-0.04, position=1.0, id=_M3_IDS[0]
+    )
+    later_open = _opt_row(
+        instrument=_M3_LATER, day="2026-01-20", change=0.01, position=-1.0, id=_M3_IDS[2]
+    )
+    later_close = _opt_row(
+        instrument=_M3_LATER, day="2026-01-21", change=-0.01, position=0.0, id=_M3_IDS[3]
+    )
+    return [deposit, opening, close, later_open, later_close]
+
+
+def _m3_close(close_type: str, **overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "type": close_type,
+        "instrument_name": _ROW_INSTR,
+        "currency": "BTC",
+        "change": 0.0,
+        "timestamp": _mk_ms("2026-01-17", 8),
+        "id": _M3_IDS[1],
+    }
+    row.update(overrides)
+    return row
+
+
+async def _measure_m3(
+    monkeypatch: Any, rows: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The probe's real ``measure_member_live`` on a stubbed exchange: the records (smoothed
+    first) and every line the emitter prints for them."""
+    _patch_real_crawl(monkeypatch, rows)
+    stub = _OptionsAdapterStub(_M3_SUMMARIES, _M3_CHARTS)
+    records = await probe.measure_member_live(stub, "m1", None, sleep=_no_sleep)
+    return records, [probe.emit_record(r) for r in records]
+
+
+async def test_a_measured_shape_exercise_member_passes_like_an_expiry_close(
+    monkeypatch: Any,
+) -> None:
+    """The measured m3 shape (an exercise row, change zero and position zero) closes the long, so
+    the real smoothed build has no hole, C3 and C4 pass, and the member verdict is `pass`. The
+    control is the same ledger closed by an accepted expiry row: the two smoothed records must
+    be equal on every key, so the exercise close is no weaker and no stronger than the expiry
+    one. Red means PROD member m3 stays `build-error:OptionExerciseRowError` after the fix, and
+    the phase cannot close."""
+    ex_records, ex_lines = await _measure_m3(
+        monkeypatch, _m3_rows(_m3_close("exercise", position=0.0))
+    )
+    ex_smoothed = next(r for r in ex_records if r["basis"] == _SMOOTHED)
+    assert ex_smoothed["build"] == "ok"
+    assert ex_smoothed["build_error_detail"] is None
+    assert ex_smoothed["refusal_shape"] is None
+    assert (ex_smoothed["c3"], ex_smoothed["c4"]) == ("pass", "pass")
+    assert ex_smoothed["series_days"] > 0
+    assert ex_smoothed["member_verdict"] == "pass"
+    assert probe.verdict_record(ex_records)["verdict"] == "pass"
+
+    control_records, _control_lines = await _measure_m3(
+        monkeypatch, _m3_rows(_m3_close("expiry"))
+    )
+    control = next(r for r in control_records if r["basis"] == _SMOOTHED)
+    assert control["member_verdict"] == "pass"  # the control itself reaches `pass`
+    assert ex_smoothed == control
+    assert ex_records == control_records
+    _assert_no_row_text_in(ex_lines, _M3_IDS)

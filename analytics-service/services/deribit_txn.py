@@ -2474,8 +2474,14 @@ _OPTION_BOOK_CLOSE_TYPES: frozenset[str] = frozenset({"expiry"})
 assert not (_OPTION_BOOK_CLOSE_TYPES & CASH_BEARING_TYPES), (
     "an option book CLOSE type carries no cash and must never be cash-bearing"
 )
-# The in-the-money LONG side's expiry label per the same documentation. Its row
-# shape is unmeasured, so the replay refuses it by name (D-09).
+# The in-the-money LONG side's expiry label per the same documentation. D-09 refused
+# every such row because its shape was unmeasured. Founder decision 2026-11-27
+# (partial reversal of D-09): the one shape the 2026-11-27 PROD probe measured, a
+# `change` of zero and a PRESENT `position` of zero, closes the position to 0 on its
+# UTC day, and every other shape still refuses by name. It is deliberately NOT in
+# ``_OPTION_BOOK_CLOSE_TYPES`` (``_expiry_close`` accepts an absent change or position,
+# which is wider than the decision, and raises ``OptionExpiryRowError``), nor in the
+# cash-bearing or event sets (the measured row carries no cash).
 _OPTION_EXERCISE_TYPE: str = "exercise"
 
 
@@ -2557,7 +2563,13 @@ def replay_option_positions(
     (``_OPTION_BOOK_CLOSE_TYPES``, zero-cash) closes the position to 0 on its
     day, so an out-of-the-money expiry no longer leaves the option open past its
     life (which raised the daily-MTM hole on any later option activity). An
-    ``exercise`` row on an option refuses: its shape is unmeasured.
+    ``exercise`` row on an option refused as unmeasured; Founder decision 2026-11-27
+    (partial reversal of D-09) accepts exactly the shape the 2026-11-27 PROD probe
+    measured, ``change`` zero and ``position`` present and zero (read through
+    :func:`_row_field_shape`, the helper that produced that reading), and closes the
+    position to 0 on its UTC day. Every other exercise shape (a nonzero, absent or
+    non-numeric change; an absent, non-numeric or nonzero position) still raises
+    :class:`OptionExerciseRowError`.
 
     Returns ``{instrument: {currency, first_day, last_day, positions: {day:
     signed_size}}}`` where ``positions`` is keyed ONLY on event days (the caller
@@ -2582,19 +2594,24 @@ def replay_option_positions(
         if classify_instrument(instrument) != "option":
             continue
         if row_type == _OPTION_EXERCISE_TYPE:
-            # D-09 ITM variant, chosen to REFUSE: the long side of an in-the-money
-            # expiry is logged as `exercise`, and no census has measured its row
-            # shape. A zero-change one passes both cash twins, so without this it
-            # would leave the long open in the book. Named, never guessed.
-            raise OptionExerciseRowError(
-                f"option Deribit row id={row.get('id')!r} type='exercise': the "
-                "exercise row shape is unmeasured (no census), so the smoothed "
-                "option book cannot tell whether it closes the position; refusing "
-                "to guess (D-09)",
-                change_shape=_row_field_shape(row, "change"),
-                position_shape=_row_field_shape(row, "position"),
-                siblings=_same_instrument_census(rows, instrument),
-            )
+            # D-09 ITM variant. The long side of an in-the-money expiry is logged as
+            # `exercise`. Founder decision 2026-11-27 (partial reversal of D-09): ONLY
+            # the measured shape (change zero, position present and zero) is admitted,
+            # and the generic position read below then closes the book to 0 on its UTC
+            # day. Every other shape keeps raising, named, never guessed. A zero-change
+            # one passes both cash twins, so admitting it here is what closes the long.
+            change_shape = _row_field_shape(row, "change")
+            position_shape = _row_field_shape(row, "position")
+            if not (change_shape == ROW_FIELD_ZERO and position_shape == ROW_FIELD_ZERO):
+                raise OptionExerciseRowError(
+                    f"option Deribit row id={row.get('id')!r} type='exercise': the "
+                    "exercise row shape is unmeasured (no census), so the smoothed "
+                    "option book cannot tell whether it closes the position; refusing "
+                    "to guess (D-09)",
+                    change_shape=change_shape,
+                    position_shape=position_shape,
+                    siblings=_same_instrument_census(rows, instrument),
+                )
         per_instr.setdefault(instrument, []).append(row)
         # WR-03: UPPERCASE like every other currency read site in this module —
         # the adapter merges the day-keyed ΔMTM into the UPPERCASE-keyed
