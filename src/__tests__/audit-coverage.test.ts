@@ -387,6 +387,11 @@ const MUTATING_RPC_NAMES: readonly string[] = [
   // the same owner (supabase/migrations/20261123180100_swap_account_slot.sql). Reached
   // only through swapAccountSlot in src/lib/venue-identity.ts, which audits the demoted key.
   "swap_account_slot",
+  // Phase 243 DBBACKSTOP (DBACC-02, founder decision 2026-11-26): the audited writer for
+  // api_keys (supabase/migrations/20261127120100_insert_api_key_rpc_and_user_id_immutable.sql).
+  // Reached only from the validate-and-encrypt route's key-connect write, whose
+  // `@audit-skip: key connect` pragma is now enforced by this list rather than decorative.
+  "insert_api_key",
   // SEC-03 (Phase 163): the composite sibling of create_wizard_strategy —
   // column-for-column the same signature, called from
   // strategies/composite/add-key. Its ABSENCE here is what made the

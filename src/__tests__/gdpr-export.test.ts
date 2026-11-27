@@ -44,6 +44,7 @@ import {
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
@@ -2082,19 +2083,14 @@ describe("GDPR export — live DB integration", () => {
         cleanup.userIds.push(userId);
 
         // Seed representative rows across a handful of tables
-        const { data: keyRow, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "export-test-key",
-            api_key_encrypted: "ct",
-            dek_encrypted: "dct",
-          })
-          .select("id")
-          .single();
-        if (keyErr) throw new Error(`api_keys seed: ${keyErr.message}`);
-        cleanup.apiKeyIds.push(keyRow.id);
+        const keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "export-test-key",
+          apiKeyEncrypted: "ct",
+          dekEncrypted: "dct",
+        });
+        cleanup.apiKeyIds.push(keyId);
 
         const { error: pErr } = await admin
           .from("portfolios")

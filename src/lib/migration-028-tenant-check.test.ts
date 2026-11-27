@@ -29,6 +29,7 @@ import {
   HAS_LIVE_DB,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "./test-helpers/live-db";
@@ -68,22 +69,13 @@ describe("Migration 028 — cross-tenant api_key_id trigger", () => {
         row.userIdB = await createTestUser(admin, `tenant-b-${ts}@test.sec`);
 
         // User B creates an api_keys row
-        const { data: keyData, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: row.userIdB,
-            exchange: "binance",
-            label: "B's key",
-            api_key_encrypted: "ciphertext",
-            dek_encrypted: "dek",
-          })
-          .select("id")
-          .single();
-
-        if (keyErr || !keyData) {
-          throw new Error(`Failed to create test key: ${keyErr?.message}`);
-        }
-        row.keyIdB = keyData.id;
+        row.keyIdB = await createTestApiKey(admin, {
+          userId: row.userIdB,
+          exchange: "binance",
+          label: "B's key",
+          apiKeyEncrypted: "ciphertext",
+          dekEncrypted: "dek",
+        });
 
         // Attempt the attack: User A creates a strategy linked to B's key
         const { data: stratData, error: stratErr } = await admin
@@ -135,18 +127,13 @@ describe("Migration 028 — cross-tenant api_key_id trigger", () => {
         row.userIdB = await createTestUser(admin, `update-b-${ts}@test.sec`);
 
         // User B's key
-        const { data: keyData } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: row.userIdB,
-            exchange: "binance",
-            label: "B's key",
-            api_key_encrypted: "ciphertext",
-            dek_encrypted: "dek",
-          })
-          .select("id")
-          .single();
-        row.keyIdB = keyData!.id;
+        row.keyIdB = await createTestApiKey(admin, {
+          userId: row.userIdB,
+          exchange: "binance",
+          label: "B's key",
+          apiKeyEncrypted: "ciphertext",
+          dekEncrypted: "dek",
+        });
 
         // User A creates a strategy with NO api_key_id — passes the trigger
         const { data: stratData, error: stratErr } = await admin
@@ -193,18 +180,13 @@ describe("Migration 028 — cross-tenant api_key_id trigger", () => {
         row.userIdA = await createTestUser(admin, `self-a-${ts}@test.sec`);
 
         // User A's own key
-        const { data: keyData } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: row.userIdA,
-            exchange: "okx",
-            label: "A's own key",
-            api_key_encrypted: "ciphertext",
-            dek_encrypted: "dek",
-          })
-          .select("id")
-          .single();
-        row.keyIdB = keyData!.id; // parked in keyIdB slot for cleanup reuse
+        row.keyIdB = await createTestApiKey(admin, {
+          userId: row.userIdA,
+          exchange: "okx",
+          label: "A's own key",
+          apiKeyEncrypted: "ciphertext",
+          dekEncrypted: "dek",
+        }); // parked in keyIdB slot for cleanup reuse
 
         // User A creates a strategy linked to their OWN key — must succeed
         const { data: stratData, error: stratErr } = await admin
@@ -310,21 +292,13 @@ describe("Migration 028 — cross-tenant api_key_id trigger", () => {
         row.userIdA = await createTestUser(admin, `ondelete-a-${ts}@test.sec`);
 
         // User A's own key.
-        const { data: keyData, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: row.userIdA,
-            exchange: "okx",
-            label: "A's key (to be deleted)",
-            api_key_encrypted: "ciphertext",
-            dek_encrypted: "dek",
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyData) {
-          throw new Error(`Failed to create test key: ${keyErr?.message}`);
-        }
-        row.keyIdB = keyData.id; // parked in keyIdB slot for cleanup reuse
+        row.keyIdB = await createTestApiKey(admin, {
+          userId: row.userIdA,
+          exchange: "okx",
+          label: "A's key (to be deleted)",
+          apiKeyEncrypted: "ciphertext",
+          dekEncrypted: "dek",
+        }); // parked in keyIdB slot for cleanup reuse
 
         // User A links a strategy to their own key — passes the 028/029 trigger.
         const { data: stratData, error: stratErr } = await admin

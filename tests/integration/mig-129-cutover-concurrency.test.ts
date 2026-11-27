@@ -137,24 +137,20 @@ describe.skipIf(!HAS_TEST_SUPABASE)(
 
       // api_keys row (required FK target for strategies.api_key_id, but
       // we only need any active row for the same user).
-      const apiKeyRes = await clientA
-        .from("api_keys")
-        .insert({
-          user_id: userId,
-          exchange: "binance",
-          label: `mig129-${labelSuffix}`,
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        })
-        .select("id")
-        .single();
-      if (apiKeyRes.error || !apiKeyRes.data) {
+      // DBACC-02: service_role writes api_keys only through the audited writer RPC.
+      const apiKeyRes = await clientA.rpc("insert_api_key", {
+        p_user_id: userId,
+        p_exchange: "binance",
+        p_label: `mig129-${labelSuffix}`,
+        p_api_key_encrypted: "test-only:not-a-real-secret",
+        p_kek_version: 1,
+      });
+      if (apiKeyRes.error || typeof apiKeyRes.data !== "string" || !apiKeyRes.data) {
         throw new Error(
           `Seed: api_key insert failed: ${apiKeyRes.error?.message ?? "no row"}`,
         );
       }
-      const apiKeyId = apiKeyRes.data.id as string;
+      const apiKeyId = apiKeyRes.data;
       seedApiKeyIds.push(apiKeyId);
 
       // strategies row — status 'published' so the RPC sees a real strategy.

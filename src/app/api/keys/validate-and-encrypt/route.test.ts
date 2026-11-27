@@ -76,8 +76,19 @@ const {
    */
   PERSIST_STATE: {
     inserts: [] as Record<string, unknown>[],
-    /** The `{ data, error }` the `.single()` terminal resolves to. */
+    /**
+     * The `{ data, error }` the DIRECT `.from("api_keys").insert().single()` terminal
+     * resolves to. Phase 243 (DBACC-02): the route no longer writes this way, so the
+     * mock stays only to RECORD a reintroduced direct insert in `inserts` (the
+     * "no direct insert" arm). The route's write answers through `insertKeyResult`.
+     */
     insertResult: null as { data: unknown; error: unknown } | null,
+    /**
+     * Phase 243 (DBACC-02) - the `{ data, error }` the writer RPC `insert_api_key`
+     * resolves to. null = success with the id `"persisted-key-id"`. Every other rpc
+     * name keeps answering `rpcResult`, so the `swap_account_slot` arms are unchanged.
+     */
+    insertKeyResult: null as { data: unknown; error: unknown } | null,
     /** When set, `createAdminClient()` THROWS this — the missing-service-key arm. */
     adminFactoryError: null as Error | null,
     /**
@@ -149,7 +160,7 @@ vi.mock("@/lib/supabase/server", () => ({
  *
  * The chain is modelled exactly as the route calls it —
  * `.from(table).insert(payload).select(cols).single()` — and the payload is
- * pushed into PERSIST_STATE.inserts BEFORE the terminal resolves, so a test can
+ * pushed into the mock's `inserts` record BEFORE the terminal resolves, so a test can
  * read what was written even on the arms where the insert then fails.
  *
  * `from` records the table too: the assertion "the row went into api_keys" is
@@ -161,6 +172,9 @@ vi.mock("@/lib/supabase/admin", () => ({
     return {
       rpc: async (name: string, args: Record<string, unknown>) => {
         PERSIST_STATE.rpcCalls.push({ name, args });
+        if (name === "insert_api_key") {
+          return PERSIST_STATE.insertKeyResult ?? { data: "persisted-key-id", error: null };
+        }
         return PERSIST_STATE.rpcResult ?? { data: null, error: null };
       },
       from: (table: string) => ({
@@ -280,6 +294,30 @@ vi.mock("@/lib/supabase/admin", () => ({
     };
   },
 }));
+
+/**
+ * Phase 243 DBBACKSTOP (DBACC-02) - the arguments of every `insert_api_key` call the
+ * route made, in order. The route writes the key row through this audited writer RPC,
+ * so these are the oracle for what the SERVER decided to write: the owner, the venue,
+ * the encrypted columns and the venue identity. An EMPTY list is the "nothing was
+ * written" oracle.
+ */
+function insertKeyCalls(): Record<string, unknown>[] {
+  return PERSIST_STATE.rpcCalls.filter((c) => c.name === "insert_api_key").map((c) => c.args);
+}
+
+/** Reset every record of how the key row was written (the RPC and any direct insert). */
+function resetWriterRecords(): void {
+  PERSIST_STATE.inserts.length = 0;
+  PERSIST_STATE.insertResult = null;
+  PERSIST_STATE.insertKeyResult = null;
+  PERSIST_STATE.rpcCalls.length = 0;
+}
+
+/** Every rpc the route issued EXCEPT the key writer (the swap, the compute enqueue). */
+function nonWriterRpcCalls() {
+  return PERSIST_STATE.rpcCalls.filter((c) => c.name !== "insert_api_key");
+}
 
 // ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
 // `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
@@ -1569,8 +1607,7 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
     rateLimitResult.reason = undefined;
-    PERSIST_STATE.inserts.length = 0;
-    PERSIST_STATE.insertResult = null;
+    resetWriterRecords();
     PERSIST_STATE.adminFactoryError = null;
     PERSIST_STATE.sameLoginRows = [];
     PERSIST_STATE.sameLoginError = null;
@@ -1609,36 +1646,61 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     );
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    const row = PERSIST_STATE.inserts[0];
-    expect(row.__table).toBe("api_keys");
-    // BOTH columns against the SAME hand-typed venue. That is also what pins
-    // the coupling the DB CHECK enforces (a divergence caught in CI rather than
-    // as a 23514 in production) — and it pins it INDEPENDENTLY. A bare
-    // `expect(row.attested_venue).toBe(row.exchange)` stood here and could not
-    // fail once these two passed; worse, on its own it is satisfied by a row
-    // whose columns were BOTH forged to the same wrong venue (review F3).
-    expect(row.exchange).toBe("deribit");
-    expect(row.attested_venue).toBe("deribit");
-    expect(row.user_id).toBe(TEST_USER.id);
-    expect(row.user_id).not.toBe("00000000-0000-0000-0000-ffffffffffff");
-    // The ciphertext still reaches the ROW (it has to — that is the key), it
+    expect(insertKeyCalls()).toHaveLength(1);
+    const args = insertKeyCalls()[0];
+    // Phase 243 (DBACC-02): the write is the audited writer RPC (the dedicated
+    // "no direct insert" arm below pins that nothing else wrote the table).
+    // The venue the server validated, against a hand-typed literal. The DATABASE
+    // stamps `attested_venue` from `p_exchange` inside the SECURITY DEFINER writer
+    // (the SQL gate's arm R1 and the live-lane file's arm (a) prove it), so the
+    // route sends NO attestation: the hostile body's `attested_venue: "mt5"` has no
+    // argument to land in. A route that forwarded it would fail the next line.
+    expect(args.p_exchange).toBe("deribit");
+    expect(args).not.toHaveProperty("p_attested_venue");
+    expect(args.p_user_id).toBe(TEST_USER.id);
+    expect(args.p_user_id).not.toBe("00000000-0000-0000-0000-ffffffffffff");
+    // The ciphertext still reaches the writer (it has to - that is the key), it
     // simply stops reaching the browser. See the response oracle below.
-    expect(row.api_key_encrypted).toBe("ct-blob");
-    expect(row.dek_encrypted).toBe("dek-ct");
-    // ⭐ 160 review F1 — TOTALITY, not a sample. The two assertions above pin
+    expect(args.p_api_key_encrypted).toBe("ct-blob");
+    expect(args.p_dek_encrypted).toBe("dek-ct");
+    // ⭐ 160 review F1 - TOTALITY, not a sample. The two assertions above pin
     // 2 of the 6 fields the encrypt contract declares; `nonce`, `kek_version`,
-    // `api_secret_encrypted` and `passphrase_encrypted` were asserted NOWHERE,
-    // so deleting any of them from the route's projection was invisible to this
-    // suite. That is not a cosmetic gap: `kek_version` is INTEGER NOT NULL
-    // DEFAULT 1, so its omission INSERTs successfully and mislabels the KEK the
-    // blob is wrapped under — the row decrypts nowhere, in another service,
-    // days later, with no error anywhere. Driven off `.shape` rather than a
-    // second hand-written list so it grows with the contract: a seventh schema
-    // field the route forgets to write reddens HERE as well as at `tsc`.
+    // `api_secret_encrypted` and `passphrase_encrypted` would otherwise be asserted
+    // NOWHERE, so deleting any of them from the route's projection would be
+    // invisible to this suite. That is not a cosmetic gap: `kek_version` omitted
+    // stores KEK v1 and mislabels the KEK the blob is wrapped under - the row
+    // decrypts nowhere, in another service, days later, with no error anywhere.
+    // Driven off `.shape` rather than a second hand-written list so it grows with
+    // the contract: a seventh schema field the route forgets to send reddens HERE
+    // as well as at `tsc`. Each argument is compared to the seam's VALUE, not just
+    // its presence.
+    const seamValues: Record<string, unknown> = {
+      api_key_encrypted: "ct-blob",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: "dek-ct",
+      nonce: "nonce-b64",
+      kek_version: 3,
+    };
     for (const field of Object.keys(EncryptKeyResponseSchema.shape)) {
-      expect(row, `the insert projection dropped ${field}`).toHaveProperty(field);
+      expect(args, `the writer call dropped p_${field}`).toHaveProperty(`p_${field}`);
+      expect(args[`p_${field}`], `p_${field} is not the seam's value`).toEqual(seamValues[field]);
     }
+  });
+
+  // ── (1a) Phase 243 DBBACKSTOP (DBACC-02): NO DIRECT api_keys INSERT ────────
+  // The route's key-connect write moved into `insert_api_key`, and PR-C's fence
+  // refuses every insert that is not that writer. A route that quietly went back to
+  // `.from("api_keys").insert(...)` would pass every assertion on the writer's
+  // arguments while the fence (once applied) refused it in production. The mock
+  // records any direct insert, so this arm is the one that catches it.
+  it("a successful connect writes through insert_api_key and records NO direct .from(\"api_keys\").insert", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeReq(persistBody({ exchange: "deribit" })));
+
+    expect(res.status).toBe(200);
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(PERSIST_STATE.inserts.filter((row) => row.__table === "api_keys")).toEqual([]);
   });
 
   // ── (1b) THE SECOND FORGERY VECTOR: the encryptKey RESPONSE, not the body ──
@@ -1688,19 +1750,23 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const res = await POST(makeReq(persistBody({ exchange: EXPECTED_VENUE })));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    const row = PERSIST_STATE.inserts[0];
-    expect(row.user_id).toBe(TEST_USER.id);
-    // BOTH venue columns against the SAME independent expectation — never
-    // against each other. The DB CHECK's equality is a CONSEQUENCE of each
-    // column carrying the venue this server authenticated against; asserting
-    // only the equality would be satisfied by a row where BOTH were forged to
-    // the poisoned "mt5" above.
-    expect(row.exchange).toBe(EXPECTED_VENUE);
-    expect(row.attested_venue).toBe(EXPECTED_VENUE);
-    // The ciphertext from the same response still lands — the guard is scoped to
-    // the provenance columns, it does not discard the payload we asked for.
-    expect(row.api_key_encrypted).toBe("ct-blob");
+    expect(insertKeyCalls()).toHaveLength(1);
+    const args = insertKeyCalls()[0];
+    expect(args.p_user_id).toBe(TEST_USER.id);
+    // The venue argument against an independent hand-typed expectation, never
+    // against another field of the same call. The database stamps `attested_venue`
+    // from `p_exchange` (SQL gate arm R1, live-lane arm (a)), so the poisoned
+    // response's `attested_venue: "mt5"` has no argument to land in: the route
+    // sends none, and asserting only an equality would be satisfied by a call
+    // where every venue-bearing argument was forged to the poisoned "mt5".
+    expect(args.p_exchange).toBe(EXPECTED_VENUE);
+    expect(args).not.toHaveProperty("p_attested_venue");
+    // The poisoned label did not reach the writer either: the label is the
+    // server's own value.
+    expect(args.p_label).toBe("My OKX key");
+    // The ciphertext from the same response still lands - the guard is scoped to
+    // the provenance arguments, it does not discard the payload we asked for.
+    expect(args.p_api_key_encrypted).toBe("ct-blob");
   });
 
   // ── (2) NORMALIZATION: the CANONICAL venue lands, not the raw body string ──
@@ -1712,12 +1778,15 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     );
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(insertKeyCalls()).toHaveLength(1);
     // The api_keys CHECK admits lowercase venue codes only. If either column
     // were written from `body.exchange` instead of the route's own
     // `exchangeNormalized`, this row would carry "MT5" and 23514 in production.
-    expect(PERSIST_STATE.inserts[0].exchange).toBe("mt5");
-    expect(PERSIST_STATE.inserts[0].attested_venue).toBe("mt5");
+    expect(insertKeyCalls()[0].p_exchange).toBe("mt5");
+    // The database stamps `attested_venue` from this one argument, so the CHECK
+    // that couples the two columns cannot be violated by the route; the route sends
+    // no attestation of its own.
+    expect(insertKeyCalls()[0]).not.toHaveProperty("p_attested_venue");
   });
 
   // ── (2b) 164.5.3-02 — venue_account_id: populated for MT5, null otherwise ──
@@ -1740,8 +1809,8 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     );
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("5001234");
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe("5001234");
   });
 
   // 167.1.2 (c): a ccxt validation WITHOUT an id still connects, with NULL.
@@ -1752,9 +1821,9 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const res = await POST(makeReq(persistBody({ exchange: "okx" })));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_exchange).toBe("okx");
+    expect(insertKeyCalls()[0]).not.toHaveProperty("p_venue_account_id");
   });
 
   // 167.1.2 (a) — D-01. The id the validator read from THIS credential is what
@@ -1771,9 +1840,9 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const res = await POST(makeReq(persistBody({ exchange: "okx" })));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].exchange).toBe("okx");
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe("100000001");
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_exchange).toBe("okx");
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe("100000001");
     // The id is written, never echoed back to the browser.
     expect(JSON.stringify(await res.json())).not.toContain("100000001");
   });
@@ -1804,14 +1873,14 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     const res = await POST(makeReq(persistBody({ label: undefined })));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
+    expect(insertKeyCalls()[0].p_label).toBe("OKX key");
   });
 
   it("falls back to the server default when the label is whitespace-only", async () => {
     const { POST } = await import("./route");
     await POST(makeReq(persistBody({ label: "   " })));
 
-    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
+    expect(insertKeyCalls()[0].p_label).toBe("OKX key");
   });
 
   it("CAPS an over-long label at 120 chars rather than failing an already-validated connect", async () => {
@@ -1821,14 +1890,14 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
     // The connect SUCCEEDS — a cosmetic display string must not cost the user
     // a live venue round-trip they already passed.
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts[0].label).toBe("L".repeat(120));
+    expect(insertKeyCalls()[0].p_label).toBe("L".repeat(120));
   });
 
   it("ignores a non-string label (server default), never coercing it into the row", async () => {
     const { POST } = await import("./route");
     await POST(makeReq(persistBody({ label: { evil: true } })));
 
-    expect(PERSIST_STATE.inserts[0].label).toBe("OKX key");
+    expect(insertKeyCalls()[0].p_label).toBe("OKX key");
   });
 });
 
@@ -1875,7 +1944,7 @@ describe("POST /api/keys/validate-and-encrypt — the persist arm (160-02 / RANK
  *      they would reach the WRITER, which is the double-write threat wearing a
  *      different hat now that the server is the only writer.
  *
- * `PERSIST_STATE.inserts` staying EMPTY remains the anti-double-write pin.
+ * the writer's recorded calls staying EMPTY remains the anti-double-write pin.
  */
 describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses, and serves no ciphertext", () => {
   /** Every ciphertext-shaped key the legacy envelope used to carry. */
@@ -1901,8 +1970,7 @@ describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
     rateLimitResult.reason = undefined;
-    PERSIST_STATE.inserts.length = 0;
-    PERSIST_STATE.insertResult = null;
+    resetWriterRecords();
     PERSIST_STATE.adminFactoryError = null;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -1938,7 +2006,7 @@ describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses
     // THIS arm reddened nothing. The refusal names a tenant's client state and
     // the request that produced it carried raw exchange credentials.
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
   });
 
   it("the refusal happens BEFORE any live venue call — no validate, no encrypt", async () => {
@@ -1975,7 +2043,7 @@ describe("POST /api/keys/validate-and-encrypt — the retired legacy arm refuses
       expect(body.code).toBe("STALE_CLIENT");
       // … and no id, because it never reached the writer.
       expect(body.api_key_id).toBeUndefined();
-      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(insertKeyCalls()).toEqual([]);
     },
   );
 });
@@ -2002,8 +2070,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
     rateLimitResult.reason = undefined;
-    PERSIST_STATE.inserts.length = 0;
-    PERSIST_STATE.insertResult = null;
+    resetWriterRecords();
     PERSIST_STATE.adminFactoryError = null;
     mockValidateKey.mockResolvedValue({ valid: true, read_only: true });
     mockEncryptKey.mockResolvedValue({
@@ -2041,7 +2108,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     // an unthrottled path to a live credential probe.
     expect(mockValidateKey).not.toHaveBeenCalled();
     expect(mockEncryptKey).not.toHaveBeenCalled();
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
   });
 
   // ── Test 2: upstream validation failure ⇒ nothing is minted ───────────────
@@ -2059,7 +2126,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     expect(body).toEqual({ error: "Invalid API credentials", code: "KEY_AUTH_FAILED" });
     // A key that did not authenticate must never become an ATTESTED row — the
     // attestation is precisely the claim "this server saw this key work here".
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(mockEncryptKey).not.toHaveBeenCalled();
     expect(Object.keys(body).filter((k) => CIPHERTEXT_KEY_PATTERN.test(k))).toEqual([]);
   });
@@ -2072,7 +2139,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
 
     expect(res.status).toBe(400);
     expect((await res.json()).code).toBe("KEY_NOT_READ_ONLY");
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
   });
 
   // ── Test 3: the INSERT itself rejects ─────────────────────────────────────
@@ -2081,7 +2148,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       'new row for relation "api_keys" violates check constraint ' +
       '"api_keys_attested_venue_matches_exchange" (SQLSTATE 23514) ' +
       "DETAIL: Failing row contains (okx-api-key, okx-api-secret)";
-    PERSIST_STATE.insertResult = { data: null, error: { message: RAW_PG, code: "23514" } };
+    PERSIST_STATE.insertKeyResult = { data: null, error: { message: RAW_PG, code: "23514" } };
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { POST } = await import("./route");
@@ -2156,7 +2223,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       'duplicate key value violates unique constraint ' +
       '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
       "DETAIL: Key (user_id, exchange, venue_account_id)=(…, mt5, 5551234) already exists.";
-    PERSIST_STATE.insertResult = {
+    PERSIST_STATE.insertKeyResult = {
       data: null,
       error: { message: RAW_PG, code: "23505" },
     };
@@ -2198,7 +2265,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       'duplicate key value violates unique constraint ' +
       '"api_keys_user_exchange_venue_account_uniq" (SQLSTATE 23505) ' +
       `DETAIL: Key (user_id, exchange, venue_account_id)=(…, okx, ${UID}) already exists.`;
-    PERSIST_STATE.insertResult = {
+    PERSIST_STATE.insertKeyResult = {
       data: null,
       error: { message: RAW_PG, code: "23505" },
     };
@@ -2214,7 +2281,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       error:
         "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
     });
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(UID);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(UID);
     expect(JSON.stringify(body)).not.toContain(UID);
     // The collision WAS logged (the arm ran), and the logged line is scrubbed.
     const logged = JSON.stringify(consoleErr.mock.calls);
@@ -2229,7 +2296,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
   it("the venue-identity collision arm (409) logs the inbound correlation id", async () => {
     const CID = "key-validate:11111111-2222-4333-8444-555555555555";
     INBOUND_HEADERS.correlationId = CID;
-    PERSIST_STATE.insertResult = {
+    PERSIST_STATE.insertKeyResult = {
       data: null,
       error: {
         message:
@@ -2254,7 +2321,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     const RAW_PG =
       'duplicate key value violates unique constraint ' +
       '"strategies_user_wizard_session_source_uniq" (SQLSTATE 23505)';
-    PERSIST_STATE.insertResult = {
+    PERSIST_STATE.insertKeyResult = {
       data: null,
       error: { message: RAW_PG, code: "23505" },
     };
@@ -2277,7 +2344,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     // The shape that makes a false success possible: PostgREST answered without
     // an error but handed back nothing. Reporting 200 here would tell the user
     // the key was saved and hand the component an undefined id.
-    PERSIST_STATE.insertResult = { data: null, error: null };
+    PERSIST_STATE.insertKeyResult = { data: null, error: null };
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { POST } = await import("./route");
@@ -2309,7 +2376,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     // the same distinction the 503-vs-429 limiter arm draws above.
     expect(body.error).not.toMatch(/key validation failed/i);
     expect(body.error).not.toContain("SUPABASE");
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
 
     consoleErr.mockRestore();
   });
@@ -2327,7 +2394,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
       [
         "insert fault",
         () => {
-          PERSIST_STATE.insertResult = {
+          PERSIST_STATE.insertKeyResult = {
             data: null,
             error: { message: "boom", code: "XX000" },
           };
@@ -2379,8 +2446,7 @@ describe("POST /api/keys/validate-and-encrypt — persist-arm failure surface (1
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     for (const [label, setup] of arms) {
       // Reset to the happy baseline, then drive exactly one arm.
-      PERSIST_STATE.inserts.length = 0;
-      PERSIST_STATE.insertResult = null;
+      resetWriterRecords();
       PERSIST_STATE.adminFactoryError = null;
       rateLimitResult.success = true;
       rateLimitResult.retryAfter = 0;
@@ -2566,8 +2632,7 @@ describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of t
    * behavioural case.
    */
   it("PITFALL 6: a persist request still reaches the writer and still returns the row id, unchanged", async () => {
-    PERSIST_STATE.inserts.length = 0;
-    PERSIST_STATE.insertResult = null;
+    resetWriterRecords();
     PERSIST_STATE.adminFactoryError = null;
     mockEncryptKey.mockResolvedValue({
       api_key_encrypted: "ct-blob",
@@ -2587,7 +2652,7 @@ describe("[161-09 / WIZERR-08] the four request-shape arms carry codes true of t
     expect(body).toEqual({ api_key_id: expect.any(String), valid: true, read_only: true });
     // The writer really ran — a 200 with no INSERT would satisfy the shape
     // assertion above while proving the persist path was skipped entirely.
-    expect(PERSIST_STATE.inserts.length).toBe(1);
+    expect(insertKeyCalls().length).toBe(1);
   });
 
   it("PITFALL 6: all four re-coded arms sit UPSTREAM of the persist discriminator, in source order", () => {
@@ -3088,8 +3153,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     rateLimitResult.success = true;
     rateLimitResult.retryAfter = 0;
     rateLimitResult.reason = undefined;
-    PERSIST_STATE.inserts.length = 0;
-    PERSIST_STATE.insertResult = null;
+    resetWriterRecords();
     PERSIST_STATE.adminFactoryError = null;
     PERSIST_STATE.sameLoginRows = [];
     PERSIST_STATE.sameLoginError = null;
@@ -3133,11 +3197,11 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body).toEqual({ api_key_id: "persisted-key-id", valid: true, read_only: true });
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(insertKeyCalls()).toHaveLength(1);
     // The new key carries NO identity at insert: the swap stamps it atomically,
     // so the unique index never sees two holders (the failing one still has it).
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBeNull();
-    expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+    expect(insertKeyCalls()[0]).not.toHaveProperty("p_venue_account_id");
+    expect(insertKeyCalls()[0]).not.toHaveProperty("p_venue_server");
     // A swap that lands undoes nothing.
     expect(PERSIST_STATE.deletes).toEqual([]);
 
@@ -3175,7 +3239,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body).toEqual(REFUSAL);
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
     expect(JSON.stringify([body, consoleErr.mock.calls])).not.toContain(OKX_UID);
     consoleErr.mockRestore();
@@ -3188,7 +3252,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
 
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual(REFUSAL);
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
   });
 
@@ -3273,7 +3337,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
       for (const read of PERSIST_STATE.holderReads) {
         expect(read.user_id ?? read.owner_id, `${String(read.__table)} read was not owner-scoped`).toBe(TEST_USER.id);
       }
-      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(insertKeyCalls()).toEqual([]);
       expect(PERSIST_STATE.rpcCalls).toEqual([]);
     });
 
@@ -3298,7 +3362,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).toBe(409);
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
   });
 
   it("an MT5 add beside a same-login owner key on a DIFFERENT server is inserted (the fence admits it)", async () => {
@@ -3307,10 +3371,10 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
-    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
-    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(LOGIN);
+    expect(insertKeyCalls()[0].p_venue_server).toBe(SERVER_NORMALISED);
+    expect(nonWriterRpcCalls()).toEqual([]);
   });
 
   // ── Q2 / CONN-03: the server on the insert ─────────────────────────────────
@@ -3319,9 +3383,9 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add({ api_key: "  5001234  ", passphrase: "  MetaQuotes-Demo  " }));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
-    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(LOGIN);
+    expect(insertKeyCalls()[0].p_venue_server).toBe(SERVER_NORMALISED);
   });
 
   it("WR-03: an MT5 add whose server carries no-break-space padding stores the value the Python poll captures (str.strip first)", async () => {
@@ -3329,8 +3393,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add({ passphrase: "\u00a0MetaQuotes-Demo\u00a0" }));
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_venue_server).toBe(SERVER_NORMALISED);
   });
 
   it("an okx add carries venue_server null", async () => {
@@ -3339,9 +3403,9 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(okxAdd());
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(OKX_UID);
-    expect(PERSIST_STATE.inserts[0].venue_server).toBeNull();
+    expect(insertKeyCalls()).toHaveLength(1);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(OKX_UID);
+    expect(insertKeyCalls()[0]).not.toHaveProperty("p_venue_server");
   });
 
   // ── 225-18 (CONTEXT Q6 item 2): the stored server is the validated server ──
@@ -3355,10 +3419,10 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(res.status).toBe(200);
     expect(mockValidateKey).toHaveBeenCalledTimes(1);
     expect(mockValidateKey.mock.calls[0][3]).toBe("  MetaQuotes-Demo  ");
-    expect(PERSIST_STATE.inserts).toHaveLength(1);
+    expect(insertKeyCalls()).toHaveLength(1);
     // The literal is the oracle for the normaliser; the call order shows the
     // insert came after the validation it describes.
-    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
+    expect(insertKeyCalls()[0].p_venue_server).toBe(SERVER_NORMALISED);
     expect(mockValidateKey.mock.invocationCallOrder[0]).toBeLessThan(
       mockEncryptKey.mock.invocationCallOrder[0],
     );
@@ -3375,7 +3439,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).not.toBe(200);
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
@@ -3386,7 +3450,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).toBe(400);
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
     expect(mockEncryptKey).not.toHaveBeenCalled();
   });
@@ -3397,7 +3461,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
 
     expect(res.status).toBe(400);
     expect(mockValidateKey).not.toHaveBeenCalled();
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
   });
 
   // ── Q3 / ONCE-02: never across owners ──────────────────────────────────────
@@ -3412,8 +3476,8 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(res.status).toBe(200);
     expect(PERSIST_STATE.sameLoginReads).toHaveLength(1);
     expect(PERSIST_STATE.sameLoginReads[0].user_id).toBe(TEST_USER.id);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(OKX_UID);
-    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(OKX_UID);
+    expect(nonWriterRpcCalls()).toEqual([]);
   });
 
   it("the same MT5 login and server held only by ANOTHER owner's FAILING key is inserted with the identity stamped and no swap", async () => {
@@ -3422,9 +3486,9 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     const res = await POST(mt5Add());
 
     expect(res.status).toBe(200);
-    expect(PERSIST_STATE.inserts[0].venue_account_id).toBe(LOGIN);
-    expect(PERSIST_STATE.inserts[0].venue_server).toBe(SERVER_NORMALISED);
-    expect(PERSIST_STATE.rpcCalls).toEqual([]);
+    expect(insertKeyCalls()[0].p_venue_account_id).toBe(LOGIN);
+    expect(insertKeyCalls()[0].p_venue_server).toBe(SERVER_NORMALISED);
+    expect(nonWriterRpcCalls()).toEqual([]);
   });
 
   // ── the dark fence ─────────────────────────────────────────────────────────
@@ -3447,7 +3511,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
     expect(text).not.toContain(LOGIN);
     expect(text).not.toContain(SERVER_RAW);
     // Nothing was written: no insert, no swap.
-    expect(PERSIST_STATE.inserts).toEqual([]);
+    expect(insertKeyCalls()).toEqual([]);
     expect(PERSIST_STATE.rpcCalls).toEqual([]);
     expect(captureSpy).toHaveBeenCalledTimes(1);
     expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-read");
@@ -3669,7 +3733,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
 
       expect(res.status).toBe(409);
       expect(await res.text()).toBe(KEY_VENUE_ALREADY_CONNECTED_BODY);
-      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(insertKeyCalls()).toEqual([]);
       expect(PERSIST_STATE.rpcCalls).toEqual([]);
       expect(PERSIST_STATE.deletes).toEqual([]);
       expect(PERSIST_STATE.dependentReads).toEqual([
@@ -3706,7 +3770,7 @@ describe("POST /api/keys/validate-and-encrypt — one account per owner (Phase 2
       const text = await res.text();
       expect(JSON.parse(text).code).toBe("UNKNOWN");
       expect(text).not.toContain(LOGIN);
-      expect(PERSIST_STATE.inserts).toEqual([]);
+      expect(insertKeyCalls()).toEqual([]);
       expect(PERSIST_STATE.rpcCalls).toEqual([]);
       expect(captureSpy).toHaveBeenCalledTimes(1);
       expect(captureSpy.mock.calls[0][1].tags.step).toBe("holder-read");

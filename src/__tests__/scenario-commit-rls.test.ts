@@ -40,6 +40,7 @@ import { createClient } from "@supabase/supabase-js";
 import {
   HAS_LIVE_DB,
   createLiveAdminClient,
+  createTestApiKey,
   advertiseLiveDbSkipReason,
   LIVE_DB_URL,
 } from "@/lib/test-helpers/live-db";
@@ -289,29 +290,27 @@ describe("POST /api/allocator/scenario/commit — live-DB RLS regression (Phase 
     // Seed api_keys for both allocators (FK target for allocator_holdings).
     const apiKeyAId = "00000000-0000-0000-0000-000000007095";
     const apiKeyBId = "00000000-0000-0000-0000-000000007096";
-    await admin.from("api_keys").upsert(
-      [
-        {
-          id: apiKeyAId,
-          user_id: allocAId,
-          exchange: "binance",
-          label: "Phase10 RLS A (synthetic)",
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        },
-        {
-          id: apiKeyBId,
-          user_id: allocBId,
-          exchange: "okx",
-          label: "Phase10 RLS B (synthetic)",
-          api_key_encrypted: "test-only:not-a-real-secret",
-          is_active: true,
-          kek_version: 1,
-        },
-      ],
-      { onConflict: "id" },
-    );
+    // Phase 243 DBACC-02: seeded through the audited writer, keeping the fixed ids.
+    // ifAbsent keeps re-run idempotence without an upsert: the PR-C fence fires on
+    // INSERT ... ON CONFLICT before conflict resolution. is_active is the table default.
+    await createTestApiKey(admin, {
+      id: apiKeyAId,
+      userId: allocAId,
+      exchange: "binance",
+      label: "Phase10 RLS A (synthetic)",
+      apiKeyEncrypted: "test-only:not-a-real-secret",
+      kekVersion: 1,
+      ifAbsent: true,
+    });
+    await createTestApiKey(admin, {
+      id: apiKeyBId,
+      userId: allocBId,
+      exchange: "okx",
+      label: "Phase10 RLS B (synthetic)",
+      apiKeyEncrypted: "test-only:not-a-real-secret",
+      kekVersion: 1,
+      ifAbsent: true,
+    });
 
     // Seed allocator_holdings — A owns BTC + ETH on binance; B owns SOL on okx.
     const today = new Date().toISOString().slice(0, 10);

@@ -54,6 +54,7 @@ import {
   seedTestAllocator,
   seedStrategyWithHistory,
   cleanupStrategiesByNamePrefix,
+  insertApiKeyViaRpc,
 } from "./helpers/seed-test-project";
 import { getCleanupAdmin } from "./helpers/cleanup-test-project";
 import { isPostLoginPath } from "./helpers/login";
@@ -258,16 +259,16 @@ test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — /strategies merge
     });
     // An active key that feeds no strategy is a placeholder row, which prints the
     // key's label. Same placeholder-ciphertext idiom as seedWizardDraft.
-    const { error } = await getCleanupAdmin().from("api_keys").insert({
-      user_id: owner.userId,
+    await insertApiKeyViaRpc(getCleanupAdmin(), {
+      userId: owner.userId,
       exchange: "binance",
       label: `${NAME_PREFIX}${LONG_TEXT}`,
-      api_key_encrypted: "e2e-placeholder-ciphertext",
-      is_active: true,
+      apiKeyEncrypted: "e2e-placeholder-ciphertext",
+    }).catch((e: unknown) => {
+      throw new Error(
+        `reflow /strategies bare key seed failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
     });
-    if (error) {
-      throw new Error(`reflow /strategies bare key seed failed: ${error.message}`);
-    }
   });
 
   test.afterAll(async () => {

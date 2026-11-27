@@ -774,8 +774,9 @@ describe("corpus re-derivation", () => {
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): totalAnchored 1074 -> 1079, +5 twinned arms (P8, P8/sfox, P8/deribit, P9/binance, P9/bybit) in test_enqueue_poll_positions_cohort.sql, a file already annotated.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): totalAnchored 1079 -> 1085, +6 twinned arms (1a, 1b, 2a, 2b, 3, 4) in the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `arms: 0/1085/0`, `coverage: files 97/124`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): totalAnchored 1085 -> 1099, +14 twinned arms (R1 to R8 in test_insert_api_key_rpc.sql, 1a, 1b, 2a, 2b, 3, 4 in test_api_keys_user_id_immutable.sql). MEASURED: `--parse-only` printed `arms: 0/1099/0`, `coverage: files 99/126`.
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09): totalAnchored 1110 -> 1117, +7 twinned arms (GRANT 1, GRANT 2, GRANT 3, GRANT 4, WRITE 1, WRITE 2, KEEP 1 in test_strategy_analytics_anon_grants.sql). MEASURED: `--parse-only` printed `arms: 0/1117/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): totalAnchored 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
-    expect(totalAnchored).toBe(1119);
+    expect(totalAnchored).toBe(1126);
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): totalAnchored 1100 -> 1109, +9 twinned arms (1a, 1b, 1c, 2, 3, 4, 5a, 5b, 6) in the NEW gate test_strategy_analytics_unit_segments.sql (+1 file, 99 -> 100 annotated, 126 -> 127 files). MEASURED: `--parse-only` printed `arms: 0/1109/0` and `coverage: files 100/127`; the --file diagnostic run printed `arms: 9/9/0`, `biting: 9`.
   });
 });
@@ -1853,7 +1854,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): every derived literal in this fixture and in the cases built from it moves with the NEW gate
     // test_client_role_timeouts.sql (+1 file, +6 arms: 1079 -> 1085, 96 -> 97 annotated, 123 -> 124 files; one more real per-file row, `sections 4 / judged 6 /
     // annotated 6 / waived 0 / biting 6`, copied from the file's own DIAGNOSTIC run). MEASURED: `--parse-only` printed `coverage: files 97/124`, `arms: 0/1085/0`.
-    "scope: FULL 100/100 annotated files",
+    "scope: FULL 101/101 annotated files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12): the runner prints exactly one
     // `scope-reason:` line directly after `scope:` on every corpus run, and the
     // count-recheck step MEASURE_FAILs without it.
@@ -1924,7 +1925,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
     // ⭐ CURRENCY 2026-11-25 (Phase 225 ONEACCOUNTONCE, plan 16): coverage 93/120 -> 94/121, the NEW gate test_commit_scenario_batch_venue_server_identity.sql (12 sections, 12 annotated arms), from `--parse-only` (`coverage: files 94/121`).
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): coverage 94/121 -> 95/122, the NEW gate test_mt5_terminal_lease.sql (+1 file, +8 arms: 1033 -> 1041, 94 -> 95 annotated, 121 -> 122 files), from `node scripts/mutation-runner/run.mjs --parse-only`.
-    "coverage: files 100/127",
+    "coverage: files 101/128",
     // 164.4-01: the exclusion, named. Two synthetic basenames rather than the
     // real 27 — the arms below mutate the COUNT against the NAMES, and a
     // fixture carrying the live corpus would have to move on every batch.
@@ -2243,7 +2244,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-25 (Phase 230 MT5NIGHTLY, plan 06): every 1033 in the synthetic FULL log moves to 1041 (arms, biting, lane-invocations, the mean line); the baseline/restore legs 94 -> 95, the NEW gate test_mt5_terminal_lease.sql (+1 file, +8 arms: 1033 -> 1041, 94 -> 95 annotated, 121 -> 122 files).
     // ⭐ CURRENCY 2026-11-26 (Phase 225 ONEACCOUNTONCE, plan 19 round 2, PR-3 re-base): every 1041 in the synthetic FULL log moves to 1050 (arms, biting, lane-invocations, the mean line); the baseline/restore legs stay 95. The offset literals 1040/1042 become 1049/1051. MEASURED: `--parse-only` printed `arms: 0/1050/0` and `coverage: files 95/122`.
     // ⭐ CURRENCY 2026-11-26 (poll_positions venue gate, migration 20261126180000): every 1074 in the synthetic FULL log moves to 1079 (+5 twinned arms in test_enqueue_poll_positions_cohort.sql, no file joined; derived offsets 1073/1075 -> 1078/1080).
-    "arms: 1119/1119/0   (executed/annotated/waived)",
+    "arms: 1126/1126/0   (executed/annotated/waived)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
@@ -2254,7 +2255,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    "biting: 1119   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
+    "biting: 1126   (executed arms that reddened their OWN arm first — the quantity ARMS_FLOOR bounds)",
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829, 81 -> 82 legs; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848, 82 -> 83 legs; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801 and 79 -> 80 legs; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
@@ -2265,7 +2266,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    "lane-invocations: 1119   (arm lanes actually spawned — tallied inside runLane, independent of the 1119 the verdict loop counted; plus 100 baseline / 100 restore leg(s))",
+    "lane-invocations: 1126   (arm lanes actually spawned — tallied inside runLane, independent of the 1126 the verdict loop counted; plus 101 baseline / 101 restore leg(s))",
     // 164.4-01: the per-file breakdown. ⚠️ CURRENCY 2026-09-05: these FORTY-FOUR
     // rows are the real, measured shape at plan 164.4.1-05, which annotated
     // test_reconcile_dropped_enqueue_sweep.sql (39 sections, all 39 biting) —
@@ -2359,6 +2360,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): test_insert_api_key_rpc.sql 8 -> 9 twinned arms (R9, every parameter lands in its own column), copied from the --file diagnostic run's own line (`arms: 9/9/0`, `biting: 9`, `sections 9 / judged 9`). Aggregate 1099 -> 1100.
     "  file test_insert_api_key_rpc.sql: sections 9 / judged 9 / annotated 9 / waived 0 / biting 9",
     "  file test_api_keys_user_id_immutable.sql: sections 4 / judged 6 / annotated 6 / waived 0 / biting 6",
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09): the DBACC-01 gate adds one real per-file row (+1 file, +7 arms: 1110 -> 1117, 99 -> 100 annotated, 126 -> 127 files), copied from its own DIAGNOSTIC run (`arms: 7/7/0`, `biting: 7`, `sections 7 / judged 7 / annotated 7 / waived 0 / biting 7`).
+    "  file test_strategy_analytics_anon_grants.sql: sections 7 / judged 7 / annotated 7 / waived 0 / biting 7",
     // ⭐ CURRENCY 2026-10-20 (Phase 167.1.2.1.2 HISTORYREADER plan 07): the sameday_empty gate, copied from the full run's own per-file line.
     "  file test_commit_scenario_batch_fingerprint_sameday_empty.sql: sections 6 / judged 6 / annotated 6 / waived 0 / biting 6",
     "  file test_commit_scenario_batch_fingerprint_unpriced.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
@@ -2522,7 +2525,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    "per-arm lane time: mean 3.8s over 1119 arm run(s)",
+    "per-arm lane time: mean 3.8s over 1126 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",
@@ -2572,7 +2575,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix): 864 -> 867 (offset literals 863/865 -> 866/868 move with it), the +3 twinned arms NA5, NA6 and SK4 in test_ledger_refresh_fanout.sql (44 -> 47 twin sections). MEASURED: `--parse-only` read `arms: 0/867/0` and the exit-0 SUBSET run over that gate read `arms: 47/47/0`, `biting: 47`, `lane-invocations: 47`, `file test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("1119 arm lane(s) spawned");
+    expect(r.out).toContain("1126 arm lane(s) spawned");
   });
 
   // ── 164.4-01, criterion 1 as amended: a SILENT EXCLUSION must fail here ──
@@ -2808,7 +2811,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 211 SYNCJOBS, plan 06): every derived literal in this block and in the severed, extra, garbled, waived, zero and spliced cases below moves with the aggregate: 830 -> 845 arms, 81 -> 82 files, one more per-file row (83 printed vs 82 annotated, rows sum to 844 against 845), `biting arms 845 >= 845`. Each is the GREEN_LOG pin above, restated; none is an independent measurement.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("printed 101 per-file row(s) but reported 100 annotated file(s)");
+    expect(r.out).toContain("printed 102 per-file row(s) but reported 101 annotated file(s)");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2899,7 +2902,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
     // ⭐ CURRENCY 2026-11-24 (Phase 227 JOBLEDGER, plan 10): 909 -> 978, the aggregate's 979 minus the one arm this case removes.
-    expect(r.out).toContain("rows sum to 1118 biting arm(s) but the aggregate");
+    expect(r.out).toContain("rows sum to 1125 biting arm(s) but the aggregate");
     // ⭐ CURRENCY 2026-10-28 (Phase 177 DERIBITFLOWS, plan 07): 816 -> 829; copied from ONE full lane run (`coverage: files 82/109`, `arms: 829/829/0`, `biting: 829`), the new gate test_api_key_flow_prices.sql (8 sections, 13 annotated arms).
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): 829 -> 848; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 791 -> 801; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
@@ -2909,7 +2912,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("reports 1119");
+    expect(r.out).toContain("reports 1126");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -2964,7 +2967,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const severed = GREEN_LOG.replace(/^lane-invocations: 1119 /m, "lane-invocations: 0 ");
+    const severed = GREEN_LOG.replace(/^lane-invocations: 1126 /m, "lane-invocations: 0 ");
     expect(severed).not.toBe(GREEN_LOG);
     const r = runCountRecheck(severed);
     expect(r.status, r.out).toBe(1);
@@ -2984,7 +2987,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("executed=1119 lane-invocations=0 biting=1119");
+    expect(r.out).toContain("executed=1126 lane-invocations=0 biting=1126");
     expect(r.out).not.toContain("two tallies agree");
   });
 
@@ -3038,7 +3041,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const extra = GREEN_LOG.replace(/^lane-invocations: 1119 /m, "lane-invocations: 1120 ");
+    const extra = GREEN_LOG.replace(/^lane-invocations: 1126 /m, "lane-invocations: 1127 ");
     const r = runCountRecheck(extra);
     expect(r.status, r.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 792 -> 803, 793 -> 804; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
@@ -3051,7 +3054,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("executed=1119 lane-invocations=1120 biting=1119");
+    expect(r.out).toContain("executed=1126 lane-invocations=1127 biting=1126");
   });
 
   it("RED: a NON-NUMERIC lane-invocations count is a MEASURE_FAIL, never parsed as a number", () => {
@@ -3083,7 +3086,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const garbled = GREEN_LOG.replace(/^lane-invocations: 1119 /m, "lane-invocations: abc ");
+    const garbled = GREEN_LOG.replace(/^lane-invocations: 1126 /m, "lane-invocations: abc ");
     expect(garbled).not.toBe(GREEN_LOG);
     const r = runCountRecheck(garbled);
     expect(r.status, r.out).toBe(1);
@@ -3144,7 +3147,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, review round 1 fix): 864 -> 867 (offset literals 863/865 -> 866/868 move with it), the +3 twinned arms NA5, NA6 and SK4 in test_ledger_refresh_fanout.sql (44 -> 47 twin sections). MEASURED: `--parse-only` read `arms: 0/867/0` and the exit-0 SUBSET run over that gate read `arms: 47/47/0`, `biting: 47`, `lane-invocations: 47`, `file test_ledger_refresh_fanout.sql: sections 47 / judged 47 / annotated 47 / waived 0 / biting 47`.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const waived = GREEN_LOG.replace(/^arms: 1119\/1119\/0 /m, `arms: 1119/1119/${WAIVED_CEILING + 1} `);
+    const waived = GREEN_LOG.replace(/^arms: 1126\/1126\/0 /m, `arms: 1126/1126/${WAIVED_CEILING + 1} `);
     expect(waived).not.toBe(GREEN_LOG);
     const r = runCountRecheck(waived);
     expect(r.status, r.out).toBe(1);
@@ -3228,7 +3231,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const zero = GREEN_LOG.replace(/^arms: 1119\/1119\/0 /m, "arms: 0/1119/0 ");
+    const zero = GREEN_LOG.replace(/^arms: 1126\/1126\/0 /m, "arms: 0/1126/0 ");
     const z = runCountRecheck(zero);
     expect(z.status, z.out).toBe(1);
     expect(z.out).toContain("ZERO arms executed");
@@ -3244,7 +3247,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const spliced = GREEN_LOG.replace(/^biting: 1119 /m, "biting: 1120 ");
+    const spliced = GREEN_LOG.replace(/^biting: 1126 /m, "biting: 1127 ");
     const s = runCountRecheck(spliced);
     expect(s.status, s.out).toBe(1);
     // ⭐ CURRENCY 2026-10-26 (Phase 167.2.1.1.1 NAVMTM, plan 02): 793 -> 804, 792 -> 803; copied from ONE full lane run (`coverage: files 80/107`, `arms: 803/803/0`, `biting: 803`), the new gate test_api_key_nav_marks.sql (11 arms).
@@ -3257,7 +3260,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(s.out).toContain("biting (1120) exceeds executed (1119)");
+    expect(s.out).toContain("biting (1127) exceeds executed (1126)");
   });
 
   // ── 164.4.2-09, DECISION D: the step judges WHAT THE RUN COVERED ─────────
@@ -3302,7 +3305,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): SUBSET 2/80 -> 2/81; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    "scope: SUBSET 2/100 annotated files: test_allocator_equity_derived_rls.sql test_commit_scenario_batch_fingerprint_unpriced.sql",
+    "scope: SUBSET 2/101 annotated files: test_allocator_equity_derived_rls.sql test_commit_scenario_batch_fingerprint_unpriced.sql",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
     "scope-reason: 2 of 5 changed file(s) are gate files",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5), directly after `scope-reason:` as the
@@ -3334,7 +3337,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): coverage 80/107 -> 81/108; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    "coverage: files 100/127",
+    "coverage: files 101/128",
     "unreachable: 2 file(s) raise outside the runner's identity idiom — a.sql b.sql (TODOS [REDUNDER-NONIDIOM])",
     "lane-blocked: 2 file(s) probe pg_extension for pg_cron and are NOT yet annotated — d.sql e.sql (the lane hosts pg_cron since Phase 164.4.1, so a non-empty class here is STALE — see the lane-probe line)",
     "lane-probe: pg_cron absent — lane-blocked class is current",
@@ -3401,7 +3404,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-11-05 (Phase 191 REFUSALRACE, plan 04): 79/79 -> 80/80; copied from ONE full lane run (`coverage: files 80/107`, `arms: 801/801/0`, `biting: 801`), the new gate test_compute_job_metadata_merge.sql (10 annotated arms; its untwinned control arm is not counted).
       // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
       // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-      expect(r.out).toContain("scope: FULL 100/100 annotated files");
+      expect(r.out).toContain("scope: FULL 101/101 annotated files");
       expect(r.out).toContain("both floors and the waiver ceiling hold");
       // ⭐ CURRENCY 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04): 426 -> 428.
       // The right-hand side is ARMS_FLOOR as the step re-reads it from run.mjs.
@@ -3447,7 +3450,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-11-14 (Phase 214 FRESHTRUTH, plan 07): 848 -> 864 (offset literals 847/849 -> 863/865 move with it); copied from `--parse-only` (`coverage: files 82/109`, `arms: 0/864/0`) and the exit-0 SUBSET run of the four touched gate files (`arms: 109/109/0`, `biting: 109`, `lane-invocations: 109`); the FULL local run was not run on this host (about 8.7 GB free, about 15 GB needed).
       // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
       // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-      expect(r.out).toContain("biting arms 1119 >= 1119");
+      expect(r.out).toContain("biting arms 1126 >= 1126");
     }
   });
 
@@ -3514,7 +3517,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 2/80 -> 2/81, 3/80 -> 3/81; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const lying = SUBSET_LOG.replace("scope: SUBSET 2/100 ", "scope: SUBSET 3/100 ");
+    const lying = SUBSET_LOG.replace("scope: SUBSET 2/101 ", "scope: SUBSET 3/101 ");
     expect(lying).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(lying, PR);
     expect(r.status, r.out).toBe(1);
@@ -3607,7 +3610,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 80/80 -> 81/81; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
       // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
       // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-      "scope: FULL 100/100 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
+      "scope: FULL 101/101 annotated files (subset fallback: no listed file is annotated: test_x.sql)",
     );
     expect(mislabelled).not.toBe(SUBSET_LOG);
     const r = runCountRecheck(mislabelled, PR);
@@ -3641,7 +3644,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-11-10 (Phase 204 INTROAUTH, plan 02, D-07): 80 -> 81 annotated files; copied from `--parse-only` (`coverage: files 81/108`, `arms: 0/830/0`) and the exit-0 SUBSET run of the new gate test_contact_requests_insert_intro_authz.sql (`arms: 15/15/0`, `biting: 15`, `lane-invocations: 15`, 15 annotated arms); the FULL local run was not run on this host (disk), CI sql-mutation FULL is the full-corpus reading.
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    expect(r.out).toContain("printed 2 per-file row(s) but reported 100 annotated file(s)");
+    expect(r.out).toContain("printed 2 per-file row(s) but reported 101 annotated file(s)");
   });
 
   // ── Phase 164.9.6 / D-12: every run says WHY it took its scope ─────────
@@ -3752,7 +3755,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): scope 82/82 -> 83/83; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const twice = GREEN_LOG.replace("scope: FULL 100/100 annotated files", "scope: FULL 100/100 annotated files\nscope: FULL 100/100 annotated files");
+    const twice = GREEN_LOG.replace("scope: FULL 101/101 annotated files", "scope: FULL 101/101 annotated files\nscope: FULL 101/101 annotated files");
     const t = runCountRecheck(twice, PUSH_MAIN);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
@@ -3762,7 +3765,7 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-31 (Phase 176 LEGACYRETIRE, plan 02): scope 82/82 -> 83/83; copied from ONE full lane run (`coverage: files 83/110`, `arms: 848/848/0`, `biting: 848`), the new gate test_bridge_outcome_deltas_derived.sql (11 sections, 19 annotated arms).
     // ⭐ CURRENCY 2026-11-20 (Phase 219 ACCOUNTEMAIL gap closure, plan 08): this literal moves with the NEW gate test_auth_user_has_password.sql (+1 file, +9 arms: 901 -> 910, 84 -> 85 annotated, 111 -> 112 files; derived offsets 900/902 -> 909/911). MEASURED: `--parse-only` printed `coverage: files 85/112`, `arms: 0/910/0`, and plan 04's `--file` diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // ⭐ CURRENCY 2026-11-23 (Phase 225 ONEACCOUNTONCE, plan 04): this literal moves with the NEW gate test_swap_account_slot.sql (+1 file, +13 arms: 914 -> 927, 85 -> 86 annotated, 112 -> 113 files; derived offsets 913/915 -> 926/928). MEASURED: `--parse-only` printed `coverage: files 86/113`, `arms: 0/927/0`, and the `--file` diagnostic run printed `arms: 13/13/0`, `biting: 13`.
-    const diag = GREEN_LOG.replace("scope: FULL 100/100 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
+    const diag = GREEN_LOG.replace("scope: FULL 101/101 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
     const d = runCountRecheck(diag, PUSH_MAIN);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");

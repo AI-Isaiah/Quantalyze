@@ -4347,6 +4347,23 @@ export type Database = {
           session_count: number
         }[]
       }
+      insert_api_key: {
+        Args: {
+          p_api_key_encrypted: string
+          p_api_secret_encrypted?: string
+          p_dek_encrypted?: string
+          p_exchange: string
+          p_id?: string
+          p_kek_version?: number
+          p_label: string
+          p_nonce?: string
+          p_passphrase_encrypted?: string
+          p_user_id: string
+          p_venue_account_id?: string
+          p_venue_server?: string
+        }
+        Returns: string
+      }
       is_org_admin: { Args: { org_id: string }; Returns: boolean }
       is_org_member: { Args: { org_id: string }; Returns: boolean }
       latest_cron_success: { Args: { p_cron_name: string }; Returns: string }

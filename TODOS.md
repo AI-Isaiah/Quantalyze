@@ -1042,10 +1042,6 @@ in the same PR.
       ⚠️ Not urgent and not blocking: this changes WHICH credential is used, not whether the control
       works. Do not let it gate the phase.
 
-### RANK-SPLAT-01 — the anon metrics surface is unbounded by construction (booked 2026-08-26) (owned by Phase 243 DBBACKSTOP, v1.23; REQUIREMENTS.md DBACC-01; tagged 2026-11-23)
-
-- **[RANK-SPLAT-01] Still open (re-measured 2026-11-14).** The `metrics_json` half is done: `src/lib/factsheet/fetch-and-build-payload.ts` selects named `metrics_json->x` aliases and its test forbids a bare `metrics_json`. `strategy_analytics.metrics_json_by_basis` is still selected as a whole column in that same select, so whatever the analytics stage writes into it becomes readable by an anonymous visitor of a published strategy with no review step. **Closed when:** that column is projected as a named alias set (or through an RPC that returns one), pinned by a test that FAILS when a new key appears in the projection.
-
 ### Phase 164.8 TESTPREPROD — the NEW couplings the TEST-first pipeline creates, and the one disposition it deliberately did not build (booked 2026-09-09)
 
 Opened by Phase 164.8 plan 06 as it closed `CI-MIGRATE-01`, `[164.2-TEST-APPLY-PROVENANCE]`,

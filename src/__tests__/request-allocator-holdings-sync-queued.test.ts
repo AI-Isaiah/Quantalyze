@@ -55,6 +55,7 @@ import {
   LIVE_DB_SERVICE_ROLE_KEY,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
@@ -64,21 +65,12 @@ async function seedApiKey(
   userId: string,
   label: string,
 ): Promise<string> {
-  const { data, error } = await admin
-    .from("api_keys")
-    .insert({
-      user_id: userId,
-      exchange: "binance",
-      label: `__test_issue_008_${label}`,
-      api_key_encrypted: "test-encrypted-placeholder",
-      is_active: true,
-    } as never)
-    .select("id")
-    .single();
-  if (error || !data) {
-    throw new Error(`seedApiKey(${label}): ${error?.message}`);
-  }
-  return (data as { id: string }).id;
+  // is_active is the table default (true), so the writer needs no extras.
+  return createTestApiKey(admin, {
+    userId,
+    exchange: "binance",
+    label: `__test_issue_008_${label}`,
+  });
 }
 
 async function pinInflightJob(

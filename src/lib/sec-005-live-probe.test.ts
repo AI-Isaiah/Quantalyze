@@ -37,6 +37,7 @@ import {
   runIntrospectionSql,
   createLiveAdminClient,
   createTestUser,
+  createTestApiKey,
   cleanupLiveDbRow,
   advertiseLiveDbSkipReason,
 } from "./test-helpers/live-db";
@@ -64,21 +65,13 @@ describe("SEC-005 live probe — migration 027 ground truth", () => {
         // Insert a test api_keys row owned by this user. Service-role is
         // fine for the seed — we're not testing this insert, we're testing
         // the authenticated-client SELECT that follows.
-        const { data: keyData, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "sec005-probe",
-            api_key_encrypted: "PROBE_CIPHERTEXT",
-            dek_encrypted: "PROBE_DEK",
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyData) {
-          throw new Error(`Failed to insert test api_keys row: ${keyErr?.message}`);
-        }
-        keyId = keyData.id;
+        keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "sec005-probe",
+          apiKeyEncrypted: "PROBE_CIPHERTEXT",
+          dekEncrypted: "PROBE_DEK",
+        });
 
         // Sign in AS that user to get a user-scoped JWT.
         const signinClient = createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!);
@@ -211,21 +204,13 @@ describe("SEC-005 live probe — migration 027 ground truth", () => {
         // Seed a real row (service-role) so that if anon COULD read, there is
         // actual ciphertext to leak. Without a row, an empty result could be
         // confused with RLS scoping rather than the column REVOKE.
-        const { data: keyData, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "sec005-anon-probe",
-            api_key_encrypted: "ANON_PROBE_CIPHERTEXT",
-            dek_encrypted: "ANON_PROBE_DEK",
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyData) {
-          throw new Error(`Failed to insert test api_keys row: ${keyErr?.message}`);
-        }
-        keyId = keyData.id;
+        keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "sec005-anon-probe",
+          apiKeyEncrypted: "ANON_PROBE_CIPHERTEXT",
+          dekEncrypted: "ANON_PROBE_DEK",
+        });
 
         // Anon client: publishable key only, NO Authorization bearer. This is
         // exactly what an unauthenticated public-internet request looks like.
@@ -468,21 +453,13 @@ describe("SEC-005 live probe — migration 027 ground truth", () => {
         // Insert a row this user owns, service-role, purely as fixture setup
         // — the assertions below exercise the AUTHENTICATED client's SELECT,
         // not this insert.
-        const { data: keyData, error: keyErr } = await admin
-          .from("api_keys")
-          .insert({
-            user_id: userId,
-            exchange: "binance",
-            label: "sec005-cols-probe",
-            api_key_encrypted: "PROBE_CIPHERTEXT",
-            dek_encrypted: "PROBE_DEK",
-          })
-          .select("id")
-          .single();
-        if (keyErr || !keyData) {
-          throw new Error(`Failed to insert test api_keys row: ${keyErr?.message}`);
-        }
-        keyId = keyData.id;
+        keyId = await createTestApiKey(admin, {
+          userId,
+          exchange: "binance",
+          label: "sec005-cols-probe",
+          apiKeyEncrypted: "PROBE_CIPHERTEXT",
+          dekEncrypted: "PROBE_DEK",
+        });
 
         // Sign in AS that user to get a user-scoped JWT.
         const signinClient = createClient(LIVE_DB_URL!, LIVE_DB_SERVICE_ROLE_KEY!);
