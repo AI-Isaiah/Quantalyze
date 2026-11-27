@@ -1409,8 +1409,8 @@ describe("audit-coverage helpers — H-0004/H-0005 audit gap fixtures", () => {
   // is not a deferral — it is a control that cannot fail, indistinguishable
   // in CI from a control that passes. The debt now lives in
   // H_0001_UNCOVERED_ALLOWLIST, where it is counted, explained, and
-  // exact-set asserted, so this test can be live while the route work
-  // stays open under H-0001 in TODOS.md.
+  // exact-set asserted, so this test could be live while the route work
+  // was still open. Phase 244 DBACC-05 closed that work on 2026-11-26.
   //
   // ## This test is the regression detector for the fix
   //
@@ -1655,6 +1655,20 @@ describe("audit-coverage scan performance — H-0003 (S9b) import-resolution rea
  * H-0001 — the six PRE-EXISTING uncovered single-line mutation sites,
  * as a counted, exact-set-asserted allowlist.
  *
+ * CLOSED 2026-11-26 (Phase 244 DBACC-05): the list is empty. Each of the six
+ * sites now carries a recorded disposition the gate can read:
+ *   - site 1, admin/partner-import profiles upsert: COVERED. The moved
+ *     `@audit-skip` pragma points at the `admin.partner_import` roll-up row
+ *     that `emitAsUser` writes after the import completes.
+ *   - sites 2-3, flag-monitor's two ZERO_DENOM_STREAK_KEY upserts: founder
+ *     exemption 2026-11-26, internal cron counter.
+ *   - sites 4-6, keys/sync stampCompositeFailedUnlessComplete and the two
+ *     finalize-wizard strategy_analytics upserts: founder exemption
+ *     2026-11-26, derived strategy_analytics compute state.
+ * The array stays as a typed empty array so both drift arms keep working and
+ * a seventh uncovered site still reds on arrival. It only shrinks; it never
+ * gains an entry. The text below is kept as lineage.
+ *
  * ## Why this list exists
  *
  * Until 2026-08-29 `findMutations` could not see the single-line
@@ -1667,9 +1681,9 @@ describe("audit-coverage scan performance — H-0003 (S9b) import-resolution rea
  * Fixing the detector without recording the debt would have turned this
  * gate permanently red and taught everyone to ignore it. Fixing the six
  * ROUTES is production work (add an audit emission or a justified pragma
- * to each) and is deliberately NOT in this test-only pass — it stays open
- * under H-0001 in TODOS.md. So the debt is written down instead, in a form
- * a machine reads on every push.
+ * to each) and was deliberately NOT in that test-only pass — Phase 244
+ * DBACC-05 closed it on 2026-11-26. So the debt was written down instead, in
+ * a form a machine reads on every push.
  *
  * ## Why the assertion is an EXACT SET, not a floor
  *
@@ -1681,7 +1695,8 @@ describe("audit-coverage scan performance — H-0003 (S9b) import-resolution rea
  * to re-read is how a record decays into fiction — which is precisely what
  * happened to the PREVIOUS census of these same sites: recorded as prose in
  * a comment, it under-reported by two AND named a site Phase 106 had
- * already deleted (TODOS.md, "H-0001 census RE-MEASURED", 2026-08-26).
+ * already deleted (the 2026-08-26 TODOS.md census entry, deleted when
+ * Phase 244 closed H-0001).
  *
  * ## Method (re-measured at HEAD, 2026-08-29 — do not re-number, RE-MEASURE)
  *
@@ -1704,45 +1719,7 @@ const H_0001_UNCOVERED_ALLOWLIST: ReadonlyArray<{
   file: string;
   snippet: string;
   reason: string;
-}> = [
-  {
-    file: "src/app/api/admin/partner-import/route.ts",
-    snippet: 'const { error: profileErr } = await admin.from("profiles").upsert(',
-    reason:
-      "H-0001: profiles upsert. An @audit-skip pragma exists but sits ~15 lines above the chain start, outside the 8-line window — so it does not count. Fix = move the pragma into the window or emit a real audit event.",
-  },
-  {
-    file: "src/app/api/cron/flag-monitor/route.ts",
-    snippet: 'await args.admin.from("feature_flags").upsert(',
-    reason:
-      "H-0001: zero-denominator streak increment. The file contains no logAuditEvent* call at all, so there is nothing for the forward walk to find.",
-  },
-  {
-    file: "src/app/api/cron/flag-monitor/route.ts",
-    snippet: 'await admin.from("feature_flags").upsert(',
-    reason:
-      "H-0001: streak reset on the first non-zero window. Same file, same absence of any audit emission.",
-  },
-  {
-    file: "src/app/api/keys/sync/route.ts",
-    snippet:
-      'const { error: stampErr } = await admin.from("strategy_analytics").upsert(',
-    reason:
-      "H-0001: strategy_analytics upsert in stampCompositeFailedUnlessComplete. The file's only emission lives in a DIFFERENT function, and the coverage walk is scoped to the enclosing function body (P694).",
-  },
-  {
-    file: "src/app/api/strategies/finalize-wizard/route.ts",
-    snippet: 'await admin.from("strategy_analytics").upsert(',
-    reason:
-      "H-0001: strategy_analytics upsert in compositeMemberCount. The file's only emission is in runLegacyFinalize, a different function.",
-  },
-  {
-    file: "src/app/api/strategies/finalize-wizard/route.ts",
-    snippet: 'await compositeAdmin.from("strategy_analytics").upsert(',
-    reason:
-      "H-0001: strategy_analytics upsert in unifiedFinalizeWizardHandler. No emission in that function.",
-  },
-];
+}> = [];
 
 /**
  * Identity for an uncovered site: repo-relative path + the trimmed source
@@ -1876,8 +1853,8 @@ describe("audit coverage: every mutation site in src/app/api must emit or skip",
     // bare set-comparison would let the number drift out of the prose
     // record (the TODOS lesson: the previous census under-reported by two
     // AND named a deleted site). This literal is the number that must
-    // match the SUMMARY and TODOS entry.
-    expect(H_0001_UNCOVERED_ALLOWLIST).toHaveLength(6);
+    // agree with the closure record in the allowlist's header.
+    expect(H_0001_UNCOVERED_ALLOWLIST).toHaveLength(0);
     expect(uncovered).toHaveLength(H_0001_UNCOVERED_ALLOWLIST.length);
 
     // H-0003: the gate is only meaningful if the detectors actually fired.

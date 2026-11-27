@@ -73,6 +73,7 @@ import {
 } from "@/app/(dashboard)/allocations/lib/key-data-gaps";
 import type {
   Strategy,
+  PublicStrategy,
   StrategyAnalytics,
   PortfolioWithCount,
   DeckWithCount,
@@ -200,6 +201,14 @@ export type RankedStrategyRow = StrategyWithAnalytics & {
    */
   tradeVenuesUnavailable?: true;
 };
+
+/**
+ * The public category row: `RankedStrategyRow` without the key. Returned by
+ * `getStrategiesByCategory` (anon holds no SELECT on `api_key_id`); the owner
+ * reader `getMyStrategies` keeps `RankedStrategyRow` with the key required
+ * (Phase 244 DBACC-04).
+ */
+export type PublicRankedStrategyRow = Omit<RankedStrategyRow, "api_key_id">;
 
 // Phase 149 (149-02): PERCENTILE_METRICS / LOWER_IS_BETTER / PercentileMap and
 // the scoring formula itself now live in ./percentile-core — the ONE core both
@@ -666,7 +675,7 @@ function failAnonRead(op: string, subject: string, error: { code?: string; messa
  * anon will hold no SELECT on `api_key_id` (Phase 170.6.1.1), so this projection must
  * never become a wildcard again.
  */
-export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
+export async function getStrategiesByCategory(categorySlug: string): Promise<PublicRankedStrategyRow[]> {
   const supabase = await createClient();
 
   // Single query: join strategies with category filter + analytics +
@@ -1831,7 +1840,7 @@ async function readPublishedTradeVenues(
  * (Phase 170.6.1.1), so this projection must never become a wildcard again.
  */
 export async function getFactsheetDetail(strategyId: string): Promise<{
-  strategy: Strategy & { discovery_categories?: { slug: string } | null };
+  strategy: PublicStrategy & { discovery_categories?: { slug: string } | null };
   analytics: StrategyAnalytics;
   manager: ManagerIdentity | null;
   disclosureTier: DisclosureTier;
@@ -1849,7 +1858,7 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
       )
       .eq("id", strategyId),
   )
-    .single<Strategy & { discovery_categories: { slug: string } | null; strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null; monthly_returns?: unknown; metrics_json?: unknown } | null }>();
+    .single<PublicStrategy & { discovery_categories: { slug: string } | null; strategy_analytics: { daily_returns?: unknown; computed_at: string | null; computation_status: string | null; monthly_returns?: unknown; metrics_json?: unknown } | null }>();
 
   // PGRST116 = .single() found no published row: the legitimate not-found.
   // Anything else (42501 after the ANONKEYID grants, timeout, 5xx) is an outage.

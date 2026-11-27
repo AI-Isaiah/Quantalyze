@@ -496,6 +496,8 @@ async function handleZeroDenominator(args: {
     .maybeSingle();
   const currentStreak = parseInt(flagRow?.value ?? "0", 10) || 0;
   const newStreak = currentStreak + 1;
+  // @audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05) - internal cron counter
+  // (the ZERO_DENOM_STREAK_KEY streak increment, written every 15 minutes; no user action to audit).
   await args.admin.from("feature_flags").upsert(
     {
       flag_key: ZERO_DENOM_STREAK_KEY,
@@ -635,6 +637,8 @@ async function handle(req: NextRequest): Promise<NextResponse> {
 
   // Reset streak on the first non-zero window. Best-effort — if the upsert
   // fails we don't escalate; the next zero window starts the count again.
+  // @audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05) - internal cron counter
+  // (the ZERO_DENOM_STREAK_KEY streak reset, written every 15 minutes; no user action to audit).
   await admin.from("feature_flags").upsert(
     {
       flag_key: ZERO_DENOM_STREAK_KEY,

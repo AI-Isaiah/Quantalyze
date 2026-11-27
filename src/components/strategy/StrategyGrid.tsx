@@ -21,7 +21,7 @@ import { DISCOVERY_COLUMNS, type DiscoveryColumn } from "./discovery-columns";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { termDefinition } from "@/lib/glossary";
 import type { ListSeriesVerdictResult } from "@/lib/freshness";
-import type { Strategy, StrategyAnalytics } from "@/lib/types";
+import type { PublicStrategy, StrategyAnalytics } from "@/lib/types";
 
 // Phase 197 D-05 (U-07): the card footer's two labels read from the SAME map as the table header,
 // so the two views of one list cannot name a column differently. "Return \u00b7 full record" and
@@ -34,7 +34,9 @@ function footerLabel(key: DiscoveryColumn["key"]): string {
 const RETURN_FOOTER_LABEL = footerLabel("cumulative_return");
 const CAGR_FOOTER_LABEL = footerLabel("cagr");
 
-type StrategyWithAnalytics = Strategy & {
+// Shared by the public category pages (key-free rows) and the owner /strategies list (key
+// present), so the key is optional here and only here; the owner type stays `Strategy`.
+type StrategyWithAnalytics = PublicStrategy & { api_key_id?: string | null } & {
   analytics: StrategyAnalytics;
   /**
    * Phase 170.6.1 / DISCOVERYPHONE (SC-2, D-04) — set by

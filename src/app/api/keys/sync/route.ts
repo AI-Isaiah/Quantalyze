@@ -590,6 +590,8 @@ async function stampCompositeFailedUnlessComplete(
     return;
   }
 
+  // @audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05) - derived strategy_analytics compute state
+  // (the 'failed' compute stamp, not a user action).
   const { error: stampErr } = await admin.from("strategy_analytics").upsert(
     { strategy_id: strategyId, ...payload },
     { onConflict: "strategy_id" },

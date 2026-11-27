@@ -2536,6 +2536,8 @@ async function compositeMemberCount(
     const reason = countErr
       ? `strategy_keys count failed: ${countErr.message}`
       : "strategy_keys count returned null without an error";
+    // @audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05) - derived strategy_analytics compute state
+    // (the 'failed' compute stamp, not a user action).
     await admin.from("strategy_analytics").upsert(
       {
         strategy_id: strategyId,
@@ -2681,6 +2683,8 @@ async function unifiedFinalizeWizardHandler(args: {
     );
   }
   if (compositeMembers > 0) {
+    // @audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05) - derived strategy_analytics compute state
+    // (the 'failed' compute stamp, not a user action).
     await compositeAdmin.from("strategy_analytics").upsert(
       {
         strategy_id: args.strategy_id,

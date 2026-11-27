@@ -157,8 +157,9 @@ export interface Strategy {
   id: string;
   user_id: string;
   category_id: string | null;
-  // Optional: anon-safe projections (STRATEGY_PUBLIC_COLUMNS) omit it.
-  api_key_id?: string | null;
+  // Required on owner rows. Public projections (STRATEGY_PUBLIC_COLUMNS) carry
+  // no key and use `PublicStrategy`, which omits it (Phase 244 DBACC-04).
+  api_key_id: string | null;
   name: string;
   description: string | null;
   strategy_types: string[];
@@ -224,6 +225,13 @@ export interface Strategy {
    */
   capital_ownership?: CapitalOwnership | null;
 }
+
+/**
+ * Row type for readers that select `STRATEGY_PUBLIC_COLUMNS` (anon holds no
+ * SELECT on `api_key_id` since Phase 170.6.1.1). Built with `Omit` so it cannot
+ * drift from `Strategy`; a value of this type is not assignable to `Strategy`.
+ */
+export type PublicStrategy = Omit<Strategy, "api_key_id">;
 
 /**
  * Subset of the manager's profile used for display on institutional-tier

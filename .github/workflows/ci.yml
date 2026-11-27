@@ -7163,9 +7163,14 @@ jobs:
               e2e/csv-upload-flow.spec.ts \
               e2e/my-strategies.spec.ts \
               e2e/role-home.spec.ts \
+              e2e/discovery-watchlist.spec.ts \
               e2e/manager-keys.spec.ts \
               --timeout 60000
           fi
+          # Phase 244 DBACC-06 (2026-11-27): e2e/discovery-watchlist.spec.ts is in this list
+          # (place 1); its HAS_SEED_ENV skip is place 2. It holds the only e2e proof that
+          # user-B cannot read user-A's user_favorites, and its anonymous-PUT arm asserts
+          # the proxy's 307 to /login.
           # Phase 200 gap closure (2026-11-11): e2e/manager-keys.spec.ts is in this list
           # (place 1) and has NO place-2 self-skip, by decision. Its panel tests used
           # to skip on an env var no workflow set, so they ran nowhere that could

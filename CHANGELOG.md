@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.133.102.0] - 2026-11-27 — ACCESSGUARDS: an owner read keeps its key id, the six unaudited write sites are audited or founder-exempt, and the watchlist RLS proof gates merges
+
+### Added
+- **DBACC-04 compile guard.** `Strategy.api_key_id` is required again (`string | null`). New `PublicStrategy = Omit<Strategy, "api_key_id">` (`src/lib/types.ts`) and `PublicRankedStrategyRow` (`src/lib/queries.ts`). The two `STRATEGY_PUBLIC_COLUMNS` readers return them: `getFactsheetDetail` and `getStrategiesByCategory`. `StrategyTable` and `StrategyGrid` take a row type that accepts both kinds of row, because the public category pages and the owner `/strategies` list share them.
+- `src/__tests__/api-key-id-compile-guard.test.ts` is a type-level test checked by the `frontend-typecheck` job, not by vitest. A public row assigned to `Strategy` must fail `tsc`. Making the key optional again turns `tsc` red with TS2578 on ARM-1.
+- `src/__tests__/api-key-id-owner-read-pin.test.ts` is a blocking source scan over the four owner reads whose row type comes from a cast or an explicit generic: `getMyStrategies`, the `/strategies` list, `[id]/edit` and `/compare`. Each read's literal `.select(` must be chained directly to `.from("strategies")` and must select `*` or name `api_key_id`. A cast-site census goes red when an owner-type cast is added or removed anywhere in `src/`.
+- **DBACC-06.** `e2e/discovery-watchlist.spec.ts` joins the gating `e2e-seeded` Playwright list. `SEEDED_SPEC_COUNT` goes 26 -> 27. The new pin `src/__tests__/discovery-watchlist-e2e-wiring.test.ts` checks four things:
+  - the spec stays on the seeded list and off the advisory one;
+  - its only skip is exactly `test.skip(!HAS_SEED_ENV,`, over the two seed env names `ci.yml` exports;
+  - the RLS proof keeps its shape: user-A's favourite is seeded and its insert error asserted null, user-B signs in on `userBClient`, user-B's bare SELECT has nothing chained after it, `toHaveLength(0)` holds, and there is no early return;
+  - the anonymous PUT arm asserts the proxy's 307.
+
+### Changed
+- **DBACC-05, H-0001 audit law. Founder decision 2026-11-26, "Approve as proposed", recorded in `244-CONTEXT.md` and the ROADMAP.**
+  - `H_0001_UNCOVERED_ALLOWLIST` in `src/__tests__/audit-coverage.test.ts` goes 6 -> 0, with its entries deleted and the literal now `toHaveLength(0)`.
+  - partner-import's `profiles` upsert is covered by its `admin.partner_import` roll-up row: its existing pragma moved into the gate's 8-line window.
+  - The other five sites carry in-window `@audit-skip: founder exemption 2026-11-26 (Phase 244 DBACC-05)` pragmas:
+    - flag-monitor's two `ZERO_DENOM_STREAK_KEY` upserts, an internal cron counter;
+    - the `strategy_analytics` 'failed' stamps in keys/sync `stampCompositeFailedUnlessComplete`, finalize-wizard `compositeMemberCount` and `unifiedFinalizeWizardHandler`, which are derived compute state.
+  - All route edits are comments only.
+- **`e2e/discovery-watchlist.spec.ts` repaired after its first run on the local-stack lane.**
+  - It uses the `./helpers/hydration-guard` test.
+  - A missing `TEST_SUPABASE_ANON_KEY` now fails the primary RLS proof instead of silently skipping it (the old `if (anonKey)` wrapper).
+  - The anonymous `PUT /api/watchlist/[id]` arm now asserts the proxy's `307` to `/login` with `maxRedirects: 0`. `/api/watchlist` is not in `PUBLIC_ROUTES`, so an anonymous caller never reaches the route's own 401. That 401 stays covered by its unit test.
+  - The anonymous `/browse` block now asserts that a table row rendered and that the error boundary did not, before its absence checks.
+
+### Tests
+- PROOF-01 per gate (neuter, then RED on the named arm, then byte restore with `cp` and `cmp`, then GREEN), recorded verbatim in the phase SUMMARYs and `244-REVIEW.md`:
+  - type guard: TS2578 on ARM-1;
+  - owner-read pin: RED on a `STRATEGY_PUBLIC_COLUMNS` select, and the census RED on a new cast file;
+  - audit gate: RED naming `flag-monitor/route.ts` and `partner-import/route.ts`;
+  - watchlist spec, on the local lane only: with the policy neutered to `USING (true)`, RED on "RLS LEAK on migration 024 policy", restored with a `pg_policy` snapshot compared by `cmp`; with `/api/watchlist` added to `PUBLIC_ROUTES`, RED on the 307 arm;
+  - wiring pin: RED on every neutered arm.
+- Lane runs: the spec 4 passed, 0 skipped; the neighbour run with `discovery-hide-examples-default` and `discovery-prefs-isolation` 6 passed.
+
+### Notes
+- **SC-1 is met as narrowed, pending the founder's ruling.**
+  - Compile time: a public row cannot pass as a `Strategy`.
+  - Owner reads typed by casts are held by the CI pin, not by the compiler; dropping the key from such a select still compiles.
+- `TODOS.md` closed and deleted:
+  - `[H-0001]` (the "Phase 163 / SEC-03 — H-0001 census RE-MEASURED" section);
+  - the `[158-OPS-03] discovery-watchlist.spec.ts` bullet.
+- `TODOS.md` narrowed, not deleted: `170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD` now names only the shared `StrategyTable`/`StrategyGrid` optional-key remainder.
+- Not changed, and left to reviewers:
+  - the ignored upsert error results at the pragma sites (a deferred idea in `244-CONTEXT.md`);
+  - the same silent anon-key skip in `e2e/discovery-prefs-isolation.spec.ts`.
+- No migration, no new package.
 ## [0.133.101.0] - 2026-11-27 — Phase 252 DERIBITOPTIONS plan 07: the smoothed-MTM probe names which refusal fired
 
 ### Why

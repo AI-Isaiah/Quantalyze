@@ -23,7 +23,8 @@
  *    code instead of timing out after 30s with a generic "Timeout exceeded".
  *  - Adds two new tests required by the e2e/all-user-groups rule
  *    (`feedback_e2e_all_user_groups`):
- *      (a) unauthenticated PUT returns 401 — public path coverage.
+ *      (a) unauthenticated PUT is bounced to /login (307) by the proxy
+ *          session gate before the route runs — public path coverage.
  *      (b) user-B cannot read user-A's favorites via GET — RLS proof,
  *          the entire reason the table is RLS-scoped.
  *  - Reload assertion polls via `expect(...).toBeVisible({ timeout })`
@@ -31,7 +32,7 @@
  *    distinguishable from a state-not-persisted failure.
  */
 
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { createClient } from "@supabase/supabase-js";
 import {
   seedBridgeCandidate,
@@ -268,18 +269,26 @@ test.describe("DISCO-01 watchlist", () => {
     await expect(page.locator(SELECTORS.tableRows)).toHaveCount(1);
   });
 
-  test("unauthenticated PUT to /api/watchlist returns 401 (public-path RLS guard)", async ({
+  test("unauthenticated PUT to /api/watchlist is bounced to /login by the proxy session gate before the route runs", async ({
     request,
     baseURL,
   }) => {
     // This is the public/anon coverage required by feedback_e2e_all_user_groups:
     // the RLS-scoped watchlist endpoint MUST reject unauthenticated requests
-    // before doing any work. Without this test a regression that dropped
-    // the `if (!user) return 401` guard would only fail when an actual
-    // anon user happened to call the route — never in CI.
+    // before doing any work.
+    //
+    // WHICH guard answers: src/proxy.ts. `/api/watchlist` is not in
+    // PUBLIC_ROUTES, so the proxy's session gate answers a cookie-less request
+    // with a 307 to /login BEFORE the route handler runs. The route's own
+    // `if (!user) return 401` guard is therefore unreachable for an anonymous
+    // caller; it stays proven by
+    // src/app/api/watchlist/[strategyId]/route.test.ts. A 401 here would mean
+    // the proxy gate stopped running for this path (e.g. `/api/watchlist` was
+    // added to PUBLIC_ROUTES), and a 2xx means the request was followed to the
+    // login page, which is why redirects are switched off below.
     //
     // We use a syntactically-valid UUID so the failure can only come
-    // from the auth check, not a 400 on malformed input.
+    // from the auth gate, not a 400 on malformed input.
     const someStrategyId = "cccccccc-0001-4000-8000-000000000001";
     // audit-2026-05-07 SPECIALIST-red-team
     // `e2e/discovery-watchlist.spec.ts:178:csrf-precedes-auth` —
@@ -287,27 +296,27 @@ test.describe("DISCO-01 watchlist", () => {
     // NEXT_PUBLIC_VERCEL_URL is not exposed at build-time (Playwright's
     // baseURL is then not in ALLOWED_HOSTS) would produce 403, masking
     // the auth-guard regression we actually want to detect. Explicitly
-    // setting Origin to the baseURL guarantees assertSameOrigin passes
-    // and the 401 path is the only failure mode — decoupling this
-    // assertion from CSRF env wiring.
+    // setting Origin to the baseURL decouples this assertion from CSRF env
+    // wiring.
     const origin = baseURL ?? process.env.PLAYWRIGHT_BASE_URL ?? "";
     const res = await request.put(`/api/watchlist/${someStrategyId}`, {
       data: { action: "add" },
       headers: origin ? { origin } : undefined,
+      maxRedirects: 0,
     });
-    // Anon MUST be rejected with 401 specifically. With Origin pinned to
-    // baseURL, assertSameOrigin PASSES and the route reaches the
-    // `if (!user) return 401` check.
-    //
-    // audit-2026-05-07 SPECIALIST-testing fix:
-    // e2e/discovery-watchlist.spec.ts:178 — accepting 403 as an
-    // alternative converted a real-regression detector into a noise-tolerant
-    // probe: a regression that dropped the auth guard would NOT fail this
-    // test if the CSRF guard happened to reject the test's origin for an
-    // unrelated config-drift reason. If this assertion ever fails with 403
-    // in CI, the fix is to set NEXT_PUBLIC_SITE_URL correctly — not to
-    // widen the assertion.
-    expect(res.status()).toBe(401);
+    expect(
+      res.status(),
+      "anonymous PUT /api/watchlist was not answered by the proxy session " +
+        "gate with a 307 to /login — the PUBLIC_ROUTES gate no longer covers " +
+        "this path",
+    ).toBe(307);
+    expect(
+      new URL(
+        res.headers()["location"] ?? "",
+        origin || "http://localhost:3000",
+      ).pathname,
+      "the proxy session gate redirected the anonymous PUT somewhere other than /login",
+    ).toBe("/login");
   });
 
   test("user-B cannot read user-A's favorites (RLS proof)", async ({
@@ -374,39 +383,43 @@ test.describe("DISCO-01 watchlist", () => {
     // `auth.uid() = user_id` (migration 024). A leak surfaces here
     // even if every server-side filter is intact.
     const anonKey = process.env.TEST_SUPABASE_ANON_KEY;
-    if (anonKey) {
-      const userBClient = createClient(url, anonKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
+    // A missing anon key is a FAILURE, never a skip: this bare SELECT is the
+    // only e2e proof that RLS scopes user_favorites.
+    expect(
+      anonKey,
+      "TEST_SUPABASE_ANON_KEY missing - the primary RLS proof cannot run",
+    ).toBeTruthy();
+    const userBClient = createClient(url, anonKey!, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    const { error: signInErr } =
+      await userBClient.auth.signInWithPassword({
+        email: userBEmail,
+        password: userBPassword,
       });
-      const { error: signInErr } =
-        await userBClient.auth.signInWithPassword({
-          email: userBEmail,
-          password: userBPassword,
-        });
-      expect(
-        signInErr,
-        `user-B signInWithPassword failed: ${signInErr?.message}`,
-      ).toBeNull();
-      // Bare SELECT — no client-side filter. Only RLS can scope this.
-      const { data: leakRows, error: leakErr } = await userBClient
-        .from("user_favorites")
-        .select("user_id, strategy_id");
-      expect(
-        leakErr,
-        `user-B SELECT user_favorites failed: ${leakErr?.message}`,
-      ).toBeNull();
-      // RLS contract: user-B's session may ONLY see rows where
-      // user_id = userBId. user-A's seeded row MUST NOT appear.
-      const aRowsVisibleToB = (leakRows ?? []).filter(
-        (r) => r.user_id === userAId,
-      );
-      expect(
-        aRowsVisibleToB,
-        `user-B's session sees ${aRowsVisibleToB.length} of user-A's ` +
-          `user_favorites rows — RLS LEAK on migration 024 policy`,
-      ).toHaveLength(0);
-      await userBClient.auth.signOut();
-    }
+    expect(
+      signInErr,
+      `user-B signInWithPassword failed: ${signInErr?.message}`,
+    ).toBeNull();
+    // Bare SELECT — no client-side filter. Only RLS can scope this.
+    const { data: leakRows, error: leakErr } = await userBClient
+      .from("user_favorites")
+      .select("user_id, strategy_id");
+    expect(
+      leakErr,
+      `user-B SELECT user_favorites failed: ${leakErr?.message}`,
+    ).toBeNull();
+    // RLS contract: user-B's session may ONLY see rows where
+    // user_id = userBId. user-A's seeded row MUST NOT appear.
+    const aRowsVisibleToB = (leakRows ?? []).filter(
+      (r) => r.user_id === userAId,
+    );
+    expect(
+      aRowsVisibleToB,
+      `user-B's session sees ${aRowsVisibleToB.length} of user-A's ` +
+        `user_favorites rows — RLS LEAK on migration 024 policy`,
+    ).toHaveLength(0);
+    await userBClient.auth.signOut();
 
     // Belt-and-braces UI assertion. Coincidence requirement: this only
     // fires when BOTH the explicit user_id filter AND RLS regress.
@@ -514,9 +527,24 @@ test.describe("DISCO-01 watchlist — public/anon path (no allocator chrome)", (
         "browse path must stay reachable without auth",
     ).not.toHaveURL(/\/login/);
 
-    // The page may legitimately have zero published rows on a clean DB. The
-    // assertions below are about the ABSENCE of allocator-only chrome, which
-    // holds whether or not rows exist — so we do NOT require a seeded row.
+    // The page may legitimately have zero published rows on a clean DB, so we do
+    // NOT require a seeded row. But every assertion below is an ABSENCE check, and
+    // an absence check passes vacuously on a page that rendered an error or
+    // nothing at all (the userId-gated chrome never mounts there). So first
+    // assert a POSITIVE render: StrategyTable's tbody holds either a strategy
+    // row or its explicit "No strategies match your filters." row, and the root
+    // error boundary holds neither. Phase 244 SFH-M1.
+    await expect(
+      page.getByRole("heading", { name: "Something went wrong" }),
+      "anon /browse/crypto-sma rendered the root error boundary, so the " +
+        "absence checks below would pass without the table ever mounting",
+    ).toHaveCount(0);
+    await expect(
+      page.locator(SELECTORS.tableRows).first(),
+      "anon /browse/crypto-sma rendered no strategy table row and no " +
+        "'No strategies match your filters' row — the page did not render the " +
+        "table, so the absence checks below would be vacuous",
+    ).toBeVisible({ timeout: 15000 });
 
     // 1. No star/watchlist toggle anywhere on the public page. The star
     //    column is rendered ONLY when userId !== undefined (StrategyTable
