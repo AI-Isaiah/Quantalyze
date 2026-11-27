@@ -14915,8 +14915,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # already degrades every structural, budget and timeout failure of this pass, and the
     # population is exactly the rows the wave-1 withhold hides, so a degrade leaves them
     # as they are today. Precedent: 185 D-04 builds the key-mode options headline without
-    # the flag. A TRANSIENT reconstruction result (429 / geo-block) still surfaces as a
-    # whole-job retry, as it does with the flag on. The flag keeps gating the single-key
+    # the flag. A TRANSIENT reconstruction result (429 / geo-block) or transient marks
+    # read surfaces as a whole-job retry on every attempt but the last, and degrades on
+    # the last (WR-01, 252 gap-2 review). The flag keeps gating the single-key
     # smoothed third pass and the RT-4 headline-config refusal in
     # run_derive_broker_dailies_job, unchanged.
     smoothed_ok = smoothed_mtm_available(member_signals)
@@ -14928,6 +14929,18 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # the smoothed pass does not run (SC-4: nothing smoothed-flavoured touches a
     # no-option composite) OR when it DEGRADED before producing metas.
     smoothed_member_metas: list[dict[str, Any]] = []
+    # WR-01 (252 gap-2 review): the smoothed basis is additive (GLB-3), so a TRANSIENT
+    # in its pass must never sink the cash composite on the job's LAST attempt. Earlier
+    # attempts keep surfacing it (a retry re-converges, and a published row is not
+    # flipped to the withheld cash headline by a single blip). Same final-attempt read
+    # as the sibling handlers: a job row without both integer counts is not final.
+    _sm_attempts = job.get("attempts")
+    _sm_max_attempts = job.get("max_attempts")
+    _smoothed_final_attempt = (
+        isinstance(_sm_attempts, int)
+        and isinstance(_sm_max_attempts, int)
+        and _sm_attempts >= _sm_max_attempts
+    )
     if smoothed_ok:
         # GLB-3(b): bound the smoothed fan-out to its slice of the REMAINING
         # stitch_composite budget so an at-cap options composite degrades gracefully
@@ -14993,12 +15006,38 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "cash/MTM composite unaffected: %s",
                     strategy_id, scrub_freeform_string(str(_sm_exc)),
                 )
+            except DeribitTransientReadError as _sm_exc:
+                # WR-01: a transient marks read escaping the smoothed pass. Retry on
+                # every attempt but the last; on the last, DEGRADE (smoothed_result
+                # None → not promoted → the cash headline plus unsmoothed_options_book)
+                # instead of failing the healthy cash composite.
+                if not _smoothed_final_attempt:
+                    raise
+                smoothed_result = None
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm third pass hit a transient "
+                    "marks read on the last attempt for strategy %s — degrading the "
+                    "additive smoothed object, cash composite unaffected: %s",
+                    strategy_id, scrub_freeform_string(str(_sm_exc)),
+                )
         if isinstance(smoothed_result, DispatchResult):
-            # A per-leg TRANSIENT (429 / geo-block) or a preflight / unsupported-venue
-            # PERMANENT result — NOT a smoothed-structural degrade. Surface it: a
-            # transient re-runs the whole job (and re-converges), a permanent config
-            # error fails loud, exactly as the cash pass would on the same condition.
-            return smoothed_result
+            if smoothed_result.error_kind == "transient" and _smoothed_final_attempt:
+                # WR-01: a per-leg TRANSIENT (429 / geo-block) on the LAST attempt
+                # degrades instead of ending the cash composite failed_final.
+                logger.warning(
+                    "run_stitch_composite_job: smoothed_mtm third pass ended transient "
+                    "on the last attempt for strategy %s — degrading the additive "
+                    "smoothed object, cash composite unaffected",
+                    strategy_id,
+                )
+                smoothed_result = None
+            else:
+                # A per-leg TRANSIENT (429 / geo-block) on an earlier attempt or a
+                # preflight / unsupported-venue PERMANENT result — NOT a smoothed-
+                # structural degrade. Surface it: a transient re-runs the whole job
+                # (and re-converges), a permanent config error fails loud, exactly as
+                # the cash pass would on the same condition.
+                return smoothed_result
         if smoothed_result is not None:
             clipped_smoothed, _sm_signals, _sm_venues, _sm_metas, _sm_degraded = (
                 smoothed_result

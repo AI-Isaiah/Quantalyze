@@ -28,6 +28,7 @@ import pytest
 
 from services.deribit_ingest import (
     CompletenessReport,
+    DeribitTransientReadError,
     deribit_raw_rows_have_option_activity,
 )
 from services.native_nav import NativeLedger
@@ -5039,6 +5040,7 @@ async def _g252_run(
     combine_seq: list[tuple[pd.Series, dict[str, Any]]] | None = None,
     extra_patches: list[Any] | None = None,
     strategy_row: dict[str, Any] | None = None,
+    job_extra: dict[str, Any] | None = None,
 ) -> tuple[_FakeSupabase, Any, AsyncMock]:
     """Drive run_stitch_composite_job over two Deribit members. Combine yields the cash
     pair then the smoothed pair in call order (cash pass, then smoothed pass; MTM is
@@ -5082,7 +5084,9 @@ async def _g252_run(
     ), patch(
         "services.deribit_ingest.build_deribit_native_ledger", new=build_spy,
     ), _apply(list(extra_patches or [])):
-        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+        result = await run_stitch_composite_job(
+            {"strategy_id": _STRATEGY_ID, **(job_extra or {})}
+        )
     return fake, result, build_spy
 
 
@@ -5490,6 +5494,74 @@ async def test_g252_transient_in_the_smoothed_pass_retries_the_job_and_writes_no
     assert not [u for u in fake.upserts if u[0] in ("strategy_analytics", "csv_daily_returns")]
     assert not [d for d in fake.deletes if d[0] == "csv_daily_returns"]
     assert fake.existing_flags == seeded
+
+
+async def _g252_transient_build(exchange: Any, *, account_state: Any, pnl_basis: str,
+                                exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+    """The smoothed pass ends transient as a returned DispatchResult (a ccxt 429)."""
+    import ccxt
+
+    if pnl_basis == "smoothed_mtm":
+        raise ccxt.RateLimitExceeded("429 too many requests")
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+async def _g252_transient_read_build(exchange: Any, *, account_state: Any, pnl_basis: str,
+                                     exclude_spot_extraction: bool,
+                                     nav_twin: bool = False) -> Any:
+    """The smoothed pass raises a DeribitTransientReadError that escapes the pass."""
+    if pnl_basis == "smoothed_mtm":
+        raise DeribitTransientReadError("marks read transient")
+    return (_stub_ledger(), _G252_OPT_REPORT)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_", ["transient_dispatch_result", "escaping_transient_read"])
+async def test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_composite(
+    exit_: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01 (252 gap-2 review): intent change from T-252-27 above. The smoothed basis is
+    additive (GLB-3), so on the job's LAST attempt a transient in its pass (a returned
+    transient DispatchResult, or a DeribitTransientReadError escaping the marks fetch)
+    DEGRADES: the cash composite ships DONE with the named withhold and no headline_basis,
+    instead of the job ending failed_final over a healthy cash headline. Earlier attempts
+    keep retrying (the T-252-27 test and the next one). If this goes red a rate-limit or a
+    marks blip in the extra crawl stamps a healthy cash composite failed."""
+    build = (
+        _g252_transient_build if exit_ == "transient_dispatch_result"
+        else _g252_transient_read_build
+    )
+    fake, result, _ = await _g252_run(
+        monkeypatch,
+        build_side_effect=build,
+        job_extra={"attempts": 3, "max_attempts": 3},
+        extra_patches=[patch("services.job_worker._stamp_429", new=AsyncMock())],
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "headline_basis" not in dq
+    assert dq["mtm_gated_reason"] == MTM_REASON_OPTIONS
+    by_basis = headline["metrics_json_by_basis"]
+    assert "smoothed_mtm" not in by_basis
+    assert _g252_equal_on_keys(headline, by_basis["cash_settlement"])
+
+
+@pytest.mark.asyncio
+async def test_g252_escaping_transient_read_before_the_last_attempt_still_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: the degrade is last-attempt only. An escaping DeribitTransientReadError on an
+    earlier attempt (or a job row with no attempt counts) still escapes, so the worker
+    retries and a published row is not flipped to the withheld cash headline by one blip.
+    If this goes red the degrade fires on attempt 1 and a transient demotes a promoted row."""
+    with pytest.raises(DeribitTransientReadError):
+        await _g252_run(
+            monkeypatch,
+            build_side_effect=_g252_transient_read_build,
+            job_extra={"attempts": 1, "max_attempts": 3},
+        )
 
 
 @pytest.mark.asyncio
