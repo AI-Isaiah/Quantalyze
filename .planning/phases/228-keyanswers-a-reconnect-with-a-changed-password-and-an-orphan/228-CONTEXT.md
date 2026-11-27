@@ -3,6 +3,8 @@
 **Gathered:** 2026-11-26
 **Status:** Ready for planning
 
+⭐ **Moved from v1.22 TRUTH to v1.23 HARDEN, 2026-11-27 (founder ruling in chat; recorded here and in `ROADMAP.md`'s v1.22 and v1.23 sections per the deviation policy, and in `REQUIREMENTS.md`).** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". The ruling names only the milestone for this phase; nothing else about it was ruled on, and the earlier records stand. Its open human item, the founder reconnecting a live MT5 key with a changed investor password, stays as it is. The ruling's second half (close v1.22 after 252, then start v1.23) is not part of this move.
+
 <domain>
 ## Phase Boundary
 

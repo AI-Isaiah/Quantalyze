@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.118.2] - 2026-11-28 — records: Phases 228 KEYANSWERS and 230 MT5NIGHTLY move from v1.22 TRUTH to v1.23 HARDEN
+
+This is a records PR. It has no source, test, workflow or migration change. It records the founder's ruling of 2026-11-27 in chat, verbatim: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". This PR does the move only. Closing v1.22 once 252 closes, and starting v1.23, are not done here. The version is the next free patch above main's v0.133.118.1 (the baseline re-dump after #1419). The change was first cut at v0.133.109.0, rebuilt on main at v0.133.115.2 and rebased again onto v0.133.118.1, after #1419, #1420, #1421 and #1423 merged. Every count below was re-measured from disk on that base and is unchanged, because those merges touched only v1.23 phases (256, 257, 259).
+
+### Changed
+- **`ROADMAP.md`.** The `### Phase 228` and `### Phase 230` sections, their overview bullets and their Progress rows move from the v1.22 section to the v1.23 section, after 224 and ahead of 242. Each section gets one dated ruling note, and each Progress row says it moved.
+  - The milestone list: v1.22 now lists 222, 223, 225, 226, 227, 229, 231–241 and 250–253, and v1.23 gains 228 and 230.
+  - The v1.22 status paragraph gets a dated correction. v1.22 holds 21 phases, 20 of them with verification `passed`, and 252 DERIBITOPTIONS is the one still open. Before this PR the paragraph counted 22 phases with 10 complete, which was already stale.
+  - v1.22's goal counts move from 71/45 to 67/49. The ruling is recorded verbatim in both milestone sections and in v1.23's status paragraph. Order item 2 is kept as lineage with a dated note. Seams S1, S3 and S4 mark 228 and 230 as v1.23's.
+- **`REQUIREMENTS.md`.** CONN-02 and CONN-04 are re-mapped to `Phase 228 (v1.23)`, and MT5D-02 and MT5D-03 to `Phase 230 (v1.23)`, in the traceability table. Their Status cells are unchanged.
+  - Coverage: v1.22 has 67 requirements on 17 phases (MT5D 6, CONN 4, new groups 57), and v1.23 has 49 on 14 phases, for 116 in all.
+  - Their text stays under its v1.22 headings, with a dated pointer under MT5DERIVE2 and CONNECTTRUTH, so that existing citations still resolve. F-10 gets a dated note naming the ruling.
+- **`STATE.md` and `state.json`.** The progress block goes from 23 phases, 19 complete, 161 plans, 159 complete and 83% to 21, 20, 149, 149 and 95%. Every figure was measured from the v1.22 phase directories on disk: PLAN and SUMMARY files, and VERIFICATION `status: passed`.
+  - Before the move, the disk read 23 phases, 20 complete, 163 plans and 161 complete. The block had been one phase and two plans behind.
+  - `state_head`, `last_updated` and Current Position's `Progress:` bar were set by hand. A Roadmap Evolution entry was hand-written, and Current Focus gets a dated note.
+  - `state.json` drops the 228 and 230 entries, and its `next.reason` reads "of 21 · 95%".
+- **`228-CONTEXT.md` and `230-CONTEXT.md`** each get the dated, verbatim ruling. `PROJECT.md` gets dated corrections in its v1.22 and v1.23 paragraphs and in its status line.
+- **`TODOS.md`.** The owner tags of `202-MT5-CLOCK-LEAD-01` and `175-NIGHTLY-MT5-DERIVE-CHECK` now say Phase 230 is in v1.23 since 2026-11-27. No entry is closed or deleted.
+
+### Fixed
+- **228's ROADMAP records.** Its Progress row read `0/? | Not started`, and its four plan ticks were `[ ]`, although 228 shipped as v0.133.98.0 (#1377) with four plan SUMMARYs and verification `human_needed`. The ticks are now `[x]`, the plan count reads 4/4, and the row reads shipped, `human_needed`. The overview bullet stays `[ ]`, because the phase is not complete.
+
+### Notes
+- **Both phases keep their open human items.** 228 still waits on the founder reconnecting a live MT5 key with a changed investor password. 230 still waits on plan 09's seven clean nights (the soak runs to about 2026-12-03) and on plan 10's capture and replay. The Deferred Verification rows for both are unchanged.
+- **230's place in the 155.2 freeze window is unchanged.** If its fix or replay moves MT5 numbers for MM2, MM3 or FX-AI_V, it still merges on one side of the window. A dated note says so at the milestone-wide rule.
+- No remaining v1.22 phase lists 228 or 230 in its Depends-on line.
+
 ## [0.133.118.1] - 2026-11-28 — BASELINE: automated re-dump after the PROD apply of 9a6e3039
 
 ### Changed

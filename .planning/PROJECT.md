@@ -43,7 +43,9 @@ DEMOCREDS: delete the two demo accounts and remove their committed passwords), k
 `158-OPS-03` is the only HIGH item in scope. ⛔ **CORRECTED 2026-11-25 (founder ruling in chat, "We will Move 157 and 155.2 into the next milestone"):**
 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM moved to v1.23 HARDEN with their 10 requirements, so v1.22 now holds
 22 phases (222, 223, 225, 226–241 and the later-booked 250–252) and 71 requirements. The two "Carried" target
-features below are kept as lineage. MT5 stays unadvertised until 155.2 passes.
+features below are kept as lineage. MT5 stays unadvertised until 155.2 passes. ⛔ **CORRECTED 2026-11-27 (founder ruling in chat,
+"let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"):** 228 KEYANSWERS and 230 MT5NIGHTLY moved to v1.23 HARDEN with CONN-02, CONN-04, MT5D-02 and
+MT5D-03, so v1.22 now holds 21 phases (222, 223, 225, 226, 227, 229, 231–241 and 250–253) and 67 requirements.
 
 **Target features:**
 - **Carried, live MT5 parity (155.2 LIVEPARITY)** — the founder's broker statements, the Gate B run and
@@ -80,7 +82,9 @@ SENTRYSCRUB2 and 224 DEADLEFTOVERS and the new 242–249: secrets hygiene beyond
 readers, SQL gate censuses and live-DB test lanes. Its 35 requirements keep their ids under "Planned for
 v1.23" in `.planning/REQUIREMENTS.md`; the phases are in ROADMAP's v1.23 section. ⭐ **2026-11-25 (founder ruling in
 chat, "We will Move 157 and 155.2 into the next milestone"):** it also holds 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved from v1.22
-with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, which makes 45 requirements.
+with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, which makes 45 requirements. ⭐ **2026-11-27 (founder ruling in chat,
+"let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"):** it also holds 228 KEYANSWERS and 230 MT5NIGHTLY,
+moved from v1.22 with CONN-02, CONN-04, MT5D-02 and MT5D-03, which makes 49 requirements.
 
 ## ✅ Shipped: v1.18 MT5-VERIFY & founder confirmations (2026-08-14 → 2026-11-23; parked 2026-08-20 → 2026-11-13)
 
@@ -522,7 +526,7 @@ This document evolves at phase transitions and milestone boundaries.
 **v1.18 MT5-VERIFY & founder confirmations shipped and closed 2026-11-23** (audit `passed`, 5/5
 requirements, 16/16 phases `passed`). See the `## ✅ Shipped: v1.18` section above. **v1.22 TRUTH — data you
 can trust started 2026-11-23** (see `## Current Milestone` above); it holds Phases 155.2, 157, 222, 223, 225 and
-226–241 (221 and 224 moved to the planned v1.23 HARDEN by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes. ⛔ CORRECTED 2026-11-25: 155.2 and 157, with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, moved to v1.23 HARDEN (founder: "We will Move 157 and 155.2 into the next milestone"); v1.22 holds 222, 223, 225, 226–241 and 250–252.
+226–241 (221 and 224 moved to the planned v1.23 HARDEN by F-10) and carries MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04. MT5 stays unadvertised until 155.2 passes. ⛔ CORRECTED 2026-11-25: 155.2 and 157, with MT5-07..10, MT5-15, MT5-GOAL-01 and FCONF-01..04, moved to v1.23 HARDEN (founder: "We will Move 157 and 155.2 into the next milestone"); v1.22 holds 222, 223, 225, 226–241 and 250–252. ⛔ CORRECTED 2026-11-27: 228 and 230, with CONN-02, CONN-04, MT5D-02 and MT5D-03, moved to v1.23 HARDEN (founder: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"); v1.22 holds 222, 223, 225, 226, 227, 229, 231–241 and 250–253.
 
 **v1.21 UX — trustworthy, navigable, lean shipped and closed 2026-11-13** (audit `tech_debt`, 32/32
 requirements, 18/18 phases `passed`). See the `## ✅ Shipped: v1.21` section above. The next milestone is not
