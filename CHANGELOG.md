@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.133.109.1] - 2026-11-27 — records: Phase 254 OPENINGDEPOSIT closed (verification passed)
+
+### Changed
+- Phase 254 OPENINGDEPOSIT (v1.23) is closed. Its artifacts come onto `main`: CONTEXT, DISCUSSION-LOG, PLAN, SUMMARY, REVIEW, SECURITY and VERIFICATION. `ROADMAP.md` ticks the phase and its one plan, and its Progress row reads Complete.
+- `STATE.md` keeps its Current Position. The `phase complete` handler moved it to Phase 228, recomputed v1.22's `progress:` block and reset `state.json` statuses; all three were reverted by hand. Only the last-activity lines name 254.
+- `254-VERIFICATION.md` is `passed` (4/4), and `254-SECURITY.md` has 8/8 threats closed. The code shipped in #1407 (v0.133.109.0).
+
+### Notes
+- The discuss step ran autonomously (no founder question was needed). Every decision is recorded in `254-CONTEXT.md`.
+- Records only, no code. No `TODOS.md` entry is closed. The one PROD book's `out_of_window_flow` is expected to clear on its next daily derive. That is not yet measured.
+
 ## [0.133.109.0] - 2026-11-27 — Phase 254 OPENINGDEPOSIT: a deposit dated the day before a key's first return is its opening deposit on every venue
 
 ### Fixed

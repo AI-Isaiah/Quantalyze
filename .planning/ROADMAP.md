@@ -997,7 +997,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 247: SENTRYHELD — a failing anonymous read reports exactly once, and the landing page at most once per window** - Caller-only; ordered after SENTRYSCRUB2
 - [ ] **Phase 248: SQLGATES2 — SQL gate censuses fail when an axis drifts, and apply-test tells a seeded ledger row from an applied migration** - Derived census axes, enforced exemptions, provenance gate twins, the apply-test fix before the forward comment correction
 - [ ] **Phase 249: TESTLANES — every live-DB lane test executes, a fence timeout fails, lint agrees cold and warm, and the PROD image crash risk is measured** - Ledger to zero with no assertion weakened, no green skips, cache-proof lint, supautils measured locally on the PROD image version
-- [ ] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
+- [x] **Phase 254: OPENINGDEPOSIT — a deposit dated the day before a key's first return is its opening deposit on every venue** - Booked 2026-11-26 by founder ruling ("Exempt it, book for v1.23") from an allocator book whose `out_of_window_flow` is a Bybit key's opening deposit dated one day before its first return; a narrow opening-run exemption in `replay_key_equity`, not a wider `FULL_HISTORY_VENUES`
 - [x] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD (completed 2026-11-27)
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 - [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
@@ -1282,10 +1282,10 @@ Plans:
 2. A deposit two or more days before the first return, and a flow on any later day outside the window, are still reported as `out_of_window_flow`.
 3. `FULL_HISTORY_VENUES` and the D-13 zero-start checks are unchanged, and a test pins that.
 4. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 254-01-PLAN.md — the opening-deposit exemption in `replay_key_equity` (deposit only, off full history, count flag `opening_deposit_exempted`), the SC-1/SC-2/SC-3 and writer-basis arms, the old-rule tests reworked, the full suite against a HEAD baseline, and PROOF-01 neuters N1 to N10
 
 ### Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips
 
@@ -1372,7 +1372,7 @@ Plans:
 | 247. SENTRYHELD | 0/? | Planned for v1.23 | - |
 | 248. SQLGATES2 | 0/? | Planned for v1.23 | - |
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
-| 254. OPENINGDEPOSIT | 0/? | Planned for v1.23 | - |
+| 254. OPENINGDEPOSIT | 1/1 | Complete (shipped v0.133.109.0, #1407; verification passed 4/4, SECURITY 8/8 closed; the one PROD book's `out_of_window_flow` clears on its next daily derive) | 2026-11-27 |
 | 255. NULLANCHOR | 3/3 | Complete (shipped v0.133.104.0, #1395; verification passed, SC-3 met at ship; SECURITY 0 open; founder rulings 2026-11-27: "Re-read now (Recommended)" for the OKX backfill, "Fix both in a follow-up (Recommended)" for 257 SEEDHOLD) | 2026-11-27 |
 | 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
 | 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
