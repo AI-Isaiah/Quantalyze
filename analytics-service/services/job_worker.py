@@ -12736,6 +12736,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     import pandas as pd
 
     from services.stitch_composite import (
+        HEADLINE_BASIS_FLAG,
+        HEADLINE_BASIS_SMOOTHED,
         CompositeOverlapError,
         MemberBasisSignal,
         MemberWindow,
@@ -12743,6 +12745,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         clip_to_window,
         coverage_mask,
         mark_to_market_available,
+        smoothed_headline_promotion,
         smoothed_mtm_available,
         stitch_clipped_series,
     )
@@ -14904,13 +14907,19 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # no smoothed degrade-REASON channel yet (Phase 133 / LOW-01) — the by-basis
     # omission is the signal; every degrade is logged (scrubbed text only).
     #
-    # Phase 134 kill-switch: with SMOOTHED_MTM_ENABLED off (the dark default) the
-    # composite smoothed THIRD pass is SKIPPED ENTIRELY — smoothed_ok is forced
-    # False so there is NO per-member smoothed reconstruction fan-out, no stitch, no
-    # derive_basis_series, no persist, and smoothed_metrics_json stays None so no
-    # metrics_json_by_basis["smoothed_mtm"] key is written. Short-circuit FIRST (flag
-    # before availability) so a mark-hole never even reaches the predicate.
-    smoothed_ok = is_smoothed_mtm_enabled() and smoothed_mtm_available(member_signals)
+    # Phase 252 (G252-MTM-PROMOTION): this composite site NO LONGER reads the Phase 134
+    # SMOOTHED_MTM_ENABLED kill-switch. The founder's 2026-11-25 ruling makes the
+    # smoothed basis the HEADLINE CANDIDATE for an option-active composite ("measure
+    # market-price valuation and switch the headline to it only if it actually works for
+    # these keys"), and that measurement cannot happen behind a dark flag. GLB-3 above
+    # already degrades every structural, budget and timeout failure of this pass, and the
+    # population is exactly the rows the wave-1 withhold hides, so a degrade leaves them
+    # as they are today. Precedent: 185 D-04 builds the key-mode options headline without
+    # the flag. A TRANSIENT reconstruction result (429 / geo-block) still surfaces as a
+    # whole-job retry, as it does with the flag on. The flag keeps gating the single-key
+    # smoothed third pass and the RT-4 headline-config refusal in
+    # run_derive_broker_dailies_job, unchanged.
+    smoothed_ok = smoothed_mtm_available(member_signals)
     smoothed_metrics_json: dict[str, Any] | None = None
     _smoothed_basis_result: BasisSeriesResult | None = None
     # MED-01 (132 review): the smoothed-pass member metas are KEPT (no longer
@@ -15029,6 +15038,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         strategy_id,
                     )
                 else:
+                    # Phase 252 (T-252-26): the cash derive's arguments minus the
+                    # covered-day and tiny-day exclusion (this pass runs with
+                    # apply_member_marks False, so it has neither). Without
+                    # scalar_returns the default scalar input drops a member-guard NaN
+                    # day and fills it with 0.0: an invented flat day that hides the
+                    # chain break the promotion decision (P4) reads.
                     _smoothed_basis_result = derive_basis_series(
                         stitched_smoothed,
                         benchmark_rets,
@@ -15036,6 +15051,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                         cumulative_method=cumulative_method,
                         day_basis=day_basis,
                         benchmark_symbol="BTC",
+                        scalar_returns=gap_fill_daily_returns(stitched_smoothed),
+                        densify_policy="zero_fill",
                     )
                     smoothed_metrics_json = dict(_smoothed_basis_result.metrics_json)
             except CompositeOverlapError as exc:
@@ -15064,6 +15081,46 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "unaffected: %s",
                     strategy_id, scrub_freeform_string(str(exc)),
                 )
+
+    # 6c. Phase 252 (G252-MTM-PROMOTION): the HEADLINE-BASIS DECISION. Starts False on
+    # every stitch; only an option-active composite (P1, smoothed_ok) asks the pure
+    # decision (P2 computed, P3 no retention-bucketed option day, P4 no interior chain
+    # break), so a no-option composite emits no line and writes nothing smoothed. The
+    # log line carries the cause literal only: no amount, no date, no member id.
+    smoothed_promoted = False
+    if smoothed_ok:
+        smoothed_promoted, _not_promoted_cause = smoothed_headline_promotion(
+            smoothed_computed=smoothed_metrics_json is not None,
+            retention_bucketed=any(
+                m.get("pre_mark_retention_option_dailies")
+                for m in smoothed_member_metas
+            ),
+            chain_broken=(
+                _smoothed_basis_result is not None
+                and _smoothed_basis_result.headline_since is not None
+            ),
+        )
+        if smoothed_promoted:
+            logger.info(
+                "run_stitch_composite_job: smoothed headline promoted for strategy %s",
+                strategy_id,
+            )
+        else:
+            logger.info(
+                "run_stitch_composite_job: smoothed headline not promoted for "
+                "strategy %s (%s)",
+                strategy_id, _not_promoted_cause,
+            )
+    # The ONE result every HEADLINE-describing output below reads (the top-level
+    # scalars and series, headline_since, insufficient_window, the chain-break verdict).
+    # Cash-basis contracts (csv_daily_returns, the by-basis cash object, the series rows,
+    # the siblings, the coverage mask) keep reading the cash result.
+    _headline_result: BasisSeriesResult = _cash_basis_result
+    _headline_metrics: dict[str, Any] = cash_metrics_json
+    if smoothed_promoted:
+        assert _smoothed_basis_result is not None and smoothed_metrics_json is not None
+        _headline_result = _smoothed_basis_result
+        _headline_metrics = smoothed_metrics_json
 
     # 7. PERSIST (OQ-3 ordering): (1) csv_daily_returns, (2) headline CSV analytics,
     # (3) additive metrics_json_by_basis + merged DQ flags.
@@ -15225,7 +15282,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # `cumulative_twr_segmented` predicate the single-key path's flag uses), so the
     # flag and the date can never disagree. It rides the same warn promotion as every
     # NAV_TWR_GUARD_KEYS member (single-key parity: complete_with_warnings).
-    _composite_chain_broken = _cash_basis_result.headline_since is not None
+    # Phase 252: read from the HEADLINE result (cash, or the smoothed one on a promoted
+    # row, where P4 guarantees no break).
+    _composite_chain_broken = _headline_result.headline_since is not None
     if _composite_chain_broken:
         member_warn_flags["twr_chain_broken"] = True
         member_warned = True
@@ -15285,10 +15344,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # present coverage-mask key. DROP a stale one when THIS derive ADMITS MTM, else a
     # prior gated run's reason would linger next to a now-present mark_to_market basis
     # (the per_key / gap_* keys are unconditionally overwritten above, so no stale).
-    if not mtm_ok and mtm_reason is not None:
-        merged_flags["mtm_gated_reason"] = mtm_reason
-    else:
+    #
+    # Phase 252 (G252-MTM-PROMOTION): on a PROMOTED row the headline is the smoothed
+    # result, so the named withhold is dropped and ``headline_basis`` names the basis;
+    # on every other stitch (including one with smoothed_ok False, a composite that
+    # stopped being option-active) a stale marker is popped so it can never outlive the
+    # promotion. Exactly one of the two markers is present on an option-active row. Both
+    # ride the ONE headline_payload upsert with the scalars they describe.
+    if smoothed_promoted:
         merged_flags.pop("mtm_gated_reason", None)
+        merged_flags[HEADLINE_BASIS_FLAG] = HEADLINE_BASIS_SMOOTHED
+    else:
+        merged_flags.pop(HEADLINE_BASIS_FLAG, None)
+        if not mtm_ok and mtm_reason is not None:
+            merged_flags["mtm_gated_reason"] = mtm_reason
+        else:
+            merged_flags.pop("mtm_gated_reason", None)
     # HARD-04 (#67): lift the CAGR-site insufficient_window annotation, mirroring
     # the mtm_gated_reason drop-stale pattern above — a composite that GROWS past
     # MIN_ANNUALIZATION_DAYS heals (loses the flag) on the next re-stitch. Read
@@ -15296,7 +15367,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # composite compute); the MTM second pass shares the same window by
     # construction. Annotation only — it deliberately does NOT touch
     # computation_status (not a NAV_TWR_GUARD_KEYS member).
-    if _cash_basis_result.insufficient_window:
+    if _headline_result.insufficient_window:
         merged_flags["insufficient_window"] = True
     else:
         merged_flags.pop("insufficient_window", None)
@@ -15305,8 +15376,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # flags, so a clean re-stitch must POP a stale date explicitly (the insufficient
     # window / mtm_gated_reason drop-stale twin above). Annotation only: it never
     # touches computation_status (not a NAV_TWR_GUARD_KEYS member).
-    if _cash_basis_result.headline_since is not None:
-        merged_flags["headline_since"] = _cash_basis_result.headline_since
+    if _headline_result.headline_since is not None:
+        merged_flags["headline_since"] = _headline_result.headline_since
     else:
         merged_flags.pop("headline_since", None)
     # NAVMTM plan 09 (D-12): where the members' stored marks begin inside the stitched span and
@@ -15314,11 +15385,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # re-stitch whose result lacks one POPS it (the ``headline_since`` pop's twin above), or a
     # stale start date or gap list would outlive the stitch that computed it. Annotation only:
     # neither is a NAV_TWR_GUARD_KEYS member, so none promotes computation_status.
-    if _mark_summary.marks_since is not None:
+    #
+    # Phase 252: on a PROMOTED row these two (and marks_trailing_since below) are POPPED:
+    # they describe stored marks that were applied to the CASH basis only, and the
+    # smoothed headline was derived with no marks applied.
+    if _mark_summary.marks_since is not None and not smoothed_promoted:
         merged_flags["marks_since"] = _mark_summary.marks_since
     else:
         merged_flags.pop("marks_since", None)
-    if _mark_summary.mark_gap_days:
+    if _mark_summary.mark_gap_days and not smoothed_promoted:
         merged_flags["mark_gap_days"] = list(_mark_summary.mark_gap_days)
     else:
         merged_flags.pop("mark_gap_days", None)
@@ -15331,9 +15406,22 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # ``marks_since`` cut: a closed member's W2 tail keeps its NaN days after its first mark.
     from services.tiny_base import tiny_base_day_list
 
-    _stitched_nan = {ts.date().isoformat() for ts in stitched_cash.index[stitched_cash.isna().to_numpy()]}
-    _listed_tiny: set[str] = set(_mark_summary.tiny_base_days)
-    for (_tiny_seq, _), _tiny_meta in zip(clipped_cash, member_metas, strict=True):
+    # Phase 252: on a PROMOTED row the same rule reads the SMOOTHED pass: its metas, its
+    # clipped series and the NaN days of ``stitched_smoothed``, with the marked-era
+    # ``_mark_summary`` days NOT added (marks apply to the cash basis only).
+    if smoothed_promoted:
+        _tiny_stitched = stitched_smoothed
+        _tiny_clipped = clipped_smoothed
+        _tiny_metas = smoothed_member_metas
+        _tiny_seed: set[str] = set()
+    else:
+        _tiny_stitched = stitched_cash
+        _tiny_clipped = clipped_cash
+        _tiny_metas = member_metas
+        _tiny_seed = set(_mark_summary.tiny_base_days)
+    _stitched_nan = {ts.date().isoformat() for ts in _tiny_stitched.index[_tiny_stitched.isna().to_numpy()]}
+    _listed_tiny: set[str] = _tiny_seed
+    for (_tiny_seq, _), _tiny_meta in zip(_tiny_clipped, _tiny_metas, strict=True):
         _tiny_lo, _tiny_hi = _window_by_seq[_tiny_seq]
         _listed_tiny.update(
             d
@@ -15346,7 +15434,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         merged_flags.pop("tiny_base_days", None)
     # SFH round 2 N2: the earliest day any still-open member's rows stop before the day this run
     # labels. A note like the two above (not a NAV_TWR_GUARD_KEYS member), popped when current.
-    if member_trailing:
+    if member_trailing and not smoothed_promoted:
         merged_flags["marks_trailing_since"] = min(member_trailing.values())
     else:
         merged_flags.pop("marks_trailing_since", None)
@@ -15551,7 +15639,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES
     # metrics_json_by_basis wholesale (Finding 5) so a prior mark_to_market basis
     # can't survive a now-gated re-derive.
-    headline_payload.update(cash_metrics_json)
+    #
+    # Phase 252 (G252-MTM-PROMOTION): on a PROMOTED row this is the SAME object as
+    # metrics_json_by_basis.smoothed_mtm instead, series included (returns_series,
+    # drawdown_series, monthly_returns, sparkline_*), so every chart drawn from the
+    # top-level series shows the curve that matches the promoted figures. The marker
+    # and the dropped reason rode the same payload (merged_flags above).
+    headline_payload.update(_headline_metrics)
 
     # Phase 105 (SC-5 / D5): ORDERED-IDEMPOTENT finalize. BOTH basis series (cash +
     # MTM below) land BEFORE the DONE-bearing headline/by-basis scalar flip — together
@@ -15625,9 +15719,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # timeout / structural member failure / degenerate-length / compute chain-break).
     # Without the heal a prior successful stitch's smoothed series row would outlive the
     # authoritative by-basis scalar OMISSION — a stale money series read by bare
-    # (strategy_id, kind). smoothed_ok is only True on an options composite with the
-    # flag ON, so this never relaxes SC-4: a no-option / flag-off composite leaves
-    # smoothed_ok False → the smoothed_mtm series row is untouched (byte-invisible).
+    # (strategy_id, kind). smoothed_ok is only True on an options composite (Phase 252:
+    # whatever SMOOTHED_MTM_ENABLED says), so this never relaxes SC-4: a no-option
+    # composite leaves smoothed_ok False → the smoothed_mtm series row is untouched
+    # (byte-invisible).
     if smoothed_ok:
         _smoothed_persist_result = (
             _smoothed_basis_result if smoothed_metrics_json is not None else None

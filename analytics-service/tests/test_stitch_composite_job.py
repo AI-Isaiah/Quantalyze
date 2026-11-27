@@ -43,11 +43,12 @@ from services.stitch_composite import MTM_REASON_OPTIONS
 from services.deribit_txn import LedgerValuationError
 
 
-# Phase 134 (smoothed_mtm kill-switch): the composite smoothed THIRD pass ships DARK
-# behind SMOOTHED_MTM_ENABLED (default OFF). The smoothed-assuming tests in this
-# module (4-combine fan-outs, a smoothed by-basis key, per-leg fail-loud) opt the
-# flag ON explicitly so the gate is VISIBLE here; the dark-launch (flag-OFF)
-# assertion below overrides with a per-test `monkeypatch.delenv` (read per-call).
+# Phase 134 (smoothed_mtm kill-switch): the composite smoothed THIRD pass shipped DARK
+# behind SMOOTHED_MTM_ENABLED (default OFF), and the smoothed-assuming tests in this
+# module opt the flag ON. Phase 252 (G252-MTM-PROMOTION) made the COMPOSITE pass
+# flag-independent (the flag still gates the single-key pass), so this opt-in is now
+# inert for the composite route; it is kept so these cases stay as written, and the
+# flag-unset cases (the G252 block at the end) override it with `monkeypatch.delenv`.
 pytestmark = pytest.mark.usefixtures("smoothed_mtm_enabled")
 
 
@@ -1175,22 +1176,41 @@ async def test_mtm_degenerate_length_gets_dedicated_message_not_chain_break() ->
 @pytest.mark.asyncio
 async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
     """An option-active member gates MTM off; the reason is carried in
-    data_quality_flags for Phase 90 (never JSON null in the by-basis object)."""
+    data_quality_flags for Phase 90 (never JSON null in the by-basis object).
+
+    Phase 252 (G252-MTM-PROMOTION) intent change: the reason is carried on an
+    option-active composite whose smoothed headline is NOT promoted. With the smoothed
+    build computing, the headline is promoted and the reason is dropped (pinned in the
+    G252 block below), so this case forces a smoothed STRUCTURAL degrade: the cash
+    headline ships and the named withhold stays, which is what it always protected."""
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),
         _member(2, "2024-02-01", None),
     ])
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    _opt_report = CompletenessReport(
+        total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+        has_option_activity=True,
+    )
+
+    async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
+                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+        if pnl_basis == "smoothed_mtm":
+            raise LedgerValuationError("no smoothed mark at book-channel boundary")
+        return (_stub_ledger(), _opt_report)
+
     with _apply(_deribit_patches(
         fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
-    )):
+    )), patch(
+        "services.deribit_ingest.build_deribit_native_ledger",
+        new=AsyncMock(side_effect=_build),
+    ):
         await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     by_basis = _by_basis(fake)
     assert by_basis is not None
-    # Phase 132: an options composite now ALSO persists smoothed_mtm (smoothing OPENS
-    # what MTM keeps closed); cash_settlement + smoothed_mtm, still NO mark_to_market.
-    assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}
+    # A degraded smoothed pass omits the smoothed key; MTM stays gated off.
+    assert set(by_basis) == {"cash_settlement"}
     # Phase 102 MTM-02 (Option A, COMPOSE-2): an options-member composite persists
     # NO mark_to_market key (never a JSON null in the by-basis object) — the honest-
     # disabled contract, tied to the value-imported constant (rename-decouple guard).
@@ -1261,7 +1281,11 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
         "an options composite persists cash + smoothed_mtm; MTM stays gated off"
     )
     assert "mark_to_market" not in by_basis  # never JSON null; honestly gated off
-    # The MTM gate decision is BYTE-UNCHANGED — the reason stays unsmoothed_options_book.
+    # The MTM gate decision is BYTE-UNCHANGED: mark_to_market is absent from the by-basis
+    # object above. Phase 252 (G252-MTM-PROMOTION) intent change: the stored REASON is no
+    # longer asserted here, because a composite whose smoothed build computes is PROMOTED
+    # and drops the named withhold (marker headline_basis instead); the unpromoted forms
+    # that keep the reason are pinned in the G252 block below.
     dq = None
     for table, payload, _ in reversed(fake.upserts):
         if table == "strategy_analytics" and isinstance(payload, dict) \
@@ -1270,7 +1294,9 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
             dq = payload["data_quality_flags"]
             break
     assert dq is not None
-    assert dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS == "unsmoothed_options_book"
+    assert MTM_REASON_OPTIONS == "unsmoothed_options_book"
+    assert dq.get("headline_basis") == "smoothed_mtm"
+    assert "mtm_gated_reason" not in dq
     # The smoothed pass built the ledger with the smoothed_mtm basis.
     smoothed_calls = [
         c for c in build_spy.await_args_list
@@ -1279,19 +1305,20 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
     assert smoothed_calls, "options composite must run a smoothed_mtm ledger pass"
 
 
-# ── Phase 134 (kill-switch): SMOOTHED_MTM_ENABLED off ⇒ composite pass is DARK ───
+# ── Phase 252: SMOOTHED_MTM_ENABLED no longer gates the COMPOSITE smoothed pass ─────
 
 @pytest.mark.asyncio
-async def test_smoothed_dark_launch_composite_skips_smoothed_pass(monkeypatch) -> None:
-    """KILL-SWITCH (composite): with SMOOTHED_MTM_ENABLED off (the dark default), an
-    options-member composite that WOULD persist a smoothed_mtm basis when the flag is
-    on (test_options_composite_persists_smoothed_while_mtm_gated) instead runs NO
-    smoothed pass at all — smoothed_ok is forced False before smoothed_mtm_available is
-    even consulted. Only the cash fan-out runs (2 members × 1 combine = 2 combines, MTM
-    honestly gated off), the by-basis object is {cash_settlement} with NO smoothed_mtm
-    key, and NO smoothed_mtm ledger crawl is issued. The MTM gate reason is byte-
-    unchanged. Neuter (remove the flag gate) → RED (4 combines, smoothed_mtm appears)."""
-    # Override the module-level opt-in: the flag is read per-call at run time.
+async def test_smoothed_flag_off_composite_still_runs_smoothed_pass(monkeypatch) -> None:
+    """Phase 134 kill-switch intent, CHANGED by Phase 252 (G252-MTM-PROMOTION). It was
+    ``test_smoothed_dark_launch_composite_skips_smoothed_pass``: with the flag off the
+    composite ran NO smoothed pass. The founder's 2026-11-25 ruling makes the smoothed
+    basis the headline candidate for an option-active composite, so the composite pass
+    runs whatever the flag says (GLB-3 still degrades every structural, budget and
+    timeout failure). With the flag off an options composite therefore runs cash +
+    smoothed (2 members x 2 passes = 4 combines, MTM honestly gated off) and persists
+    {cash_settlement, smoothed_mtm}. The flag keeps gating the single-key pass
+    (tests/test_mtm_single_key.py, unedited). The no-option half is pinned by
+    test_g252_no_option_composite_is_byte_identical_with_the_flag_unset_and_set."""
     monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
     fake = _FakeSupabase(members=[
         _member(1, "2024-01-01", "2024-02-01"),
@@ -1303,13 +1330,10 @@ async def test_smoothed_dark_launch_composite_skips_smoothed_pass(monkeypatch) -
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=True,
     )))
-    # Only the cash fan-out should run when dark → size for ONE pass (2 members). The
-    # harness only DOUBLES combine_returns for has_option_activity, so we pass the flag
-    # through here but rely on the dark gate to consume exactly the cash half.
     patches = _deribit_patches(
         fake,
-        combine_returns=[(m1, {}), (m2, {})],
-        has_option_activity=True,  # options book — MTM gated off; smoothed dark-OFF
+        combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
+        has_option_activity=True,
     )
     with _apply(patches), patch(
         "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
@@ -1319,25 +1343,15 @@ async def test_smoothed_dark_launch_composite_skips_smoothed_pass(monkeypatch) -
 
         _combine_mock = _bd.combine_native_ledger
     assert result.outcome == DispatchOutcome.DONE
-    assert _combine_mock.call_count == 2, (
-        "dark launch: only the cash fan-out runs (2 members × 1 combine) — the smoothed "
-        "THIRD pass must NOT fan out when SMOOTHED_MTM_ENABLED is off"
+    assert _combine_mock.call_count == 4, (
+        "flag off: an options composite still runs cash + smoothed (2 members x 2 passes)"
     )
-    # NO smoothed_mtm ledger crawl was issued.
-    smoothed_calls = [
-        c for c in build_spy.await_args_list
-        if c.kwargs.get("pnl_basis") == "smoothed_mtm"
-    ]
-    assert not smoothed_calls, (
-        "dark launch: no smoothed_mtm ledger pass — a member mark-hole cannot fail "
-        "the job when the basis is dormant"
-    )
+    assert any(
+        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build_spy.await_args_list
+    ), "flag off: the composite smoothed_mtm ledger pass must run (Phase 252)"
     by_basis = _by_basis(fake)
     assert by_basis is not None
-    assert set(by_basis) == {"cash_settlement"}, (
-        "dark launch: only cash_settlement persists — NO smoothed_mtm key; the MTM "
-        "gate stays honestly closed (unsmoothed_options_book), cash byte-identical"
-    )
+    assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}
 
 
 # ── GLB-3: the composite smoothed THIRD pass DEGRADES (structural + budget) ──────
@@ -1698,8 +1712,7 @@ async def test_composite_smoothed_helper_valueerror_degrades() -> None:
     """GLB-3(a): a ValueError (interior chain-break) from the shared derive_basis_series
     on the SMOOTHED call hits the smoothed ValueError arm → DEGRADE (omit the smoothed_mtm
     key, keep the cash composite DONE), single-key parity (:3972). The cash derive
-    succeeds (it carries the zero_fill densify bridge); ONLY the smoothed derive (no
-    densify_policy kwarg) raises, isolating the smoothed arm. Neuter (re-raise /
+    succeeds (call 1); ONLY the smoothed derive (call 2) raises, isolating the smoothed arm. Neuter (re-raise /
     _stamp_failed in the smoothed except ValueError arm) → RED (the job FAILS)."""
     import services.basis_series as _bs
 
@@ -1710,11 +1723,15 @@ async def test_composite_smoothed_helper_valueerror_degrades() -> None:
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
     _real_derive = _bs.derive_basis_series
+    _derive_calls = {"n": 0}
 
     def _derive_side(*a: Any, **k: Any) -> Any:
-        # The cash call carries densify_policy; the smoothed call does not → raise only
-        # on the smoothed derive (MTM is gated off for an options composite).
-        if "densify_policy" not in k:
+        # Phase 252 intent-preserving edit: the smoothed derive now carries
+        # densify_policy too (honest derive), so it can no longer be told apart by
+        # kwarg. The cash derive is call 1 and the smoothed derive call 2 (MTM is gated
+        # off for an options composite) → raise only on call 2.
+        _derive_calls["n"] += 1
+        if _derive_calls["n"] >= 2:
             raise ValueError("interior chain-break")
         return _real_derive(*a, **k)
 
@@ -4969,3 +4986,260 @@ async def test_the_composite_verdict_is_derived_not_hand_written() -> None:
     headline = _headline_row(fake)
     assert headline is not None
     assert headline["series_completeness"] == "composite_stitched"
+
+
+# ===========================================================================
+# Phase 252 (gap G252-MTM-PROMOTION) — the composite HEADLINE basis is chosen per row.
+#
+# Founder ruling 2026-11-25 (252-CONTEXT.md): "Then measure market-price valuation and
+# switch the headline to it only if it actually works for these keys." An option-active
+# composite whose smoothed build computes (P2), carries no retention-bucketed option day
+# (P3) and has no interior chain break (P4) stores the SMOOTHED result as its headline,
+# names the basis in data_quality_flags.headline_basis and drops the wave-1 withhold
+# (mtm_gated_reason). Any miss keeps today's cash headline plus the named withhold.
+# Every case below runs with SMOOTHED_MTM_ENABLED UNSET (the module's opt-in is
+# overridden inside the runner), because the PROD Railway variable is unset.
+# ===========================================================================
+_G252_LOG = "quantalyze.analytics.job_worker"
+_G252_OPT_REPORT = CompletenessReport(
+    total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+    has_option_activity=True,
+)
+_G252_STRATEGY_ROW = {"id": _STRATEGY_ID, "asset_class": "crypto"}
+
+
+def _g252_members() -> list[dict[str, Any]]:
+    return [_member(1, "2024-01-01", "2024-02-01"), _member(2, "2024-02-01", None)]
+
+
+# CASH members and SMOOTHED members DIFFER, so a cash/smoothed mix-up is visible.
+def _g252_cash() -> tuple[pd.Series, pd.Series]:
+    return (
+        _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05), ("2024-01-03", -0.02)]),
+        _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06), ("2024-02-03", 0.03)]),
+    )
+
+
+def _g252_smoothed() -> tuple[pd.Series, pd.Series]:
+    return (
+        _returns([("2024-01-01", 0.07), ("2024-01-02", -0.01), ("2024-01-03", 0.04)]),
+        _returns([("2024-02-01", 0.02), ("2024-02-02", -0.03), ("2024-02-03", 0.05)]),
+    )
+
+
+async def _g252_run(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cash: tuple[pd.Series, pd.Series] | None = None,
+    smoothed: tuple[pd.Series, pd.Series] | None = None,
+    flag: str | None = None,
+    existing_flags: dict[str, Any] | None = None,
+    build_side_effect: Any = None,
+    has_option_activity: bool = True,
+    combine_seq: list[tuple[pd.Series, dict[str, Any]]] | None = None,
+    extra_patches: list[Any] | None = None,
+    strategy_row: dict[str, Any] | None = None,
+) -> tuple[_FakeSupabase, Any, AsyncMock]:
+    """Drive run_stitch_composite_job over two Deribit members. Combine yields the cash
+    pair then the smoothed pair in call order (cash pass, then smoothed pass; MTM is
+    gated off for an options composite). ``flag`` None leaves SMOOTHED_MTM_ENABLED UNSET
+    (overriding the module opt-in), a string sets it."""
+    if flag is None:
+        monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("SMOOTHED_MTM_ENABLED", flag)
+    c1, c2 = cash or _g252_cash()
+    s1, s2 = smoothed or _g252_smoothed()
+    seq = combine_seq if combine_seq is not None else [
+        (c1, {}), (c2, {}), (s1, {}), (s2, {}),
+    ]
+    _i = {"n": 0}
+
+    def _combine(*_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
+        out = seq[_i["n"]]
+        _i["n"] += 1
+        return out
+
+    fake = _FakeSupabase(
+        members=_g252_members(),
+        existing_flags=existing_flags,
+        strategy_row=strategy_row if strategy_row is not None else dict(_G252_STRATEGY_ROW),
+    )
+    build_spy = (
+        AsyncMock(side_effect=build_side_effect)
+        if build_side_effect is not None
+        else AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=has_option_activity,
+        )))
+    )
+    patches = _deribit_patches(
+        fake, combine_returns=[], has_option_activity=has_option_activity,
+    )
+    with _apply(patches), patch(
+        "services.broker_dailies.combine_native_ledger",
+        new=MagicMock(side_effect=_combine),
+    ), patch(
+        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy,
+    ), _apply(list(extra_patches or [])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    return fake, result, build_spy
+
+
+def _g252_series_rpc(fake: _FakeSupabase) -> dict[str, dict[str, Any]]:
+    """Every per-basis series row the run upserted, by kind (last write wins)."""
+    out: dict[str, dict[str, Any]] = {}
+    for name, args in fake.rpc_calls:
+        if name == "upsert_strategy_analytics_series_batch":
+            for kind, payload in args["p_kinds"].items():
+                out[kind] = payload
+    return out
+
+
+def _g252_sibling_kinds(fake: _FakeSupabase) -> Any:
+    """The sibling-series batch (rolling metrics, drawdown curve): the one batch RPC
+    that is not a single per-basis series row."""
+    from services.basis_series import (
+        KIND_CASH_SETTLEMENT, KIND_MTM_DAILY_RETURNS, KIND_SMOOTHED_MTM,
+    )
+
+    basis_kinds = {KIND_CASH_SETTLEMENT, KIND_MTM_DAILY_RETURNS, KIND_SMOOTHED_MTM}
+    for name, args in fake.rpc_calls:
+        if name == "upsert_strategy_analytics_series_batch" and not (
+            set(args["p_kinds"]) <= basis_kinds
+        ):
+            return args["p_kinds"]
+    return None
+
+
+def _g252_equal_on_keys(headline: dict[str, Any], basis_obj: dict[str, Any]) -> bool:
+    return all(headline.get(k) == v for k, v in basis_obj.items())
+
+
+def _g252_assert_exactly_one_marker(fake: _FakeSupabase) -> str:
+    """The exactly-one invariant on an option-active row. Returns which basis the
+    headline is ("smoothed_mtm" or "cash_settlement")."""
+    headline = _headline_row(fake)
+    assert headline is not None
+    by_basis = headline["metrics_json_by_basis"]
+    dq = headline["data_quality_flags"]
+    reason = dq.get("mtm_gated_reason") == MTM_REASON_OPTIONS
+    promoted = dq.get("headline_basis") == "smoothed_mtm"
+    assert reason != promoted, (
+        "exactly one of the withhold reason and the promoted marker must be present "
+        f"(reason={reason}, promoted={promoted})"
+    )
+    cash_eq = _g252_equal_on_keys(headline, by_basis["cash_settlement"])
+    if promoted:
+        assert _g252_equal_on_keys(headline, by_basis["smoothed_mtm"]), (
+            "a promoted marker must sit over the smoothed figures"
+        )
+        return "smoothed_mtm"
+    assert cash_eq, "an unpromoted row's top-level figures must be the cash by-basis object"
+    sm = by_basis.get("smoothed_mtm")
+    if sm is not None and sm != by_basis["cash_settlement"]:
+        assert not _g252_equal_on_keys(headline, sm), (
+            "no marker may sit over smoothed figures (a smoothed headline with no marker)"
+        )
+    return "cash_settlement"
+
+
+@pytest.mark.asyncio
+async def test_g252_promoted_options_composite_stores_smoothed_headline_with_flag_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """G252-MTM-PROMOTION, the point of the plan. With SMOOTHED_MTM_ENABLED UNSET (the
+    PROD state), an option-active composite whose smoothed build computes stores the
+    smoothed result as its HEADLINE: top-level scalars equal the smoothed by-basis object
+    key for key, headline_basis names it, and the wave-1 withhold is gone. The cash
+    series and cash by-basis object stay for the toggle. If this goes red the founder's
+    ruled switch never happens on PROD (the flag is off there), or a cash-wallet figure
+    ships labelled as the smoothed headline."""
+    fake, result, build_spy = await _g252_run(monkeypatch)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert any(
+        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build_spy.await_args_list
+    ), "a smoothed_mtm ledger build must be issued with the flag unset"
+    headline = _headline_row(fake)
+    assert headline is not None
+    by_basis = headline["metrics_json_by_basis"]
+    assert set(by_basis) == {"cash_settlement", "smoothed_mtm"}
+    smoothed_obj, cash_obj = by_basis["smoothed_mtm"], by_basis["cash_settlement"]
+    for key, value in smoothed_obj.items():
+        assert headline[key] == value, f"top-level {key} must be the smoothed figure"
+    assert any(smoothed_obj[k] != cash_obj[k] for k in smoothed_obj if k in cash_obj), (
+        "anti-vacuity: the smoothed and cash objects must differ in this fixture"
+    )
+    dq = headline["data_quality_flags"]
+    assert dq["headline_basis"] == "smoothed_mtm"
+    assert "mtm_gated_reason" not in dq
+    # csv_daily_returns stays the stitched CASH series (a cash-basis contract).
+    c1, c2 = _g252_cash()
+    expected_csv = {
+        ts.date().isoformat(): float(v) for s in (c1, c2) for ts, v in s.items()
+    }
+    written = {
+        r["date"]: r["daily_return"]
+        for table, payload, _ in fake.upserts
+        if table == "csv_daily_returns" and isinstance(payload, list)
+        for r in payload
+    }
+    assert written == pytest.approx(expected_csv)
+    assert _g252_assert_exactly_one_marker(fake) == "smoothed_mtm"
+    # Siblings stay cash: identical to an unpromoted run over the same cash input.
+    ref_fake, _, _ = await _g252_run(
+        monkeypatch, extra_patches=[patch.object(_jw, "_MTM_SECOND_PASS_MIN_SECONDS", 1e9)],
+    )
+    assert _g252_sibling_kinds(fake) == _g252_sibling_kinds(ref_fake)
+    assert _g252_sibling_kinds(fake) is not None
+
+
+@pytest.mark.asyncio
+async def test_g252_promoted_and_cash_metrics_share_one_key_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wholesale spread must leave no cash column behind. If the smoothed object
+    carried a key the cash object lacks (or the reverse), a promoted row would keep a
+    stale cash value under that key, or drop one a reader expects."""
+    fake, result, _ = await _g252_run(monkeypatch)
+    assert result.outcome == DispatchOutcome.DONE
+    by_basis = _by_basis(fake)
+    assert by_basis is not None
+    assert set(by_basis["smoothed_mtm"]) == set(by_basis["cash_settlement"])
+
+
+@pytest.mark.asyncio
+async def test_g252_promoted_row_carries_smoothed_top_level_series_and_pops_cash_marks_notes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The 2026-11-26 reading: the top-level series in the metrics_json spread follow
+    the promoted headline, so every chart drawn from them matches the promoted figures,
+    while the cash by-basis object keeps the cash curve. The stored-marks notes describe
+    the CASH basis only and are popped on a promoted row. If this goes red a chart
+    shows the cash curve under smoothed figures, or a note about marks applied to a
+    basis the headline is not on survives."""
+    fake, _, _ = await _g252_run(
+        monkeypatch,
+        existing_flags={
+            "marks_since": "2024-01-01",
+            "mark_gap_days": ["2024-01-02"],
+            "marks_trailing_since": "2024-02-02",
+        },
+    )
+    headline = _headline_row(fake)
+    assert headline is not None
+    by_basis = headline["metrics_json_by_basis"]
+    series_keys = [
+        k for k in ("returns_series", "drawdown_series", "monthly_returns",
+                    "sparkline_returns", "sparkline_drawdown")
+        if k in by_basis["smoothed_mtm"]
+    ]
+    assert series_keys, "the fixture must carry at least one top-level series key"
+    for key in series_keys:
+        assert headline[key] == by_basis["smoothed_mtm"][key]
+    assert any(
+        by_basis["smoothed_mtm"][k] != by_basis["cash_settlement"][k] for k in series_keys
+    ), "anti-vacuity: the smoothed and cash series must differ"
+    dq = headline["data_quality_flags"]
+    for stale in ("marks_since", "mark_gap_days", "marks_trailing_since"):
+        assert stale not in dq, f"{stale} describes the cash basis and must be popped"
