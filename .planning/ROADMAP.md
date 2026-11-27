@@ -986,7 +986,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, the retired compute_analytics enqueue and kind rows, and inert plumbing, with a migration; the poll_positions enqueue stays live (F-8)
 - [ ] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
 - [ ] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
-- [ ] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
+- [x] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
 - [ ] **Phase 245: ALERTPAGE — an MT5 outage pages once, recovers once and closes once, and every paging failure is loud** - Python paging path: episode lifecycle on a fake clock, honest Sentry credit, inline close budget, ERROR-level failures
 - [ ] **Phase 246: ALERTREADERS — every alert reader sees every row, reports its own delivery failure and pages per account** - S5 readers re-based on the narrowed body: pg_net delivery, scrub reader, per-account sync paging, match-engine cron signal
 - [ ] **Phase 247: SENTRYHELD — a failing anonymous read reports exactly once, and the landing page at most once per window** - Caller-only; ordered after SENTRYSCRUB2
@@ -1141,8 +1141,8 @@ Plans:
 ### Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI
 
 **Goal:** An owner read without its key id fails to compile, every route writes its audit row or carries an exemption, and the watchlist RLS assertions run in CI:
-- **Compile guard.** An owner-surface read that lacks `api_key_id` fails to compile (`src/lib/types.ts`).
-- **Audit rows.** Each of the six routes outside the audit-log law writes an audit row, or carries a recorded founder exemption. The exact-set allowlist only shrinks.
+- **Compile guard.** An owner-surface read that lacks `api_key_id` fails to compile (`src/lib/types.ts`). ⭐ Founder decision 2026-11-27 ("Accept as narrowed"): met as narrowed — the compile guard (a public row cannot pass as `Strategy`) plus the blocking CI source-scan pin over cast-typed owner selects and its cast-site census; owner reads typed by casts are not compiler-checked. The shared StrategyTable/StrategyGrid optional-key remainder stays on TODOS `170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD`.
+- **Audit rows.** Each of the six routes outside the audit-log law writes an audit row, or carries a recorded founder exemption. The exact-set allowlist only shrinks. ⭐ Founder decision 2026-11-26 ("Approve as proposed", recorded in `244-CONTEXT.md`): partner-import's `profiles` upsert is covered by its `admin.partner_import` roll-up row; the two flag-monitor `ZERO_DENOM_STREAK_KEY` upserts (internal cron counter) and the three `strategy_analytics` 'failed' stamps in keys/sync and finalize-wizard (derived compute state) are founder exemptions. The allowlist goes 6 to 0.
 - **Watchlist in CI.** The `discovery-watchlist` RLS and auth assertions (the MEDIUM half of `158-OPS-03`) run in CI and can fail there.
 **Requirements**: DBACC-04, DBACC-05, DBACC-06
 **Depends on:** nothing hard.
@@ -1151,10 +1151,13 @@ Plans:
 2. Each of the six routes writes an audit row or carries a recorded founder exemption, and the exact-set allowlist only shrinks. (DBACC-05)
 3. The `discovery-watchlist` RLS and auth assertions run in a CI job, and a neutered policy turns that job red. (DBACC-06)
 4. PROOF-01: each gate above goes RED on a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 244-01-PLAN.md — DBACC-04 compile guard: required Strategy.api_key_id, PublicStrategy and PublicRankedStrategyRow, shared list components relaxed, type test under tsc, PROOF-01
+- [x] 244-02-PLAN.md — DBACC-05 audit law: partner-import pragma moved into the window, five founder-exemption pragmas, allowlist 6 to 0, PROOF-01
+- [x] 244-03-PLAN.md — DBACC-06 part 1: watchlist spec run as-is on the local-stack lane, spec-local repairs, RLS and proxy neuters (PROOF-01), lane teardown
+- [x] 244-04-PLAN.md — DBACC-06 part 2: spec wired into e2e-seeded, census 26 to 27, wiring pin, PROOF-01
 
 ### Phase 245: ALERTPAGE — an MT5 outage pages once, recovers once and closes once, and every paging failure is loud
 
@@ -1299,7 +1302,7 @@ Plans:
 | 224. DEADLEFTOVERS | 0/? | Planned for v1.23 | - |
 | 242. SECRETSHYGIENE | 0/? | Planned for v1.23 | - |
 | 243. DBBACKSTOP | 0/? | Planned for v1.23 | - |
-| 244. ACCESSGUARDS | 0/? | Planned for v1.23 | - |
+| 244. ACCESSGUARDS | 4/4 | Complete (shipped v0.133.102.0, #1391; verification passed, SC-1 met as narrowed by founder decision 2026-11-27; SECURITY 0 open) | 2026-11-27 |
 | 245. ALERTPAGE | 0/? | Planned for v1.23 | - |
 | 246. ALERTREADERS | 0/? | Planned for v1.23 | - |
 | 247. SENTRYHELD | 0/? | Planned for v1.23 | - |
