@@ -11,6 +11,7 @@ This is the first of two Phase 256 PRs. It carries only the migration, so that i
 ### Tests
 - `supabase/tests/test_strategy_analytics_unit_segments.sql`: nine twinned arms (1a, 1b, 1c, 2, 3, 4, 5a, 5b, 6) on the column's type, nullability, default, the object CHECK accepting and refusing, the policies unchanged and the anon/authenticated read path. Every arm went RED on its own twin (`arms: 9/9/0`, `biting: 9`).
 - Census moved with the new gate file, re-based onto Phase 242 on `main`: `FILES_FLOOR` 99 -> 100 and `ARMS_FLOOR` 1110 -> 1119 in `scripts/mutation-floors.mjs`, MEASURED `--parse-only` `coverage: files 100/127`, `arms: 0/1119/0`; the pins in `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts` (`armsSeen` 1119, `stepsSeen` and `needles.length` 1254), `gate-family-meta.test.ts` and `lint-sql-gates.test.ts` move with them.
+- `analytics-service/tests/test_sql_gate_scoped_updates.py`: the D-05 anti-vacuity pin gains `test_strategy_analytics_unit_segments.sql: 4` (its four `strategy_analytics` UPDATEs, each scoped `WHERE strategy_id = v_sid`).
 
 ### Notes
 - migration-reviewer: 0 CRITICAL/HIGH/MEDIUM, one LOW (a comment said the CHECK reads no data; ADD CONSTRAINT scans the table, one row per strategy, milliseconds). rls-policy-auditor: 0 findings; the column inherits exactly the visibility of `returns_series` (published strategies to anyone, unpublished only to the owner), and no view, column-list grant or SECURITY DEFINER reader returns it.
