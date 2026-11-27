@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.103.2] - 2026-11-27 — records: Phase 252 probe re-run names m3's cause (a D-09 exercise row); founder decision recorded
+
+### Changed
+- `252-CONTEXT.md` and the ROADMAP 252 section record the founder decision of 2026-11-26 (AskUserQuestion via the coordinator, verbatim "Fix it inside 252"): the cause of the wave-2 probe FAIL is fixed inside Phase 252, and the phase stays open until the probe passes, with no invented data and no narrowed MTM span without a separate ruling.
+- Gap G252-PROBE-M3 is booked in `252-VERIFICATION.md` (status `gaps_found`), along with gap plan 07, its SUMMARY and its review record. Plan 07 shipped as v0.133.101.0 (#1390).
+- The PROD probe re-run of 2026-11-27 12:43Z is recorded verbatim (closed-vocabulary lines only): verdict fail, m1 and m2 pass, m3's smoothed build refuses with `OptionExerciseRowError`, with `refusal_shape` exercise, change zero, position zero, and 18 same-instrument trades with no delivery, assignment or expiry row.
+- The ROADMAP Progress row and the STATE row for 252 now read gaps found.
+
+### Notes
+- **Root cause measured:** the long side of an in-the-money option expiry is logged as an `exercise` row whose post-event position is 0, and D-09 refuses every `exercise` row because its shape was unmeasured. The retention-straddler hypothesis is disproved. Accepting this exact shape reverses D-09, so it waits on a founder ruling.
+- Records only, with no code and no migration. No `TODOS.md` entry is closed.
+
 ## [0.133.103.1] - 2026-11-27 — records: Phase 244 ACCESSGUARDS closed, verification passed, SC-1 met as narrowed by founder decision
 
 This is a records PR. It has no source, test, workflow or migration change.
