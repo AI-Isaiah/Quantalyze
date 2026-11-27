@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.105.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 8e8c0753
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46028836679`, after the PROD apply of merge `8e8c0753`: sha256 `24ba8a9b…` → `b45cb90a…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 148 → 150, distinct function names 146 → 148, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127120000_client_role_statement_timeout_pin.sql`, `20261127120100_insert_api_key_rpc_and_user_id_immutable.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.105.0 → 0.133.105.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=346 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46028836679` succeeded, and this entry was composed by the `redump-pr` job. Run `46028836679` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.105.0] - 2026-11-27 — Phase 243 DBBACKSTOP PR-A: anon factsheet reads name 21 by-basis keys, an audited api_keys writer and a frozen user_id, and pinned client-role timeouts
 
 ### Why

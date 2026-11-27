@@ -4901,6 +4901,24 @@ $$;
 ALTER FUNCTION "public"."enforce_api_keys_published_composite_integrity"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."enforce_api_keys_user_id_immutable"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  RAISE EXCEPTION 'api_keys.user_id is immutable: a key never changes owner'
+    USING ERRCODE = 'insufficient_privilege';
+END
+$$;
+
+
+ALTER FUNCTION "public"."enforce_api_keys_user_id_immutable"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."enforce_api_keys_user_id_immutable"() IS 'Phase 243 DBACC-02. Raises unconditionally (42501, no row value in the message); the trigger api_keys_user_id_immutable only fires it when OLD.user_id differs from NEW.user_id, so a same-value assignment and every other-column update pass. SECURITY INVOKER: it reads no table.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -8209,6 +8227,73 @@ $$;
 
 
 ALTER FUNCTION "public"."increment_user_session_count"("p_user_id" "uuid", "p_debounce_seconds" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."insert_api_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text" DEFAULT NULL::"text", "p_passphrase_encrypted" "text" DEFAULT NULL::"text", "p_dek_encrypted" "text" DEFAULT NULL::"text", "p_nonce" "text" DEFAULT NULL::"text", "p_kek_version" integer DEFAULT NULL::integer, "p_venue_account_id" "text" DEFAULT NULL::"text", "p_venue_server" "text" DEFAULT NULL::"text", "p_id" "uuid" DEFAULT NULL::"uuid") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    SET "lock_timeout" TO '3s'
+    AS $$
+DECLARE
+  v_jwt_role text;
+  v_id uuid;
+BEGIN
+  -- Only service_role may write an api_keys row through this function. The fail-closed
+  -- wrapper makes a malformed request.jwt.claims REFUSE rather than pass. There is NO
+  -- auth.uid() here; see the header for why its absence is deliberate.
+  BEGIN
+    v_jwt_role := auth.role();
+  EXCEPTION WHEN OTHERS THEN
+    v_jwt_role := NULL;
+  END;
+
+  IF v_jwt_role IS DISTINCT FROM 'service_role' THEN
+    RAISE EXCEPTION 'insert_api_key: caller role (%) may not write api_keys',
+      COALESCE(v_jwt_role, '<none>')
+      USING ERRCODE = 'insufficient_privilege';
+  END IF;
+
+  -- p_user_id is the ONLY carrier of the owning identity under service_role, and a NULL
+  -- would otherwise surface as a raw not-null violation with no diagnosis.
+  IF p_user_id IS NULL THEN
+    RAISE EXCEPTION 'insert_api_key: p_user_id must not be NULL'
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  -- attested_venue is stamped HERE, inside the SECURITY DEFINER body, the only kind of
+  -- writer whose value survives the api_keys_scrub_attested_venue trigger. Both columns
+  -- come from the ONE parameter p_exchange so api_keys_attested_venue_matches_exchange
+  -- holds. p_exchange is caller-supplied and not validated here beyond the table's own
+  -- exchange CHECK: that residual is the service_role trust boundary.
+  --
+  -- venue_account_id and venue_server are normalised exactly as create_wizard_strategy
+  -- does: trim of space, tab, carriage return and newline, blank to NULL, and the server
+  -- lower-cased. The route normalises first; this expression is idempotent on its output.
+  -- is_active is omitted (table default true), as the route omits it.
+  INSERT INTO api_keys (
+    id, user_id, exchange, label,
+    api_key_encrypted, api_secret_encrypted, passphrase_encrypted,
+    dek_encrypted, nonce, kek_version,
+    attested_venue, venue_account_id, venue_server
+  )
+  VALUES (
+    COALESCE(p_id, gen_random_uuid()), p_user_id, p_exchange, p_label,
+    p_api_key_encrypted, p_api_secret_encrypted, p_passphrase_encrypted,
+    p_dek_encrypted, p_nonce, COALESCE(p_kek_version, 1),
+    p_exchange, NULLIF(btrim(p_venue_account_id, E' \t\r\n'), ''), NULLIF(lower(btrim(p_venue_server, E' \t\r\n')), '')
+  )
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."insert_api_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_venue_account_id" "text", "p_venue_server" "text", "p_id" "uuid") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."insert_api_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_venue_account_id" "text", "p_venue_server" "text", "p_id" "uuid") IS 'Phase 243 DBACC-02. The audited api_keys writer: inserts one row and returns its id. SECURITY DEFINER; SERVICE_ROLE ONLY (authenticated, anon and PUBLIC EXECUTE are REVOKED and the in-body gate is auth.role() IS DISTINCT FROM ''service_role''). There is NO auth.uid() check and its absence is deliberate: a service_role request carries no sub, so ownership is bound at the route, which is the narrowing the founder accepted. Stamps attested_venue = p_exchange. p_venue_account_id and p_venue_server are trimmed (space, tab, CR, LF) with blank to NULL, and the server is lower-cased, exactly as create_wizard_strategy stores them. p_id is for seeds only (a caller-chosen row id; the route never passes it). A duplicate venue identity raises 23505 naming api_keys_user_exchange_venue_account_uniq: there is NO handler around the INSERT, so the route''s constraint mapping keeps working. EXACTLY ONE OVERLOAD OF THIS FUNCTION MAY EXIST: PostgREST resolves rpc() by named parameters and answers PGRST203 if a second candidate appears. Add parameters by DROP + CREATE WITH RE-ISSUED GRANTS (pg_default_acl re-grants anon and authenticated on DROP), never by CREATE OR REPLACE.';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."is_org_admin"("org_id" "uuid") RETURNS boolean
@@ -17399,6 +17484,14 @@ CREATE OR REPLACE TRIGGER "api_keys_stamp_first_added" AFTER INSERT ON "public".
 
 
 
+CREATE OR REPLACE TRIGGER "api_keys_user_id_immutable" BEFORE UPDATE ON "public"."api_keys" FOR EACH ROW WHEN (("old"."user_id" IS DISTINCT FROM "new"."user_id")) EXECUTE FUNCTION "public"."enforce_api_keys_user_id_immutable"();
+
+
+
+COMMENT ON TRIGGER "api_keys_user_id_immutable" ON "public"."api_keys" IS 'Phase 243 DBACC-02 (founder decision 2026-11-26). A key never changes owner: refuses an UPDATE that changes user_id from ANY role, the table owner and BYPASSRLS service_role included. No column list on purpose, and named to sort after the other BEFORE UPDATE triggers on api_keys, so it judges the final row even when an earlier trigger rewrote NEW.user_id.';
+
+
+
 CREATE OR REPLACE TRIGGER "audit_log_cold_retention_guard" AFTER DELETE ON "public"."audit_log_cold" REFERENCING OLD TABLE AS "old_table" FOR EACH STATEMENT EXECUTE FUNCTION "public"."retention_delete_guard"();
 
 
@@ -19536,6 +19629,11 @@ GRANT ALL ON FUNCTION "public"."enforce_api_keys_published_composite_integrity"(
 
 
 
+REVOKE ALL ON FUNCTION "public"."enforce_api_keys_user_id_immutable"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_api_keys_user_id_immutable"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() TO "anon";
 GRANT ALL ON FUNCTION "public"."enforce_csv_daily_returns_owner_coherence"() TO "authenticated";
@@ -19723,6 +19821,11 @@ REVOKE ALL ON FUNCTION "public"."increment_user_session_count"("p_user_id" "uuid
 GRANT ALL ON FUNCTION "public"."increment_user_session_count"("p_user_id" "uuid", "p_debounce_seconds" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."increment_user_session_count"("p_user_id" "uuid", "p_debounce_seconds" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."increment_user_session_count"("p_user_id" "uuid", "p_debounce_seconds" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."insert_api_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_venue_account_id" "text", "p_venue_server" "text", "p_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."insert_api_key"("p_user_id" "uuid", "p_exchange" "text", "p_label" "text", "p_api_key_encrypted" "text", "p_api_secret_encrypted" "text", "p_passphrase_encrypted" "text", "p_dek_encrypted" "text", "p_nonce" "text", "p_kek_version" integer, "p_venue_account_id" "text", "p_venue_server" "text", "p_id" "uuid") TO "service_role";
 
 
 
