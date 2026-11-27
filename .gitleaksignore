@@ -1,0 +1,78 @@
+# .gitleaksignore - commit-scoped suppressions for the full history of main.
+#
+# WHAT THIS IS. Every gitleaks scan of this repo reads this file from the repo
+# root: the scheduled full-history scan (.github/workflows/secret-scan-full-history.yml),
+# CI's own secret-scan job and a local run of the same command. Each line below
+# suppresses ONE finding at ONE commit. Each is a historical test fixture, canary
+# or false positive; history cannot be rewritten, so these sites stay in the
+# history the scan walks, and the lines keep the scan green without widening
+# .gitleaks.toml.
+#
+# FORMAT. One fingerprint per line, exactly four parts, nothing after it:
+#   <40-hex commit>:<file>:<rule>:<line>
+# Copy the value from the scan's own JSON report (the Fingerprint field of a
+# --redact run), never by hand.
+#
+# TWO TRAPS, both silent:
+#   1. A three-part line (file:rule:line, no commit) is a GLOBAL fingerprint. It
+#      suppresses that site in every past AND FUTURE commit, so it would hide a
+#      real credential committed later at the same file and line. Never write one.
+#   2. Anything after the fingerprint on the same line, a trailing comment
+#      included, makes the line malformed. gitleaks warns at a low level and the
+#      line suppresses nothing. Comments go on their own whole lines, like these.
+# src/__tests__/secret-scan-full-history.test.ts fails on both shapes.
+#
+# ROTATE FIRST. A finding that could be a live credential is rotated before
+# anything else, and is never suppressed here. Add a line only for a fixture, and
+# only after running the scan locally and reading the site:
+#   gitleaks git . --config .gitleaks.toml --log-opts="--remerge-diff HEAD" --redact --no-banner
+# Every group below says what kind of site it is in words and never quotes one.
+
+# CHANGELOG prose quoting two fixture spellings of a key-shaped string.
+604d655f63397beb9e28488b953adcacf3094e9f:CHANGELOG.md:generic-api-key:46
+604d655f63397beb9e28488b953adcacf3094e9f:CHANGELOG.md:generic-api-key:63
+
+# Python analytics-service tests: canary and fixture credentials assigned in test
+# code (service-key canaries, exchange key and password fixtures). Each is synthetic.
+46886c3390ffe86a5f7f047c13da7221a279626b:analytics-service/tests/test_create_exchange_attribution.py:generic-api-key:139
+46886c3390ffe86a5f7f047c13da7221a279626b:analytics-service/tests/test_create_exchange_attribution.py:generic-api-key:258
+946ec06d5d74860834b6f23a133a11151df2959d:analytics-service/tests/test_mt5_client_contract.py:generic-api-key:310
+54a0d26dd3b56708e2daa8bd494ed6eed22bde5b:analytics-service/tests/test_mt5_validate_parity.py:generic-api-key:333
+d36e8f37d599f0b9a3e8ba210f93d4474c1b8808:analytics-service/tests/test_service_key_log_companion.py:generic-api-key:40
+d36e8f37d599f0b9a3e8ba210f93d4474c1b8808:analytics-service/tests/test_service_key_log_companion.py:generic-api-key:41
+86fd7f044c1a9fd9fbf52977be06420faf2ef402:analytics-service/tests/test_status_contract_match_sim_portfolio.py:generic-api-key:647
+8523b6fd9bacdf3ac4330f653ae7fd536dcb95c5:analytics-service/tests/test_structlog_frozen_proxy.py:generic-api-key:145
+
+# Route tests for the Next.js API: a synthetic internal service token assigned
+# to a constant so the route's auth path can be exercised.
+b22a2047eb1d37fdf0df4e4023f9c4fd2342e5fb:src/__tests__/csv-validate-route.test.ts:generic-api-key:458
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/admin/match/eval/route.test.ts:generic-api-key:417
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/admin/match/recompute/route.test.ts:generic-api-key:458
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/keys/[id]/permissions/route.test.ts:generic-api-key:1124
+b22a2047eb1d37fdf0df4e4023f9c4fd2342e5fb:src/app/api/portfolio-optimizer/route.test.ts:generic-api-key:401
+b22a2047eb1d37fdf0df4e4023f9c4fd2342e5fb:src/app/api/scenario/optimize/route.test.ts:generic-api-key:389
+
+# verify-strategy route test: a JWT-shaped fixture and a synthetic exchange key
+# and secret fixture.
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/verify-strategy/route.test.ts:jwt:539
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/verify-strategy/route.test.ts:generic-api-key:540
+00aeddbc59d35dff891c8d673aeb4908b3397ae3:src/app/api/verify-strategy/route.test.ts:generic-api-key:541
+
+# Library unit tests under src/lib (analytics client, rate limiter, resilient
+# fetch, Sentry capture, seam redaction): synthetic token and secret fixtures.
+6541a134ee50e98e0446aba821034ba791f9d5ef:src/lib/analytics-client.test.ts:generic-api-key:1911
+67b2c01aeb1e84a78e659b5f312a72d52d5c36d1:src/lib/ratelimit.test.ts:generic-api-key:177
+632eea07b0fd0e68d48a67bcd3440db9b771bdeb:src/lib/resilient-fetch.test.ts:generic-api-key:2130
+a5f2957cdf9255593a5522d7610c206bd3967ebf:src/lib/resilient-fetch.test.ts:generic-api-key:2085
+f06d9a5b178aa8af887409d3ce77ee388939b736:src/lib/seam-redaction.test.ts:generic-api-key:54
+f06d9a5b178aa8af887409d3ce77ee388939b736:src/lib/seam-redaction.test.ts:generic-api-key:63
+f06d9a5b178aa8af887409d3ce77ee388939b736:src/lib/seam-redaction.test.ts:generic-api-key:66
+19e904c2bb0f32f64675813748f1f435366ce48a:src/lib/sentry-capture.test.ts:generic-api-key:51
+19e904c2bb0f32f64675813748f1f435366ce48a:src/lib/sentry-capture.test.ts:generic-api-key:54
+
+# False positive: the identifier for a deduplication key followed by an
+# ignore-duplicates flag in the funding backfill code and its test. There is no
+# credential at these sites.
+de04f420f3c3bb0cc230049149a51c73057ad0db:analytics-service/services/job_worker.py:generic-api-key:490
+de04f420f3c3bb0cc230049149a51c73057ad0db:analytics-service/tests/test_funding_backfill_idempotency.py:generic-api-key:41
+de04f420f3c3bb0cc230049149a51c73057ad0db:scripts/backfill_funding.py:generic-api-key:16

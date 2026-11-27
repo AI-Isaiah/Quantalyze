@@ -2,80 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261010140000_cron_sync_tick.sql
--- Migration: public.cron_sync_tick() — the CALLABLE that fires the daily trade
--- sync. Phase 167.1.2.2.2 (TRADESYNC) / plan 01 / SC-1 and SC-5.
---
--- ROOT CAUSE THIS EXISTS FOR (.planning/debug/cron-sync-unscheduled.md): the
--- analytics service has carried a `POST /api/cron-sync` route and the per-key
--- sync code behind it for a long time, and NOTHING has ever called it. No
--- pg_cron job, no workflow and no tick function points at that route, so live
--- strategy keys have not had their trades ingested on a schedule. This file
--- ships the tick. It does not ship the schedule.
---
--- WHAT THIS SHIPS AND WHAT IT DOES NOT.
--- It ships one SECURITY DEFINER function, a COMMENT, a REVOKE and a
--- catalogue-only self-verifying block. ⛔ It does NOT register anything: the
--- file never makes the pg_cron schedule call, and says so in this header only
--- by that description. Registration of the daily job is a separate, founder-gated
--- live operation owned by the go-live runbook after this merges (the Phase
--- 164.7 rule, repeated by 164.1.1 for the cadence check): a migration that
--- registers a job puts the job on PROD at merge with no rehearsal. Until the
--- runbook runs, nothing invokes this function.
---
--- The function is a copy of the re-based house shape, not a new design. Its
--- LEFT side is `public.match_engine_cron_tick()` as re-based in
--- `20260911120000_vault_tick_hardening.sql` (and its committed snapshot
--- `supabase/schema/functions/match_engine_cron_tick.sql`), re-read for this
--- file: the Vault read is ONE statement that counts and takes the value off the
--- same scan, a duplicate secret name is refused by name, a blank key is refused,
--- the URL comes from `public.system_settings` key `analytics_service_url` and is
--- re-tested against the destination allow-list inside the body (without echoing
--- it), and the post is one async `net.http_post`. Only three things differ from
--- the analog: the name, the path, and the HTTP timeout.
---
--- THE TIMEOUT (SC-5). `timeout_milliseconds` is declared once, in the post
--- below, at a value above the filtered worst case of the sync run and below
--- Railway's five-minute idle cut-off. It is a PLAN, not a measurement: the
--- go-live rehearsal runs this function once behind the database-marker guard and
--- reads the real duration out of the pg_net response table, and that reading
--- decides whether the number stands. The gate reads the value back out of the
--- function definition at run time rather than restating it, so there is one
--- source of truth.
---
--- ⛔ FORWARD MIGRATION ONLY. Nothing here edits an applied migration file, and
--- nothing here runs `supabase db push`, `db reset`, `--project-ref` or
--- `--db-url`. This checkout's Supabase CLI is linked to PRODUCTION; this
--- migration reaches PROD only by merge, then apply-test, then the automatic PROD
--- apply. There is no human stop between the merge and the PROD apply, so every
--- review happens before the merge.
---
--- ⛔ CATALOGUE-ONLY VERIFY, BY DESIGN. The block at the foot never calls the
--- function (an apply-time call would fire a real HTTP POST the moment this
--- merges), never names the Vault or pg_net relations as objects (neither exists
--- on the pg-lane's bare cluster and pg_net may be absent on a fresh project; the
--- references live inside the plpgsql body, resolved at CALL time), and never
--- counts rows (shared TEST carries PROD's catalogue and EMPTY tables, and a
--- data-reading check that refuses on an empty table would block the PROD apply:
--- [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]).
---
--- DISJOINTNESS: the needles this file ASSERTS versus the strings the gate
--- MUTATES. A verification needle that a gate arm mutates ABORTS the apply, so
--- the gate never runs and no arm can be the first failure; WAIVED_CEILING is 0
--- and stays 0. The needles below are assembled by CONCATENATION in the DECLARE
--- block, so each occurs once, as the body's own statement, and never as a second
--- raw copy. The gate's `find` strings (the key guard line, the url guard line,
--- the allow-list re-test line, the tail of the no-echo message, and the post
--- path) are NOT printed in this header, because the mutation runner counts
--- `occurrences` over the raw file text, comments included. The path needle is
--- the one deliberate overlap in spirit: the gate's path twin lengthens the path
--- by a suffix, which leaves the needle satisfied and is caught by the gate arm
--- that reads the recorded url; the needle exists to catch a path that is
--- shortened, renamed or deleted.
-
--- --------------------------------------------------------------------------
--- STEP 1: public.cron_sync_tick()
--- --------------------------------------------------------------------------
+-- source migration: 20261127130000_cron_destinations_exact.sql
+-- ==========================================================================
+-- STEP 2c: public.cron_sync_tick()
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION public.cron_sync_tick()
 RETURNS BIGINT
 LANGUAGE plpgsql
@@ -90,12 +20,12 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression on system_settings and to the constant in
-  --    match_engine_cron_tick(). The constraint is one ALTER TABLE away from
-  --    gone, and this is what still refuses the POST when it is.
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits and the same two the three sibling ticks carry.
+  --    The constraint is one ALTER TABLE away from gone, and this is what
+  --    still refuses the POST when it is.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- THE VAULT READ — ONE statement, count and value off the SAME scan.
   -- Not `INTO STRICT`: STRICT would replace the by-name absent-key message with
@@ -108,10 +38,11 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  -- btrim() with no character set trims SPACES ONLY. A key of tabs or newlines
-  -- still passes and still produces a header the analytics service answers 401
-  -- to. Recorded, not closed: widening it is a decision with its own evidence.
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  -- The trim names its character set: space, tab, carriage return and newline.
+  -- btrim() with no set trims spaces only, so a key of tabs or newlines would
+  -- pass and produce a header the analytics service answers 401 to behind a
+  -- green tick. Widened in Phase 242 (SECR-04).
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -130,8 +61,8 @@ BEGIN
   -- job-run row, the Postgres log and whatever ships those onward; echoing an
   -- attacker-chosen string writes their collector's hostname into every
   -- downstream reader. Name the SETTING, never its value (T-161.1-10).
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an

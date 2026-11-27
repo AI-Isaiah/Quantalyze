@@ -4818,7 +4818,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=41 and ARMS_FLOOR=610 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=41 and ARMS_FLOOR=620 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -5141,6 +5141,9 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // its own first sentinel. 595 + 8 + 6 = 609 is the table's own sum, which ci-anti-skip-gate.contract.test.ts re-derives.
     // RAISED 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02), 41/609 -> 41/610. No file joined; one sentinel grew:
     // test_insert_api_key_rpc.sql 8 -> 9 (R9, every parameter lands in its own column). 609 + 1 = 610 is the table's own sum.
+    // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, migration 20261127130000), 41/610 -> 41/620. No file joined; four sentinels grew, each read off its own first
+    // `ALL N ARMS EXECUTED` notice: test_cron_sync_tick.sql 8 -> 11, test_prod_prober_cadence.sql 7 -> 9, test_ops_staleness_check.sql 14 -> 16 and
+    // test_analytics_service_settings_and_vault_tick.sql 13 -> 16. 610 + 10 = 620 is the table's own sum, which the anti-skip contract test re-derives from the corpus.
     const res = spawnSync(
       "grep",
       ["-ac", "SENTINEL_FLOOR=41", ".github/workflows/ci.yml"],
@@ -5154,7 +5157,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=610", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=620", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",

@@ -2,10 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260911120000_vault_tick_hardening.sql
--- --------------------------------------------------------------------------
--- STEP 1: the re-based body
--- --------------------------------------------------------------------------
+-- source migration: 20261127130000_cron_destinations_exact.sql
+-- ==========================================================================
+-- STEP 2a: public.match_engine_cron_tick()
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION public.match_engine_cron_tick()
 RETURNS BIGINT
 LANGUAGE plpgsql
@@ -20,14 +20,14 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b). BYTE-IDENTICAL to the CHECK
-  --    constraint's expression in STEP 1b, and STEP 3 check 7 asserts that the
-  --    two really are the same string by reading pg_get_constraintdef and this
-  --    body back out of the catalogue. Two copies of one rule is the point: the
-  --    constraint is one ALTER TABLE away from gone, and this is what still
-  --    refuses the POST when it is.
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  -- ⛔ THE DESTINATION ALLOW-LIST, layer (b): exactly two origins, compared by
+  --    EQUALITY and never by pattern, the same two the CHECK constraint on
+  --    system_settings admits. The Phase 242 migration's verify block reads the
+  --    constraint and every body that posts the key back out of the catalogue
+  --    and asserts both origins are present in each. Two copies of one rule is
+  --    the point: the constraint is one ALTER TABLE away from gone, and this is
+  --    what still refuses the POST when it is.
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- THE VAULT READ — ONE statement, count and value off the SAME scan.
   -- ⛔ Not `INTO STRICT`, and the choice is not a style preference. STRICT
@@ -44,12 +44,11 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  -- ⚠️ btrim() with no character set trims SPACES ONLY. A key of tabs or
-  --    newlines still passes this guard and still produces a header the
-  --    analytics service answers 401 to. RECORDED, not closed: the criterion
-  --    text is btrim(v_key) = '' and widening it to E' \t\r\n' is a decision
-  --    with its own evidence, not a silent improvement here.
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  -- The trim names its character set: space, tab, carriage return and newline.
+  -- btrim() with no set trims spaces only, so a key of tabs or newlines would
+  -- pass and produce a header the analytics service answers 401 to behind a
+  -- green tick. Widened in Phase 242 (SECR-04).
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -72,8 +71,8 @@ BEGIN
   -- writes their collector's hostname into every downstream reader of this
   -- project's logs, and an operator who needs the value can SELECT it. Same rule
   -- as the two RAISEs above (T-161.1-10): name the SETTING, never its value.
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⚠️ net.http_post is ASYNC. The BIGINT returned here is a REQUEST ID, not an

@@ -1132,7 +1132,7 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 02): `armsSeen` 1079 -> 1085, the 6 twinned arms (1a, 1b, 2a, 2b, 3, 4) of the NEW gate test_client_role_timeouts.sql. MEASURED: `--parse-only` printed `arms: 0/1085/0`. stepsSeen does not move: all six twins are `sql` steps, which this walk skips.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `armsSeen` 1085 -> 1099, the 14 twinned arms of the two NEW gates test_insert_api_key_rpc.sql (R1 to R8) and test_api_keys_user_id_immutable.sql (1a, 1b, 2a, 2b, 3, 4), migration 20261127120100. MEASURED: `--parse-only` printed `arms: 0/1099/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `armsSeen` 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
-    expect(armsSeen).toBe(1100);
+    expect(armsSeen).toBe(1110);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.

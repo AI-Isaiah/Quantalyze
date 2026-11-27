@@ -8,14 +8,21 @@
 -- over a NULL key are the five ways plan 01's pair can stay green while the
 -- alarm is still worthless.
 --
--- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE: all seven arms below measure
--- supabase/migrations/20260918120000_prod_prober_cadence.sql. Every edit-kind
--- RED-UNDER-M twin in this file names that migration — a `CREATE OR REPLACE`
--- anywhere else would mutate a body already overwritten before the first
--- assertion runs, and the arm would report `no-red`: an arm that cannot fail,
--- inside the machine built to find arms that cannot fail.
+-- ⛔ WHICH FILE THE ARMS ACTUALLY MEASURE: all nine arms below measure
+-- supabase/migrations/20261127130000_cron_destinations_exact.sql (Phase 242
+-- SECRETSHYGIENE), which re-bases this function on the exact two-origin
+-- destination set and the four-character blank-key trim. Every edit-kind
+-- RED-UNDER-M twin in this file names that migration — it is the LAST entry of
+-- the setup list, so its `CREATE OR REPLACE` is the definition the arms run
+-- against. A twin naming the older 20260918120000_prod_prober_cadence.sql
+-- would mutate a body already overwritten before the first assertion runs, and
+-- the arm would report `no-red`: an arm that cannot fail, inside the machine
+-- built to find arms that cannot fail. The migration carries FOUR bodies, so a
+-- needle that occurs in more than one carries an `nth` selecting this
+-- function's, the SECOND in that file's pinned order (match_engine_cron_tick,
+-- prod_prober_cadence_check, cron_sync_tick, ops_staleness_check).
 --
--- ⚠️ EXECUTION ORDER IS G1, S1, O1, A1, U1, V1, N1 — NOT the alphabetic/plan
+-- ⚠️ EXECUTION ORDER IS G1, S1, O1, A1, U1, W1, V1, K1, N1 — NOT the alphabetic/plan
 -- listing order — and it is LOAD-BEARING, not cosmetic. G1 and S1 (plan 01)
 -- MUST stay the first two arms, because their own RED-UNDER-M twins mutate the
 -- SHARED staleness comparison every later call in the file also uses; if any
@@ -78,10 +85,19 @@
 --            cron_name); N1 is the one arm that puts a second, more-recent
 --            producer beside a stale prod_prober row and asserts the alarm
 --            still fires. Runs LAST — see the ordering note above.
+--   W1       Refuses an implementation whose destination test is a SUFFIX rule
+--            (any https host under the Railway app domain) instead of equality
+--            against the two named origins. U1's foreign host fails the suffix
+--            rule too, so only a SIBLING under the same domain tells the two
+--            apart. Phase 242 / DEST-SET.
+--   K1       Refuses an implementation whose blank-key guard trims spaces only.
+--            V1's absent key is NULL and S1's key is a real one, so only a key
+--            made of a tab, a carriage return and a newline beside the space
+--            reaches the difference. Phase 242 / DEST-KEYGUARD.
 --
 -- WHAT MAKES THIS GATE WORTH HAVING (criterion 3, the anti-vacuity criterion
 -- this phase names explicitly). A staleness gate never observed RED has not
--- been met. All seven arms below are proven RED by their own RED-UNDER-M
+-- been met. All nine arms below are proven RED by their own RED-UNDER-M
 -- twin, executed by `node scripts/mutation-runner/run.mjs` on a disposable
 -- pg-lane — not merely asserted in prose. Arms N1, S1, A1 and U1 additionally
 -- OBSERVE the post (or its absence) rather than inferring it from a SQLSTATE:
@@ -91,8 +107,8 @@
 -- shape (seven days of silent 401s behind a green cron history) that a
 -- predicate-only gate would leave open for this function.
 --
--- Arms (LISTED in file/plan order; EXECUTED in the G1/S1/O1/A1/U1/V1/N1 order
--- above — N1 LAST):
+-- Arms (LISTED in file/plan order; EXECUTED in the G1/S1/O1/A1/U1/W1/V1/K1/N1
+-- order above — N1 LAST):
 --   G1  fresh ⇒ silent   — a contact row inside the ceiling produces NO post,
 --                          NO raise, a NULL return, and exactly one
 --                          self-observability row with status='ok'. Needs no
@@ -121,10 +137,16 @@
 --       layers                arm's own transaction and analytics_service_url
 --                          pointed at a foreign host, the callable still
 --                          REFUSES by name and does not echo the value.
+--   W1  exact origins,    — with the CHECK constraint dropped and
+--       not a suffix        analytics_service_url pointed at a sibling host under
+--                          the production origin's own Railway domain, the
+--                          callable REFUSES by name and posts nothing.
 --   V1  no key ⇒ refusal,  — with analytics_service_key absent from the Vault
 --       never a null header   stand-in, the callable RAISES naming the
 --                          setting and net._lane_posts stays EMPTY — never a
 --                          header built over a NULL key.
+--   K1  whitespace key ⇒  — a key made of a space, a tab, a carriage return
+--       refusal             and a newline is refused by name, posting nothing.
 --   N1  narrowed by       — runs LAST (own N1-SETUP restores the key and
 --       cron_name            destination). A stale prod_prober row beside a
 --                          FRESH row under a different real cron_name
@@ -155,7 +177,7 @@
 -- on failure. No psql meta-commands. Under psql -v ON_ERROR_STOP=1 a failed
 -- assertion exits non-zero. The whole test rolls back.
 --
--- The final `ALL 7 ARMS EXECUTED (…)` notice at the foot of this file is the
+-- The final `ALL 9 ARMS EXECUTED (…)` notice at the foot of this file is the
 -- sentinel CI's loop reads the arm count off. If you add or remove an arm,
 -- update BOTH the integer and the roster on that line.
 --
@@ -180,7 +202,7 @@
 -- destination this gate asserts against). 20260918120000 is applied LAST,
 -- because its CREATE OR REPLACE must be the definition the arms run against.
 -- LANE-ONLY: {"object":"net._lane_posts","fixture":"scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","job":"sql-mutation","reason":"Every arm in this file asserts against the pg-net stand-in that fixture 34's own header marks as never applied to TEST or PROD; shared TEST carries the real pg_net, so a version of this gate made to run there would issue genuine outbound HTTP from shared CI infrastructure on every run; this file's arms execute and are mutation-checked twin-by-twin on the pg-lane under sql-mutation."}
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","supabase/migrations/20260911120000_vault_tick_hardening.sql","supabase/migrations/20260918120000_prod_prober_cadence.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql","scripts/pg-lane/fixtures/33-fixture-cron-runs.sql","scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql","supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql","supabase/migrations/20260911120000_vault_tick_hardening.sql","supabase/migrations/20260918120000_prod_prober_cadence.sql","supabase/migrations/20261127130000_cron_destinations_exact.sql"]}
 
 BEGIN;
 
@@ -226,7 +248,7 @@ BEGIN
   --            c_contact_ceiling);`. A FRESH row (a small gap) is then judged
   --            stale, and a truly stale row would be judged fresh — a full
   --            inversion of the predicate this arm exists to pin.
-  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"v_stale := (now() - v_last > c_contact_ceiling);","replace":"v_stale := (now() - v_last <= c_contact_ceiling);","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"v_stale := (now() - v_last > c_contact_ceiling);","replace":"v_stale := (now() - v_last <= c_contact_ceiling);","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (G1): prod_prober_cadence_check() RAISED on a FRESH contact row: %. A fresh row must return NULL, not raise — an alarm that cannot tell fresh from stale is not an alarm.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -285,7 +307,7 @@ BEGIN
   --            hours 25 minutes';` becomes `c_contact_ceiling CONSTANT
   --            INTERVAL := '10000 hours';`, well past the 20-hour age ARM S1
   --            gives the row above.
-  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"c_contact_ceiling CONSTANT INTERVAL := '10 hours 25 minutes';","replace":"c_contact_ceiling CONSTANT INTERVAL := '10000 hours';","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"c_contact_ceiling CONSTANT INTERVAL := '10 hours 25 minutes';","replace":"c_contact_ceiling CONSTANT INTERVAL := '10000 hours';","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (S1): prod_prober_cadence_check() RAISED on a STALE contact row with a usable key and an allow-listed url: %. It should have posted and returned a request id, not raised.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -380,7 +402,7 @@ BEGIN
   --            plan). Narrowing the mutation to the status value alone leaves
   --            every FRESH-branch row correct (it already reads 'ok') and
   --            wrong only on the STALE branch, which no arm but O1 reads.
-  -- RED-UNDER-M: {"arm":"O1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"    CASE WHEN v_stale THEN 'error' ELSE 'ok' END,","replace":"    'ok',","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"O1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"    CASE WHEN v_stale THEN 'error' ELSE 'ok' END,","replace":"    'ok',","occurrences":1}]}
   SELECT count(*) INTO v_cnt FROM public.cron_runs WHERE cron_name = 'prod_prober_cadence_check';
   IF v_cnt <> 2 THEN
     RAISE EXCEPTION 'TEST FAILED (O1): expected exactly TWO self-observability rows (one per tick) after the stale second tick, got % — a tick that leaves no counted trace is the observer going silent about its OWN health, which arms G1/S1/A1/N1 cannot see because none of them reads this table.', v_cnt;
@@ -435,7 +457,7 @@ BEGIN
   --            WHEN v_stale THEN 'error' ELSE 'ok' END` — a NULL condition
   --            takes the ELSE branch, so the row this arm reads says 'ok'
   --            about a prober that has never made contact at all.
-  -- RED-UNDER-M: {"arm":"A1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"  IF v_last IS NULL THEN\n    v_stale := TRUE;\n  ELSE\n    v_stale := (now() - v_last > c_contact_ceiling);\n  END IF;","replace":"  v_stale := (now() - v_last > c_contact_ceiling);","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"A1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"  IF v_last IS NULL THEN\n    v_stale := TRUE;\n  ELSE\n    v_stale := (now() - v_last > c_contact_ceiling);\n  END IF;","replace":"  v_stale := (now() - v_last > c_contact_ceiling);","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (A1): prod_prober_cadence_check() RAISED with NO prod_prober contact row at all: %. The Vault key and destination were both left valid by S1-SETUP above, so an absent contact must reach the SAME post path a stale one does, not raise about something unrelated.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -497,7 +519,7 @@ BEGIN
   --            then zero layers deep and the function sails into
   --            net.http_post carrying the live analytics_service_key to
   --            collector.attacker.example.
-  -- RED-UNDER-M: {"arm":"U1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"  IF v_url !~ c_url_allowed THEN\n    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';\n  END IF;","replace":"","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"U1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"  IF NOT (v_url = ANY (c_allowed_origins)) THEN\n    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');\n  END IF;","replace":"","occurrences":4,"nth":2}]}
   IF NOT v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (U1): prod_prober_cadence_check() RETURNED with analytics_service_url pointing at collector.attacker.example and its CHECK constraint dropped — the destination control is one ALTER TABLE from gone (this arm just performed that ALTER TABLE), and if the in-body re-test is also absent the whole thing is zero layers deep. What leaves in an X-Service-Key header then goes wherever this row names, and nothing downstream ever reports it.';
   END IF;
@@ -511,6 +533,66 @@ BEGIN
   SELECT count(*) INTO v_cnt FROM net._lane_posts;
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (U1): % outbound post(s) were recorded despite the destination guard, expected ZERO — a refusal that still lets the request out is not a refusal at all.', v_cnt;
+  END IF;
+
+  -- ===== ARM W1 — a WILDCARD SIBLING ⇒ the callable REFUSES, posting nothing ==
+  -- The destination rule used to be a SUFFIX WILDCARD: any https host under the
+  -- Railway app domain. U1's foreign host (collector.attacker.example) is refused
+  -- by the old rule and the new one alike, so it cannot tell them apart. A
+  -- SIBLING under the same domain can: the old rule admitted it and the exact
+  -- two-origin rule does not. Directly after U1, whose stale contact row and
+  -- dropped CHECK are still in place; W1-SETUP re-drops the CHECK anyway (IF
+  -- EXISTS) so it does not depend on U1 having run. The Vault key is still the
+  -- one S1-SETUP seeded (V1 removes it later), so the key guard is not what this
+  -- arm measures. What is measured is the in-body re-test alone.
+  -- ----- W1-SETUP: CHECK gone, sibling host stored, a contact row that is stale -
+  v_setup := NULL;
+  BEGIN
+    ALTER TABLE public.system_settings
+      DROP CONSTRAINT IF EXISTS system_settings_analytics_service_url_allowed;
+    UPDATE public.system_settings
+       SET value = 'https://not-quantalyze.up.railway.app'
+     WHERE key = 'analytics_service_url';
+    GET DIAGNOSTICS v_cnt = ROW_COUNT;
+    IF v_cnt <> 1 THEN
+      RAISE EXCEPTION 'expected to repoint exactly one analytics_service_url row, repointed %', v_cnt;
+    END IF;
+    UPDATE public.cron_runs SET completed_at = now() - INTERVAL '20 hours' WHERE cron_name = 'prod_prober';
+    IF NOT FOUND THEN
+      INSERT INTO public.cron_runs (cron_name, status, completed_at) VALUES ('prod_prober', 'ok', now() - INTERVAL '20 hours');
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (W1-SETUP): could not drop the CHECK, point analytics_service_url at the sibling host and leave a stale prod_prober contact row (%), so W1 below would be asking its question of whatever state U1 left behind. Record what it says — do NOT weaken W1 to accommodate it.', v_setup;
+  END IF;
+  DELETE FROM net._lane_posts;
+
+  v_raised := false;
+  v_msg := NULL;
+  BEGIN
+    v_ret := public.prod_prober_cadence_check();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: restore the destination guard to the old suffix rule — the
+  --            equality guard becomes a pattern match on any https host under the
+  --            Railway app domain. The sibling is then admitted and the live
+  --            service key goes to a host no one chose, in an async post the
+  --            scheduler records as a success. ⚠️ U1 stays GREEN under this
+  --            mutation, because its foreign host fails the old suffix rule too;
+  --            W1 is the first failure.
+  -- RED-UNDER-M: {"arm":"W1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF NOT (v_url = ANY (c_allowed_origins)) THEN","replace":"IF v_url !~ '^(https://[a-z0-9][a-z0-9.-]*\\.up\\.railway\\.app|http://127\\.0\\.0\\.1:9)$' THEN","occurrences":4,"nth":2}]}
+  IF NOT v_raised OR v_msg !~ 'not an allowed destination' THEN
+    RAISE EXCEPTION 'TEST FAILED (W1): with analytics_service_url set to a sibling host under the same Railway domain as the production origin, prod_prober_cadence_check() did not refuse by name — raised=%, message: %. A suffix rule admits any subdomain anyone can register, so the Vault-held service key would leave in an X-Service-Key header to a host nobody chose.', v_raised, COALESCE(v_msg, 'NULL');
+  END IF;
+  SELECT count(*) INTO v_cnt FROM net._lane_posts;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (W1): % outbound post(s) were recorded despite the sibling host being refused, expected ZERO — a refusal that still lets the request out is not a refusal.', v_cnt;
   END IF;
 
   -- ===== ARM V1 — no usable key means no post, not a null header ===========
@@ -556,7 +638,7 @@ BEGIN
   --            tick as succeeded — the CRON-DRIFT-01 outage, seven days of
   --            silent 401s behind a green history, and it has already
   --            happened once in this system.
-  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"  IF v_key IS NULL OR btrim(v_key) = '' THEN","replace":"  IF FALSE THEN","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"V1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"  IF v_key IS NULL OR btrim(v_key, E' \\t\\r\\n') = '' THEN","replace":"  IF FALSE THEN","occurrences":4,"nth":2}]}
   IF NOT v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (V1): prod_prober_cadence_check() RETURNED with no analytics_service_key in the vault. A header object built over a NULL key is a header with a null value, the analytics service answers 401, and because net.http_post is fire-and-forget the scheduler records the tick as succeeded — exactly the outage this arm exists to refuse.';
   END IF;
@@ -568,6 +650,58 @@ BEGIN
   IF v_cnt <> 0 THEN
     RAISE EXCEPTION 'TEST FAILED (V1): % outbound post(s) were recorded despite the missing key, expected ZERO — arm S1 stays green under this mutant whenever the key IS present, so V1 is the only arm that measures the guard itself.', v_cnt;
   END IF;
+
+  -- ===== ARM K1 — a key of ALL FOUR whitespace characters ⇒ REFUSED, by name ===
+  -- V1 removes the key, which reads NULL. A guard that trims spaces only passes
+  -- a space-only key to its refusal and a tab, carriage-return or newline key
+  -- straight through, so this arm stores all four (space, tab, carriage return,
+  -- newline) and asks the same question. ⚠️ Built with an E'' literal, never a
+  -- pasted control character. V1-SETUP left the production url in place and the
+  -- contact row stale, and the key is read BEFORE the url, so neither is what
+  -- this arm measures.
+  -- ----- K1-SETUP: delete-then-create, so exactly one secret of that name -------
+  v_setup := NULL;
+  BEGIN
+    DELETE FROM vault.decrypted_secrets WHERE name = 'analytics_service_key';
+    PERFORM vault.create_secret(E' \t\r\n', 'analytics_service_key', 'phase 242 gate fixture');
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT, v_state = RETURNED_SQLSTATE;
+    v_setup := v_state || ' ' || v_msg;
+  END;
+  IF v_setup IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (K1-SETUP): could not store a space, tab, carriage-return and newline analytics_service_key (%), so K1 below would be asking its question of a database holding either no secret or another one. Record what it says — do NOT weaken K1 to accommodate it.', v_setup;
+  END IF;
+  DELETE FROM net._lane_posts;
+
+  v_raised := false;
+  v_msg := NULL;
+  BEGIN
+    v_ret := public.prod_prober_cadence_check();
+  EXCEPTION WHEN OTHERS THEN
+    v_raised := true;
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+  END;
+
+  -- RED-UNDER: restore the key guard to the old spaces-only trim — the explicit
+  --            four-character set becomes a bare btrim. A tab, carriage return or
+  --            newline key is then neither NULL nor blank, and the callable
+  --            carries a useless header onward, answered 401 behind a green tick.
+  -- ⚠️ V1 stays GREEN under this mutation (an absent secret is still NULL), so
+  --    K1 is the first failure.
+  -- RED-UNDER-M: {"arm":"K1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"IF v_key IS NULL OR btrim(v_key, E' \\t\\r\\n') = '' THEN","replace":"IF v_key IS NULL OR btrim(v_key) = '' THEN","occurrences":4,"nth":2}]}
+  IF NOT v_raised THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): prod_prober_cadence_check() RETURNED with an analytics_service_key made of a space, a tab, a carriage return and a newline. None of them is a usable key, and a guard that trims spaces only lets the rest through to a header the analytics service answers 401 to, asynchronously.';
+  END IF;
+  IF v_msg !~ 'analytics_service_key missing from vault' THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): the callable did raise with a whitespace-only secret present, but its message does not name analytics_service_key — it reads: %. This arm shares V1''s RAISE text on purpose.', COALESCE(v_msg, 'NULL');
+  END IF;
+  SELECT count(*) INTO v_cnt FROM net._lane_posts;
+  IF v_cnt <> 0 THEN
+    RAISE EXCEPTION 'TEST FAILED (K1): % outbound post(s) were recorded despite the whitespace-only key, expected ZERO.', v_cnt;
+  END IF;
+  -- Leave the stand-in as V1 left it (no secret), so N1-SETUP's create_secret
+  -- below yields exactly one row and not a second one beside this arm's.
+  DELETE FROM vault.decrypted_secrets WHERE name = 'analytics_service_key';
 
   -- ===== ARM N1 — the freshness read is NARROWED by cron_name ==============
   -- ----- N1-SETUP: RESTORE a usable key and an allow-listed destination — ---
@@ -629,7 +763,7 @@ BEGIN
   --            never the observer's own bookkeeping name, so this mutation
   --            stays immune to every arm's self-observability row while still
   --            reddening on a second genuine producer.
-  -- RED-UNDER-M: {"arm":"N1","apply":[{"kind":"edit","file":"supabase/migrations/20260918120000_prod_prober_cadence.sql","find":"   WHERE cron_name = 'prod_prober';","replace":"   WHERE cron_name IN ('prod_prober', 'mt5_session_episode');","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"N1","apply":[{"kind":"edit","file":"supabase/migrations/20261127130000_cron_destinations_exact.sql","find":"   WHERE cron_name = 'prod_prober';","replace":"   WHERE cron_name IN ('prod_prober', 'mt5_session_episode');","occurrences":1}]}
   IF v_raised THEN
     RAISE EXCEPTION 'TEST FAILED (N1): prod_prober_cadence_check() RAISED with a stale prod_prober row and a fresh mt5_session_episode row beside it: %. N1-SETUP restored the Vault key and destination above, so an unrelated raise here means the fixture broke, not the contact read.', COALESCE(v_msg, 'NULL');
   END IF;
@@ -642,7 +776,7 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (N1): a stale prod_prober row beside a fresh mt5_session_episode row produced % outbound post(s), expected EXACTLY 1 — the row-count analogue of the return-value assertion above, over the same coupling.', v_cnt;
   END IF;
 
-  RAISE NOTICE 'ALL 7 ARMS EXECUTED (G1,S1,O1,A1,U1,V1,N1): public.prod_prober_cadence_check() returns NULL and posts NOTHING on a fresh prod_prober contact row (G1), writing exactly one self-observability row with status=ok — and posts EXACTLY ONE alert to /api/prober-cadence-alert, carrying a non-blank X-Service-Key header, on a stale one (S1), returning a non-NULL request id. The observer''s own row lands on BOTH branches with the right status, and its metadata carries only gap_minutes/ceiling/contact_cron_name (O1). An ABSENT contact row is read as STALE, never healthy (A1) — the loudest signal this function can give, not a silent one. The destination survives its CHECK constraint being dropped, because the callable re-tests the same allow-list itself before it ever builds a header (U1). A missing key produces a REFUSAL, never a header with a null value (V1). A fresh row under a DIFFERENT cron_name does not mask the prober''s own silence (N1) — the contact read is narrowed to ONE producer, never a scan admitting every producer this table has. Phase 164.1.1 / plan 02 / criterion 3, mig 20260918120000.';
+  RAISE NOTICE 'ALL 9 ARMS EXECUTED (G1,S1,O1,A1,U1,W1,V1,K1,N1): public.prod_prober_cadence_check() returns NULL and posts NOTHING on a fresh prod_prober contact row (G1), writing exactly one self-observability row with status=ok — and posts EXACTLY ONE alert to /api/prober-cadence-alert, carrying a non-blank X-Service-Key header, on a stale one (S1), returning a non-NULL request id. The observer''s own row lands on BOTH branches with the right status, and its metadata carries only gap_minutes/ceiling/contact_cron_name (O1). An ABSENT contact row is read as STALE, never healthy (A1) — the loudest signal this function can give, not a silent one. The destination survives its CHECK constraint being dropped, because the callable re-tests the same allow-list itself before it ever builds a header (U1), and that allow-list is exactly two origins by equality, so a sibling host under the production origin''s own Railway domain is refused by name with nothing posted (W1). A missing key produces a REFUSAL, never a header with a null value (V1), and so does a key made of a space, a tab, a carriage return and a newline (K1). A fresh row under a DIFFERENT cron_name does not mask the prober''s own silence (N1) — the contact read is narrowed to ONE producer, never a scan admitting every producer this table has. Phase 164.1.1 / plan 02 / criterion 3, mig 20260918120000; re-based by Phase 242 / plan 03, mig 20261127120000.';
 END $$;
 
 ROLLBACK;

@@ -108,9 +108,10 @@ SELECT count(*) AS n_keys FROM vault.decrypted_secrets WHERE name = 'analytics_s
 SELECT s.value AS analytics_service_url FROM public.system_settings s WHERE s.key = 'analytics_service_url';
 ```
 
-- **Expected:** `n_keys = 1`; exactly one `analytics_service_url` row whose value matches
-  `^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$` (the same allow-list
-  the function re-tests in its own body). This is the SAME key and destination
+- **Expected:** `n_keys = 1`; exactly one `analytics_service_url` row whose value equals one of exactly two
+  origins, the production origin (`https://quantalyze-analytics-production.up.railway.app`) or the
+  loopback discard literal (`http://127.0.0.1:9`), compared by equality (the same set the CHECK and
+  the function's own re-test use since migration `*_cron_destinations_exact.sql`). This is the SAME key and destination
   `match_engine_cron_tick()` already uses, so this check is normally a formality, not a discovery.
 - **Abort if:** `n_keys = 0` (the function raises, and every stale tick leaves no observer row) or
   `n_keys > 1` (the function raises for the same reason a duplicate secret name has always raised

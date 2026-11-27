@@ -2,56 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260918120000_prod_prober_cadence.sql
--- Migration: public.prod_prober_cadence_check() — the PROD-side observer of the
--- prod-prober's contact cadence. Phase 164.1.1 (PROBERCADENCE) / plan 01 /
--- requirement PROBER-CADENCE-UNDELIVERED-01.
---
--- WHAT THIS SHIPS AND WHAT IT DOES NOT.
--- The prober (`.github/workflows/prod-prober.yml`, driven by GitHub Actions'
--- best-effort scheduler — measured 27% hourly delivery) writes ONE
--- `public.cron_runs` row under `cron_name = 'prod_prober'` at the end of every
--- run (D-02). PROD's OWN `pg_cron` — a scheduler that actually fires, unlike
--- GitHub's — is the only place that can watch for that row going stale without
--- sharing the exact failure mode it exists to catch. This migration ships the
--- CALLABLE that watch calls. ⛔ It does NOT call `cron.schedule(...)`: this
--- repo's settled convention (Phase 164.5.1 CRONREPOINT and the ledger-refresh
--- activation before it) treats live PROD `cron.job` registration as a separate,
--- founder-gated live op run against the linked-to-PROD Supabase CLI, documented
--- in a runbook — never inside a migration. Registration is owned by plans 05/06
--- of this phase.
---
--- The function is modelled on `public.match_engine_cron_tick()`
--- (`supabase/schema/functions/match_engine_cron_tick.sql`, canonical body in
--- `supabase/migrations/20260911120000_vault_tick_hardening.sql`) and reuses its
--- destination and its Vault key: `vault.decrypted_secrets` name
--- `analytics_service_key`, `system_settings` key `analytics_service_url`, and
--- the SAME two-layer allow-list regex. This migration adds no credential and
--- widens no allow-list (D-08).
---
--- Per D-01, the `prod_prober` contact rows this function READS need no schema
--- change. Four facts, VERIFIED rather than assumed (the same four the D-5
--- precedent in `analytics-service/services/mt5_session_episodes.py` names for
--- its own new `cron_name`):
---   * `cron_runs_service_role` is `FOR ALL` with a matching `WITH CHECK`, so a
---     service-role writer (the prober) can insert under this new name with no
---     policy change;
---   * `idx_cron_runs_name_recent (cron_name, completed_at DESC NULLS LAST)`
---     already serves `SELECT max(completed_at) … WHERE cron_name = …`;
---   * `latest_cron_success(p_cron_name)` takes a NAME and does not enumerate
---     them, so a new name raises no false stale alert against it;
---   * every existing SQL gate over `cron_runs` is narrowed by `cron_name`, so a
---     new name cannot perturb one.
---
--- ⛔ FORWARD MIGRATION ONLY. Nothing here edits an applied migration file, and
--- nothing here runs `supabase db push`, `db reset`, `--project-ref` or
--- `--db-url` — this checkout's Supabase CLI is linked to PRODUCTION, and this
--- migration reaches PROD only by merge → apply-test → the Production
--- human-reviewer gate.
-
--- --------------------------------------------------------------------------
--- STEP 1: public.prod_prober_cadence_check()
--- --------------------------------------------------------------------------
+-- source migration: 20261127130000_cron_destinations_exact.sql
+-- ==========================================================================
+-- STEP 2b: public.prod_prober_cadence_check()
+-- ==========================================================================
 CREATE OR REPLACE FUNCTION public.prod_prober_cadence_check()
 RETURNS BIGINT
 LANGUAGE plpgsql
@@ -93,8 +47,7 @@ DECLARE
   v_cnt INTEGER;
   v_url TEXT;
   v_req BIGINT;
-  c_url_allowed CONSTANT TEXT :=
-    '^(https://[a-z0-9][a-z0-9.-]*\.up\.railway\.app|http://127\.0\.0\.1:9)$';
+  c_allowed_origins CONSTANT TEXT[] := ARRAY['https://quantalyze-analytics-production.up.railway.app', 'http://127.0.0.1:9'];
 BEGIN
   -- 1. Read the contact. Narrowed by cron_name — never an unfiltered scan over
   --    public.cron_runs.
@@ -161,7 +114,7 @@ BEGIN
   IF v_cnt > 1 THEN
     RAISE EXCEPTION 'analytics_service_key is not unique in vault (% rows) — refusing to pick one', v_cnt;
   END IF;
-  IF v_key IS NULL OR btrim(v_key) = '' THEN
+  IF v_key IS NULL OR btrim(v_key, E' \t\r\n') = '' THEN
     RAISE EXCEPTION 'analytics_service_key missing from vault — refusing to send a null header';
   END IF;
 
@@ -178,8 +131,8 @@ BEGIN
   -- The message deliberately does not echo the offending url (T-161.1-10):
   -- RAISE text lands in cron.job_run_details, the Postgres log, and downstream
   -- shippers, and this repo is public.
-  IF v_url !~ c_url_allowed THEN
-    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: an https host under .up.railway.app';
+  IF NOT (v_url = ANY (c_allowed_origins)) THEN
+    RAISE EXCEPTION 'analytics_service_url in system_settings is not an allowed destination — refusing to post the analytics service key. The offending value is deliberately NOT echoed here; read it with an admin session. Allowed: exactly %', array_to_string(c_allowed_origins, ' or ');
   END IF;
 
   -- ⛔ NOTHING BELOW IS WRAPPED IN AN EXCEPTION HANDLER THAT SWALLOWS. If

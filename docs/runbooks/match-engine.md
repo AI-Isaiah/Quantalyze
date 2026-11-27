@@ -333,6 +333,12 @@ passes this guard and still produces a header the analytics service answers 401 
 is explicitly OUT OF SCOPE here — widening the guard to `E' \t\r\n'` is a decision with its own
 evidence, tracked separately, not a silent improvement folded into this step.
 
+⭐ **2026-11-27 (Phase 242 SECRETSHYGIENE): that residual is closed.** The key guard now trims
+spaces, tabs, carriage returns and newlines (`btrim(v_key, E' \t\r\n')`) in all four functions that
+post the key (`match_engine_cron_tick`, `prod_prober_cadence_check`, `cron_sync_tick`,
+`ops_staleness_check`), by migration `*_cron_destinations_exact.sql`. The paragraph above is kept as
+lineage.
+
 ### Step 3 — the activation (LIVE op 2), only if Step 1 and Step 2 both cleared
 
 Re-run the repaired P3-C from `docs/runbooks/ledger-refresh-go-live.md` § "P3 — venue enable flags"

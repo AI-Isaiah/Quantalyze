@@ -108,6 +108,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/sanitize-user-rpc.test.ts",
   "src/__tests__/sanitize-user.test.ts",
   "src/__tests__/scenario-commit-batch-tx.test.ts",
+  "src/__tests__/secret-scan-full-history.test.ts",
   "src/__tests__/seed-demo-data-entrypoint-guard.test.ts",
   "src/__tests__/seed-demo-data-idempotency.test.ts",
   "src/__tests__/seed-demo-data-types.test.ts",
