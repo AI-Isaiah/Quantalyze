@@ -476,7 +476,17 @@ export async function readCompositeFactsheet(
   // `build-payload` emits `seriesByBasis.smoothed_mtm` only from such a series. Without it the basis
   // view falls back to the cash payload, which would put cash-wallet charts under smoothed KPIs. A
   // marker without both leaves the cash basis withheld and does not switch the basis.
-  const smoothedHeadline = isSmoothedHeadlineRow(dqf) && smoothedAvailable && smoothedSeries !== null;
+  const promotedMarker = isSmoothedHeadlineRow(dqf);
+  const smoothedHeadline = promotedMarker && smoothedAvailable && smoothedSeries !== null;
+  if (promotedMarker && !smoothedHeadline) {
+    // SFH-R2-2: a promoted row whose smoothed object or series is not usable stays cash-withheld, and
+    // without this report nobody learns why. Strategy id only, never an amount.
+    console.warn("[factsheet] readCompositeFactsheet — promoted row has no usable smoothed headline or series; the cash basis stays withheld", { strategyId });
+    captureToSentry(new Error("factsheet: promoted composite has no usable smoothed headline or series"), {
+      tags: { stage: "factsheet-promoted-headline", reason: "promoted_without_usable_smoothed", strategy_id: strategyId },
+      level: "warning",
+    });
+  }
 
   return {
     dailyReturns,

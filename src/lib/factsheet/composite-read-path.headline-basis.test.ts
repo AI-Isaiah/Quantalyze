@@ -711,6 +711,53 @@ describe("G252-MTM-PROMOTION — a promoted composite through the read path and 
   });
 
   /**
+   * (c3) SFH-R2-2 (252 gap-2 round 2): a promoted marker the read cannot honour (no usable smoothed
+   * series, or no valid smoothed object) leaves the cash basis withheld, and that state is reported at
+   * warning level with the strategy id and no amount. A valid promoted row reports nothing. Without
+   * the report a promoted figure disappears from the page and nobody is told why.
+   */
+  describe("(c3) a promoted marker with no usable smoothed headline or series is reported", () => {
+    const sentry = vi.mocked(captureToSentry);
+    async function runLogged(byBasis: Record<string, unknown>, series: unknown) {
+      sentry.mockClear();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await run(PROMOTED_DQF, byBasis, series);
+        const reported = sentry.mock.calls.filter(
+          ([, opts]) => (opts as { tags?: { stage?: string } } | undefined)?.tags?.stage === "factsheet-promoted-headline",
+        );
+        return { reported, warned: warn.mock.calls.length };
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it.each([
+      ["the series row is missing", { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ }, null],
+      ["the smoothed object is missing", { cash_settlement: CASH_ARTEFACT }, SMOOTHED_SERIES],
+    ])("%s: one warning-level report tagged with the strategy id, no amount", async (_label, byBasis, series) => {
+      const { reported, warned } = await runLogged(byBasis, series);
+      expect(warned).toBe(1);
+      expect(reported).toHaveLength(1);
+      const [err, opts] = reported[0];
+      expect(opts).toMatchObject({
+        level: "warning",
+        tags: { stage: "factsheet-promoted-headline", reason: "promoted_without_usable_smoothed", strategy_id: "s1" },
+      });
+      expect((err as Error).message).not.toMatch(/\d/);
+    });
+
+    it("a valid promoted row (object and series both usable) reports nothing", async () => {
+      const { reported, warned } = await runLogged(
+        { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ },
+        SMOOTHED_SERIES,
+      );
+      expect(reported).toHaveLength(0);
+      expect(warned).toBe(0);
+    });
+  });
+
+  /**
    * (d) Rule 9: the marker is untrusted JSONB, compared strictly. A case variant, a padded string, a
    * boolean, an array or null is an ordinary composite: nothing is withheld and no basis switches, and
    * the payload equals the same row without the key.
