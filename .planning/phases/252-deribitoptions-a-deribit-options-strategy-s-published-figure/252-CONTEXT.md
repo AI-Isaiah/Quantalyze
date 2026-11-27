@@ -50,6 +50,11 @@ Out of scope: Deribit allocator books in key mode (Phase 233 DERIBITTRUTH owns b
 ### Founder decision 2026-11-26 (OG card and returns charts stay as they are)
 - The OG card does NOT get the withheld sentence, and the return and drawdown charts are NOT withheld. Both stay as they are. This closes the open question the founder-visual-check item carried (the Monthly Returns heatmap, IN-06, and the card wording); it narrows the "reason named on every surface" reading of the 2026-11-25 ruling for these two surfaces only. Recorded here and in the ROADMAP 252 section per the deviation policy.
 
+### Founder decision 2026-11-26 (probe FAIL is fixed inside 252)
+- The wave-2 probe ran on PROD on 2026-11-26 at 21:32Z and read verdict `fail` (3 members, 1 failed). m1 and m2 smoothed: pass (704 and 410 days, days_over_guard 0). m3 smoothed: `build-error:LedgerValuationError`, detail `LedgerValuationError:position`, 0 series days, c3/c4 not-run, option_activity `no`. m3's cash contrast built: 1232 days, option_activity `yes`.
+- FOUNDER DECISION 2026-11-26 (AskUserQuestion via the coordinator), verbatim answer "Fix it inside 252": fix the cause of the probe FAIL inside Phase 252, and keep 252 open until the probe passes. The fix must not invent data (an uncomputable value stays null or withheld) and must not narrow the MTM span without a separate founder ruling.
+- Local diagnosis 2026-11-27, from code only: that detail can come from exactly three smoothed-only raises in `services/deribit_txn.py`. They are the D-07 daily-mark hole in `option_mtm_daily`, the D-09 `exercise` refusal in `replay_option_positions`, and the D-09 `expiry` row with a nonzero or non-numeric `position` in `_expiry_close`. m3 is the only member whose history (1232 days) is older than the 913-day mark-retention default, so a retention straddler (the D-07 hole) is the leading hypothesis. It is NOT measured. The probe's vocabulary cannot tell the three apart, so the first gap plan makes the code name which one fired, then the probe is re-run. If the cause is a straddler, every remedy narrows the MTM span, and that needs a founder ruling.
+
 ### Claude's Discretion
 - The public wording of the withheld reason follows the existing withheld-headline sentences and DESIGN.md, with no flag names or job vocabulary. It is user-facing copy, so the founder sees it at the visual check.
 
