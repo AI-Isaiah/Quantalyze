@@ -41,6 +41,7 @@ import {
   isNativeLegUnpriced,
 } from "@/lib/factsheet/native-to-usd";
 import { formatCloseDay, parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { parseUnitSwitch } from "@/lib/factsheet/unit-segments";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import {
   API_KEY_USER_COLUMNS,
@@ -644,6 +645,17 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * through `effectiveListFlag` and `shapeStoredAnalytics` deletes both, so they never reach a client
  * component. `queries.test.ts` pins the exact set.
  *
+ * Phase 256 plan 08 (D-05, T-256-23) — SIX more scalar aliases over the same column, so the list can
+ * name an OKX unit switch (USD to a coin) from the same flags generation as the figures it shows:
+ * `unit_switch_coin`, `unit_switch_last_usd_day` and `unit_switch_first_coin_day` (the three
+ * closed scalars of `data_quality_flags->unit_switch`: a unit code and two ISO days) and their
+ * three `last_success_` twins out of the derive hop's snapshot. Same rule as `native_unit`: scalars
+ * reached by `->` through the one `unit_switch` object and read out with `->>`, never the flags
+ * blob, the `unit_switch` object itself, the snapshot object or its `flags` object. `shapeRowAnalytics`
+ * reads them through `effectiveListFlag`, keeps the three only when they pass `parseUnitSwitch`
+ * together, and deletes the three `last_success_` twins. `queries.test.ts` pins the exact set and
+ * the allowed forms.
+ *
  * Phase 170.7 (D-09) — exported for a SECOND consumer, the manager's
  * `/strategies` owner list (plan 06), which embeds the same columns so its
  * rows are shaped by `shapeRowAnalytics` exactly like Discovery's. It stays an
@@ -651,7 +663,7 @@ export const COMPARE_ANALYTICS_COLUMNS =
  * (RANK-02): a wildcard would put the private blobs above on the wire.
  */
 export const CATEGORY_RANKING_ANALYTICS_COLUMNS =
-  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, series_start:returns_series->0->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason, trades_fetched_at";
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date, series_start:returns_series->0->>date, headline_since:data_quality_flags->>headline_since, record_observations:metrics_json->record_observations, native_unit:data_quality_flags->>native_unit, cumulative_method:data_quality_flags->>cumulative_method, last_success_cumulative_method:data_quality_flags->last_success_snapshot->flags->>cumulative_method, last_success_computed_at:data_quality_flags->last_success_snapshot->>computed_at, last_success_native_unit:data_quality_flags->last_success_snapshot->flags->>native_unit, mtm_gated_reason:data_quality_flags->>mtm_gated_reason, last_success_mtm_gated_reason:data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason, unit_switch_coin:data_quality_flags->unit_switch->>coin, unit_switch_last_usd_day:data_quality_flags->unit_switch->>last_usd_day, unit_switch_first_coin_day:data_quality_flags->unit_switch->>first_coin_return_day, last_success_unit_switch_coin:data_quality_flags->last_success_snapshot->flags->unit_switch->>coin, last_success_unit_switch_last_usd_day:data_quality_flags->last_success_snapshot->flags->unit_switch->>last_usd_day, last_success_unit_switch_first_coin_day:data_quality_flags->last_success_snapshot->flags->unit_switch->>first_coin_return_day, trades_fetched_at";
 
 /**
  * Phase 170.6.1.1 (ANONKEYID) review round 1 (WR-01, SFH-1, SFH-2). The three
@@ -943,7 +955,32 @@ function shapedNativeUnit(a: StrategyAnalytics) {
  * that the unit pick held before it was generalised (the recompute-verdict census pins both counts).
  * Returns the raw value; the caller parses or compares it strictly.
  */
-type ListFlagKey = "native_unit" | "mtm_gated_reason";
+type ListFlagKey =
+  | "native_unit"
+  | "mtm_gated_reason"
+  | "unit_switch_coin"
+  | "unit_switch_last_usd_day"
+  | "unit_switch_first_coin_day";
+
+/**
+ * Phase 256 plan 08 - where each `unit_switch_*` alias lives inside a flags blob: one level down,
+ * in the `unit_switch` object, under the derive's own key names. The other keys are top-level.
+ */
+const UNIT_SWITCH_BLOB_FIELD = {
+  unit_switch_coin: "coin",
+  unit_switch_last_usd_day: "last_usd_day",
+  unit_switch_first_coin_day: "first_coin_return_day",
+} as const;
+
+function readListFlagFromBlob(flags: Record<string, unknown> | null | undefined, key: ListFlagKey): unknown {
+  if (key in UNIT_SWITCH_BLOB_FIELD) {
+    const sw = flags?.unit_switch;
+    const field = UNIT_SWITCH_BLOB_FIELD[key as keyof typeof UNIT_SWITCH_BLOB_FIELD];
+    return typeof sw === "object" && sw !== null ? (sw as Record<string, unknown>)[field] : undefined;
+  }
+  return flags?.[key];
+}
+
 function effectiveListFlag(
   a: StrategyAnalytics | Record<string, unknown> | null | undefined,
   key: ListFlagKey,
@@ -952,14 +989,39 @@ function effectiveListFlag(
   if (usesLastSuccessSnapshot(row)) {
     const effective = effectiveDataQualityFlags(row);
     return effective.source === "snapshot"
-      ? effective.flags?.[key]
+      ? readListFlagFromBlob(effective.flags as Record<string, unknown> | null | undefined, key)
       : row?.[`last_success_${key}`];
   }
   // Phase 164.6.6.2.1 (D-05, D-12): the anon ranked read projects the scalar alias; the owner's
   // wildcard embed carries the flags blob instead. Only the ONE scalar is read: the blob is never
   // copied into the shape.
   const live = (row?.data_quality_flags ?? null) as Record<string, unknown> | null;
-  return row?.[key] ?? live?.[key];
+  return row?.[key] ?? readListFlagFromBlob(live, key);
+}
+
+/**
+ * Phase 256 plan 08 - the three `unit_switch_*` scalars of a list row, or none. The three are read
+ * from the SAME flags generation as the figures (`effectiveListFlag`) and kept only when they pass
+ * `parseUnitSwitch` together, so a missing or malformed scalar yields no switch at all, never a
+ * partial one. The returned scalars are the parser's own (a validated unit code and two ISO days).
+ */
+function shapedUnitSwitch(a: StrategyAnalytics): {
+  unit_switch_coin?: string;
+  unit_switch_last_usd_day?: string;
+  unit_switch_first_coin_day?: string;
+} {
+  const sw = parseUnitSwitch({
+    coin: effectiveListFlag(a, "unit_switch_coin"),
+    last_usd_day: effectiveListFlag(a, "unit_switch_last_usd_day"),
+    first_coin_return_day: effectiveListFlag(a, "unit_switch_first_coin_day"),
+  });
+  return sw === null
+    ? {}
+    : {
+        unit_switch_coin: sw.toUnit,
+        unit_switch_last_usd_day: sw.lastFromDay,
+        unit_switch_first_coin_day: sw.firstToDay,
+      };
 }
 
 /**
@@ -1015,6 +1077,14 @@ function shapeStoredAnalytics(a: StrategyAnalytics): StrategyAnalytics {
   delete out.last_success_cumulative_method;
   delete out.last_success_computed_at;
   delete out.last_success_native_unit;
+  // Phase 256 plan 08: the six unit-switch aliases are replaced by the parsed three (or none).
+  delete out.unit_switch_coin;
+  delete out.unit_switch_last_usd_day;
+  delete out.unit_switch_first_coin_day;
+  delete out.last_success_unit_switch_coin;
+  delete out.last_success_unit_switch_last_usd_day;
+  delete out.last_success_unit_switch_first_coin_day;
+  Object.assign(out, shapedUnitSwitch(a));
   // Phase 252: the two options-book reason inputs are read by `shapeRowAnalytics` before this
   // shaper runs; neither leaves queries.ts, so a non-flagged row is shaped as it always was.
   delete out.mtm_gated_reason;

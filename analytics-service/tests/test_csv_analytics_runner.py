@@ -1726,6 +1726,68 @@ async def test_a_malformed_native_unit_is_not_carried(bad) -> None:  # type: ign
 
 
 # ===========================================================================
+# Phase 256 OKXUNITSWITCH plan 06 (SC-3) — `unit_switch` is the marker a switched OKX strategy's
+# derive pre-stamps ({coin, last_usd_day, first_coin_return_day}). The stored headline series is ALL
+# USD (USD through the last USD day, the coin segment converted at the daily closes), so unlike
+# native_unit it must NOT withhold the benchmark: the KPIs run over the whole USD series. It is
+# carried present-only through the wholesale rebuild and never promotes the status.
+# ===========================================================================
+
+_UNIT_SWITCH = {"coin": "BTC", "last_usd_day": "2025-08-05", "first_coin_return_day": "2025-08-06"}
+
+
+class TestUnitSwitchCarry:
+    @pytest.mark.asyncio
+    async def test_the_marker_survives_the_rebuild_and_the_benchmark_is_still_paired(self) -> None:
+        payload, spy, bench = await _run_with_flags(
+            {"csv_source": True, "unit_switch": dict(_UNIT_SWITCH)}
+        )
+        dq = payload["data_quality_flags"]
+        assert dq.get("unit_switch") == _UNIT_SWITCH, (
+            f"the pre-stamped marker must survive the wholesale rebuild; got {dq!r}"
+        )
+        # A denomination note, not a native unit and not a warning.
+        assert "native_unit" not in dq
+        assert payload["computation_status"] == "complete"
+        assert payload["computation_warned"] is False
+        # The headline is USD, so the benchmark is paired normally and its metrics are computed.
+        assert spy.call_args.args[1] is not None
+        bench.assert_awaited_once()
+        nested = payload["metrics_json"]
+        assert nested.get("alpha") is not None and nested.get("beta") is not None
+
+    @pytest.mark.asyncio
+    async def test_a_row_without_the_marker_writes_none(self) -> None:
+        payload, _spy, _bench = await _run_with_flags({"csv_source": True})
+        assert "unit_switch" not in payload["data_quality_flags"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "BTC",
+            ["BTC", "2025-08-05", "2025-08-06"],
+            {"coin": "BTC", "last_usd_day": "2025-08-05"},
+            {**_UNIT_SWITCH, "coin": "btc"},
+            {**_UNIT_SWITCH, "coin": 5},
+            {**_UNIT_SWITCH, "last_usd_day": "yesterday"},
+            {**_UNIT_SWITCH, "first_coin_return_day": "2025-13-40"},
+        ],
+        ids=["string", "list", "missing-key", "lowercase-coin", "int-coin", "bad-day", "impossible-day"],
+    )
+    async def test_a_malformed_marker_is_not_carried(self, bad: object) -> None:
+        payload, _spy, _bench = await _run_with_flags({"csv_source": True, "unit_switch": bad})
+        assert "unit_switch" not in payload["data_quality_flags"]
+
+    @pytest.mark.asyncio
+    async def test_extra_keys_are_dropped_not_published(self) -> None:
+        payload, _spy, _bench = await _run_with_flags(
+            {"csv_source": True, "unit_switch": {**_UNIT_SWITCH, "amount": 123456}}
+        )
+        assert payload["data_quality_flags"]["unit_switch"] == _UNIT_SWITCH
+
+
+# ===========================================================================
 # Phase 164.6.6.2 (D-25) — `small_base_measured` is an INFORMATIONAL annotation: a
 # measured day started from a balance under the unit's material equity, so its return
 # can be extreme and the factsheet says so. It is carried present-only by the wholesale

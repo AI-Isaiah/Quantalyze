@@ -448,6 +448,21 @@ export interface StrategyAnalytics {
   last_success_computed_at?: string | null;
   last_success_native_unit?: string | null;
   /**
+   * Phase 256 plan 08 (D-05) - NOT columns. The three closed scalars of
+   * `data_quality_flags.unit_switch` (`coin`, `last_usd_day`, `first_coin_return_day`), projected as
+   * JSONB aliases by the ranked list read so the list can name a unit switch without the flags blob.
+   * `shapeRowAnalytics` carries them ONLY when the three pass `parseUnitSwitch` together, so a row
+   * either names a real switch or carries none of them (no chip, never a guessed day). Absent on
+   * every USD or native-unit row. The `last_success_` twins are the derive hop's snapshot copy,
+   * evidence INPUTS deleted by `shapeRowAnalytics` like `last_success_native_unit`.
+   */
+  unit_switch_coin?: string | null;
+  unit_switch_last_usd_day?: string | null;
+  unit_switch_first_coin_day?: string | null;
+  last_success_unit_switch_coin?: string | null;
+  last_success_unit_switch_last_usd_day?: string | null;
+  last_success_unit_switch_first_coin_day?: string | null;
+  /**
    * Phase 252 (D-02) — NOT a column. The scalar `data_quality_flags->>mtm_gated_reason`, projected as
    * a JSONB alias by the ranked list projection and the percentile reads, which must not ship the
    * whole flags blob. A closed-vocabulary reason string (`unsmoothed_options_book` is the one the

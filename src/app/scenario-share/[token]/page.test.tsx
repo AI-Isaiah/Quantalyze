@@ -1142,6 +1142,48 @@ describe("ScenarioSharePage — BTC leg shares blend in USD (164.6.6.2 D-22)", (
     expect(html).toContain("My Q3 Blend");
     expect(html).not.toMatch(/\bin BTC\b/);
   });
+
+  // Phase 256 plan 08 (D-05, SC-3; CONTEXT "Readers" bullet 3) - a strategy that moved from USD into a
+  // coin stores ONE all-USD series (the coin part converted at the stored daily close) and no
+  // `native_unit`. This page must therefore read it as a USD leg: no unit, no closes read, the blend
+  // equal to the plain USD one. A unit taken from the switch would convert the series a second time.
+  it("256: a leg whose flags carry a unit_switch (and no native_unit) is a USD leg: no closes read, the markup equals the plain leg's", async () => {
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [{ strategy_id: STRAT_A, returns_series: null, data_quality_flags: {} }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const plainHtml = await renderPage("usd-plain");
+    expect(readBtcClosesMock).not.toHaveBeenCalled();
+
+    readBtcClosesMock.mockResolvedValue(alternatingCloses());
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [
+        {
+          strategy_id: STRAT_A,
+          returns_series: null,
+          data_quality_flags: {
+            unit_switch: { coin: "BTC", last_usd_day: "2026-11-14", first_coin_return_day: "2026-11-15" },
+          },
+        },
+      ],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const switchedHtml = await renderPage("usd-switched");
+
+    expect(readBtcClosesMock).not.toHaveBeenCalled();
+    expect(switchedHtml).toBe(plainHtml);
+    // Non-vacuity: the same leg WITH a native unit is converted and does render differently.
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [{ strategy_id: STRAT_A, returns_series: null, data_quality_flags: { native_unit: "BTC" } }],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+    const nativeHtml = await renderPage("native-control");
+    expect(readBtcClosesMock).toHaveBeenCalledTimes(1);
+    expect(nativeHtml).not.toBe(plainHtml);
+  });
 });
 
 // Phase 164.6.6.2 plan 10, T-164.6.6.2-30 (information disclosure): the widened

@@ -9,7 +9,7 @@ import pandas as pd
 # 167.1.2 D-27: the heuristic-capital anchor threshold below IS the USD dust floor. account_unit is
 # a leaf module (it imports only services.external_flows), so this module-level import cannot
 # close a cycle with services.nav_twr, which imports from this module.
-from services.account_unit import USD_FLOORS
+from services.account_unit import USD_FLOORS, UnitFloors
 
 if TYPE_CHECKING:
     # NavTWRMeta extends ReturnsComputationMeta with the additive DQ-01 guard
@@ -93,6 +93,7 @@ def trades_to_daily_returns_with_status(
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
     full_history: bool = False,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, "NavTWRMeta"]:
     """Audit-2026-05-07 #9 — same conversion as ``trades_to_daily_returns``
     but ALSO returns a ``ReturnsComputationMeta`` describing how
@@ -115,6 +116,12 @@ def trades_to_daily_returns_with_status(
             inception day when it carries a positive flow on a base within tolerance of
             zero (no dust / negative flag, no return). Forwarded to the core unchanged.
             Default ``False`` is byte-identical to every existing caller.
+        floors: 256 OKXUNITSWITCH. The unit the ``account_balance`` and the trades are in:
+            its ``dust_nav`` is the line below which the balance is not a real anchor, and the
+            whole row is forwarded to the core. Default ``USD_FLOORS`` is byte-identical to
+            every existing caller; only the coin segment of a switched account passes a native
+            row, because a coin balance of 2.0 is far above its own dust line and far below a
+            USD one.
 
     Returns:
         ``(returns, meta)`` where ``meta`` is a ``ReturnsComputationMeta``
@@ -181,7 +188,7 @@ def trades_to_daily_returns_with_status(
         # balance is real capital and is the anchor, not a reason to fabricate a
         # heuristic base of at least $10,000 that mis-sizes every return. The
         # point of C-0233 stands: the floor is fixed and absolute, not PnL-scaled.
-        _DUST_BALANCE_THRESHOLD = USD_FLOORS.dust_nav  # USD — fixed, not PnL-scaled
+        _DUST_BALANCE_THRESHOLD = floors.dust_nav  # the unit's dust line — fixed, not PnL-scaled
         min_balance = _DUST_BALANCE_THRESHOLD
         if account_balance and account_balance > min_balance:
             # Real exchange anchor: today's balance IS the terminal NAV. The core
@@ -224,6 +231,7 @@ def trades_to_daily_returns_with_status(
             external_flows=external_flows,
             open_unrealized_usd=open_unrealized_usd,
             full_history=full_history,
+            floors=floors,
         )
         return returns, _merge_status_meta(
             nav_meta,
@@ -241,7 +249,7 @@ def trades_to_daily_returns_with_status(
     # as the daily_pnl branch: one outlier day must not force the heuristic
     # branch when the caller has a legitimate real balance. 167.1.2 D-27: the
     # floor is the USD dust floor (``USD_FLOORS.dust_nav``), not a separate 1000.
-    min_balance_t = USD_FLOORS.dust_nav  # USD — fixed dust floor, matches daily_pnl path
+    min_balance_t = floors.dust_nav  # the unit's fixed dust floor, matches daily_pnl path
     if account_balance and account_balance > min_balance_t:
         # Real anchor: today's balance is the terminal NAV (SC-4 byte-identity
         # for estimated_start>0). A reconstructed non-positive base now FLAGS via
@@ -270,6 +278,7 @@ def trades_to_daily_returns_with_status(
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
         full_history=full_history,
+        floors=floors,
     )
     return returns, _merge_status_meta(
         nav_meta,

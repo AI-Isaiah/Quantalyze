@@ -31,6 +31,8 @@ import {
 // Phase 164.6.6.2 plan 07 (D-12) — the one validator and label composer every
 // unit surface shares.
 import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
+// Phase 256 plan 08 (D-05, UI-SPEC E): the one parser and the one composer of the switch note.
+import { parseUnitSwitch, unitSwitchOgNote } from "@/lib/factsheet/unit-segments";
 // Phase 164.6.6.3.3 (B7, B8, D-07): the sign and the tone of CAGR and Max DD come
 // from the value rounded to the printed precision, so a dash or a rounded zero is
 // never printed with a sign nor coloured.
@@ -308,6 +310,10 @@ export async function GET(
   // renders the USD card. Assigned inside the try below, so a bad read still
   // cannot 500.
   let unit: string | null = null;
+  // Phase 256 plan 08 (D-05, UI-SPEC E): the switch note, from the row's EFFECTIVE flags through
+  // `parseUnitSwitch` (a malformed flag is null, so the card is today's USD card) and composed only by
+  // `unitSwitchOgNote`. Declared beside `unit` so a throw below leaves it null and the card still renders.
+  let switchNote: string | null = null;
   try {
     // The embed unwrap stays — this route reads strategy_analytics as an EMBED
     // (unlike the lazy-returns route, which queries the table directly).
@@ -339,6 +345,12 @@ export async function GET(
     unit = parseReturnsUnit(
       (effectiveFlags as { native_unit?: unknown } | null | undefined)?.native_unit,
     );
+    // Reuses `effectiveFlags` (the recompute-verdict census pins one `effectiveDataQualityFlags`
+    // call in this file). The CAGR label stays `withUnit("CAGR", unit)`: a switched row has no unit.
+    const unitSwitch = parseUnitSwitch(
+      (effectiveFlags as { unit_switch?: unknown } | null | undefined)?.unit_switch,
+    );
+    switchNote = unitSwitch === null ? null : unitSwitchOgNote(unitSwitch);
     const rows = resolveDailyReturnSeries(
       analytics?.daily_returns,
       analytics?.returns_series,
@@ -470,10 +482,15 @@ export async function GET(
         {figureNote && (
           <div style={{ marginTop: 24, fontSize: 20, color: "#64748B" }}>{figureNote}</div>
         )}
+        {/* Phase 256 plan 08 (UI-SPEC E): one note line under the CAGR block, the figureNote style, 8 under a
+            figureNote and 24 when there is none. Present only for a switched strategy. */}
+        {switchNote && (
+          <div style={{ marginTop: figureNote ? 8 : 24, fontSize: 20, color: "#64748B" }}>{switchNote}</div>
+        )}
         {/* Phase 237 FACT-02 (UI-SPEC S5): directly under the stat row, after the figureNote when
             both render (the factsheet header's order). Only while a held re-run's figures are drawn. */}
         {hold.updating && figuresRendered && (
-          <div style={{ marginTop: figureNote ? 8 : 24, fontSize: 20, color: "#64748B" }}>
+          <div style={{ marginTop: figureNote || switchNote ? 8 : 24, fontSize: 20, color: "#64748B" }}>
             {ANALYTICS_UPDATING_LINE}
           </div>
         )}

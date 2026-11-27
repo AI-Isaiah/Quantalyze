@@ -327,7 +327,7 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
     // No stamp and no provenance on the row: both members read the literal "none".
     // 166.3.1 D-05: the row's status is the last member.
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v29", STRATEGY_ID, T0, "none", "none", "complete"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v30", STRATEGY_ID, T0, "none", "none", "complete"]]);
   });
 });
 
@@ -397,7 +397,7 @@ describe("167.1.2.2.2 plan 10 - a tick or a provenance write that leaves compute
     expect(cacheKeys).toHaveLength(1);
     const [version, id, computed, stamp, fingerprint, status] = cacheKeys[0] as string[];
     expect([version, id, computed, stamp, status]).toEqual([
-      "factsheet-v2-payload-v29",
+      "factsheet-v2-payload-v30",
       STRATEGY_ID,
       T0,
       FETCH_1,
@@ -418,7 +418,7 @@ describe("166.3.1 D-05 - the key's last member is the row's computation_status",
       {},
       null,
     );
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v29", STRATEGY_ID, T0, "none", "none", "none"]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v30", STRATEGY_ID, T0, "none", "none", "none"]]);
   });
 });
 
@@ -521,7 +521,7 @@ describe("237 CACHE-03 - a failed BTC price read is rendered, never stored", () 
     expect(second?.usdViewUnavailable).toBeUndefined();
     // Every request used the one shape-versioned key.
     expect(new Set(cacheKeys.map((k) => JSON.stringify(k))).size).toBe(1);
-    expect(cacheKeys[0][0]).toBe("factsheet-v2-payload-v29");
+    expect(cacheKeys[0][0]).toBe("factsheet-v2-payload-v30");
   });
 
   it("BOUNDARY: a no_priced_day build is a data fact and IS stored; request 2 is served from the store", async () => {
@@ -623,5 +623,40 @@ describe("164.6.6.2-07 - the share card link carries the strategy's unit as a ca
     expect(await ogUrl({ data_quality_flags: { native_unit: "b!tc&x=1" } })).toBe(
       `/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`,
     );
+  });
+
+  // Phase 256 plan 08 (D-05, T-256-25): the card gained a switch note, so a switched strategy's URL
+  // carries the coin and the two days. A CDN keeps a card by URL; a card cached before the switch was
+  // stored must not answer under a URL that looks like the plain one.
+  it("a switched strategy's card URL carries the coin and both days, and differs from the plain URL", async () => {
+    const sw = { coin: "BTC", last_usd_day: "2026-11-14", first_coin_return_day: "2026-11-15" };
+    const url = await ogUrl({ data_quality_flags: { unit_switch: sw } });
+    expect(url).toBe(`/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}&us=BTC.2026-11-14.2026-11-15`);
+    expect(url).not.toBe(await ogUrl({ data_quality_flags: {} }));
+  });
+
+  it("the switch key varies with each of its three parts (a later switch or another coin is a new cache entry)", async () => {
+    const at = (over: Record<string, string>) =>
+      ogUrl({
+        data_quality_flags: {
+          unit_switch: { coin: "BTC", last_usd_day: "2026-11-14", first_coin_return_day: "2026-11-15", ...over },
+        },
+      });
+    const base = await at({});
+    expect(await at({ coin: "ETH" })).not.toBe(base);
+    expect(await at({ last_usd_day: "2026-11-15", first_coin_return_day: "2026-11-16" })).not.toBe(base);
+  });
+
+  it("a malformed switch never reaches the URL", async () => {
+    expect(
+      await ogUrl({
+        data_quality_flags: { unit_switch: { coin: "BTC&x=1", last_usd_day: "2026-11-14", first_coin_return_day: "2026-11-15" } },
+      }),
+    ).toBe(`/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`);
+    expect(
+      await ogUrl({
+        data_quality_flags: { unit_switch: { coin: "BTC", last_usd_day: "2026-11-14", first_coin_return_day: "2026-11-17" } },
+      }),
+    ).toBe(`/api/og/factsheet/${STRATEGY_ID}?v=${OG_CARD_VERSION}`);
   });
 });

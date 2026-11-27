@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import math
@@ -114,6 +115,7 @@ from services.db import (
     db_read_with_retry,
     get_supabase,
     one,
+    paginated_select,
     rows,
 )
 from services.encryption import decrypt_credentials, get_kek
@@ -130,10 +132,27 @@ from services.exchange import (
     DAILY_PNL_READ_DEADLINE_S,
     daily_pnl_read_verdict,
     get_and_clear_last_dq_flags,
+    get_and_clear_last_okx_ccy_price,
+    get_and_clear_last_okx_ccy_share,
+    get_and_clear_last_unit_switch_read,
+    UnitSwitchRead,
     OKX_FILLS_REACH_DAYS,
     parse_since_ms,
 )
 from services.exchange_pagination import PaginationCeilingExceeded
+import services.exchange as exchange_module
+from services.unit_switch import (
+    UNIT_SWITCH_REFUSALS,
+    CoinBillCensus,
+    UnitSwitch,
+    UnitSwitchResolver,
+    derive_unit_switch,
+    end_of_day_holdings_from_rows,
+    SplitPnl,
+    split_daily_pnl_at_switch,
+    unusable_holdings_rows,
+)
+from services.unit_switch_series import SWITCH_ANCHOR_UNPRICED, SwitchedSeries, build_switched_series
 from services.ingestion._timestamps import coerce_to_aware_utc
 from services.positions import (
     BYBIT_LIST_NOT_ENDED_REASON,
@@ -5082,6 +5101,51 @@ def _realized_refusal_token(reason: str) -> str:
         return "read_deadline"
     return reason
 
+#: Phase 256 OKXUNITSWITCH plan 06. The strategy derive's OKX unit-switch refusals keep today's named
+#: failure (``daily_pnl_non_usd_okx``, which is a member of ``READ_INCOMPLETE_TOKENS``) and add one
+#: closed DETAIL token to the job message (``unit switch: <token>``). ``UNIT_SWITCH_REFUSALS`` is the
+#: set of tokens the pure switch seam and the series builder can return; the three below are the
+#: derive's own, so they are constants here and the detection set stays the seam's.
+#: ``holdings_read_failed``: the key's ``allocator_holdings`` rows could not be read.
+_UNIT_SWITCH_HOLDINGS_READ_FAILED: Final[str] = "holdings_read_failed"
+#: ``closes_read_failed``: the stored BTC closes could not be read (``BtcClosesReadError``).
+_UNIT_SWITCH_CLOSES_READ_FAILED: Final[str] = "closes_read_failed"
+#: ``marks_read_failed`` and ``stored_returns_read_failed`` (SF3-03): the key's stored NAV marks, or
+#: the stored headline rows through S, could not be read (a failed or capped page, or a row that does
+#: not parse). Named like the two reads above, never left to the generic classifier.
+_UNIT_SWITCH_MARKS_READ_FAILED: Final[str] = "marks_read_failed"
+_UNIT_SWITCH_STORED_RETURNS_READ_FAILED: Final[str] = "stored_returns_read_failed"
+#: ``stored_segments_malformed`` (SF2-01): a stored ``unit_segments`` record exists but cannot be read.
+#: It is refused rather than dropped, because dropping it would overwrite the stored two-unit history.
+#: Permanent (SF3-02): only a refused derive could rewrite the record, so a retry reads the same bytes.
+_UNIT_SWITCH_STORED_MALFORMED: Final[str] = "stored_segments_malformed"
+
+#: The detail tokens a retry can clear (a read that failed, or a latest completed day whose close is
+#: not stored yet); every other unit-switch refusal is permanent because the same history fails the
+#: same way. ``switch_anchor_unpriced`` also names an unusable live equity anchor: with no equity the
+#: anchor cannot be priced into the coin either, and the next read may succeed.
+_UNIT_SWITCH_TRANSIENT_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        _UNIT_SWITCH_HOLDINGS_READ_FAILED,
+        _UNIT_SWITCH_CLOSES_READ_FAILED,
+        _UNIT_SWITCH_MARKS_READ_FAILED,
+        _UNIT_SWITCH_STORED_RETURNS_READ_FAILED,
+        SWITCH_ANCHOR_UNPRICED,
+    }
+)
+
+#: Every detail token that may reach a log line or a job message. A token outside the set is never
+#: echoed, so no venue text, id or amount can ride a unit-switch refusal (T-256-17).
+_UNIT_SWITCH_DETAIL_TOKENS: Final[frozenset[str]] = (
+    UNIT_SWITCH_REFUSALS | _UNIT_SWITCH_TRANSIENT_TOKENS | {_UNIT_SWITCH_STORED_MALFORMED}
+)
+
+#: The ``allocator_holdings`` read is paged (PostgREST returns at most 1000 rows per request); a key
+#: holding a few symbols a day for years stays far under this many pages, so reaching the cap is a
+#: read that cannot be trusted, never a quietly shortened history.
+_UNIT_SWITCH_HOLDINGS_PAGE: Final[int] = 1000
+_UNIT_SWITCH_HOLDINGS_MAX_PAGES: Final[int] = 100
+
 #: A recorded exception class name is kept only when it is a plain identifier (never venue text).
 _READ_INCOMPLETE_CLASS_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 
@@ -5719,6 +5783,133 @@ def _native_key_usd_writer_basis(
     return composed_day_pnl, composed_flows
 
 
+class _SwitchedKeyUsd(NamedTuple):
+    """A switched OKX key's whole-history USD inputs for its ``key_inputs`` row (Phase 256 plan 09).
+
+    ``day_pnl`` is the USD day P&L over the whole history (the USD segment's own P&L plus funding
+    through S, the coin segment's native P&L priced at ITS OWN day's close after it);
+    ``realized_terminal`` the realized USD level on the last priced day; ``unpriced_days`` and
+    ``segment_terminals`` the same pair a native-unit key states (``hole_segment_ends`` finds the same
+    holes on both sides), now over the whole key."""
+
+    day_pnl: "pd.Series"
+    realized_terminal: "tuple[pd.Timestamp, float] | None"
+    priced_through: str | None
+    unpriced_days: list[str]
+    segment_terminals: "list[tuple[str, float]]"
+
+
+def _switched_key_usd(
+    *,
+    switch: UnitSwitch,
+    switched: SwitchedSeries,
+    split: SplitPnl,
+    funding_rows: "list[Any]",
+    external_flows: "list[Any]",
+    closes: "pd.Series",
+) -> _SwitchedKeyUsd:
+    """The USD inputs a switched key's ``key_inputs`` row states beside its whole-history headline.
+
+    The coin segment goes through ``_convert_native_key_to_usd`` (the native-key precedent: every
+    figure is the native one priced at the stored close of ITS OWN day, an unpriced day is omitted
+    and NAMED, never priced at a neighbour). Its native series is the builder's, with the base day S
+    prepended (the converter drops the first point, as it does for any series). The USD segment
+    contributes its own day P&L (stable P&L from the split plus the funding rows dated through S).
+
+    The converter finds holes among the coin days only. A switched key's whole series also has the
+    USD segment, so the hole ends and their levels are recomputed over the WHOLE key's event days
+    (a hole just after S ends at S, whose level is the coin base level at S's close). A hole end
+    before S states no level (``coin_nav_levels`` starts at S): the compose then reports the missing
+    level by name and composes the key unsplit, never a guess.
+
+    No writer basis is built: ``WRITER_BASIS_VENUES`` is MT5 and Deribit, a ccxt key composes on the
+    stored returns (exact here: a coin day's USD return ``(1+r)*c_d/c_{d-1}-1`` inverts with the
+    flow priced at its own day's close, which is the USD flow the key already stores)."""
+    import pandas as pd
+
+    from services.allocator_equity_compose import hole_segment_ends
+    from services.broker_dailies import _funding_iso_day
+    from services.native_to_usd import _usable_closes
+
+    close_by_day = _usable_closes(closes)
+    s_iso = switch.last_usd_day
+    s_ts = pd.Timestamp(s_iso)
+    coin_returns = switched.coin_returns
+    base = pd.Series(
+        [float("nan")],
+        # The coin segment's base day: S, or the day before the bills window when S is older (CR-02).
+        index=pd.DatetimeIndex([pd.Timestamp(switched.coin_base_day)]).as_unit(
+            pd.DatetimeIndex(coin_returns.index).unit
+        ),
+        dtype="float64",
+    )
+    coin = _convert_native_key_to_usd(
+        unit=switch.coin,
+        closes=closes,
+        native_returns=pd.concat([base, coin_returns]),
+        native_day_pnl=switched.coin_day_pnl,
+        native_nav_levels=switched.coin_nav_levels,
+        native_flow_by_day=switched.coin_flow_by_day,
+    )
+
+    usd_pnl: dict[str, float] = dict(split.usd_by_day)
+    for row in funding_rows:
+        day = _funding_iso_day(row.get("timestamp"))
+        if day is None or day > s_iso:
+            continue
+        try:
+            amount = float(row["amount"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if math.isfinite(amount):
+            usd_pnl[day] = usd_pnl.get(day, 0.0) + amount
+    usd_series = pd.Series(
+        list(usd_pnl.values()),
+        index=pd.DatetimeIndex([pd.Timestamp(d) for d in usd_pnl]).as_unit("us"),
+        dtype="float64",
+    )
+    coin_pnl = coin.day_pnl.copy()
+    coin_pnl.index = pd.DatetimeIndex(coin_pnl.index).as_unit("us")
+    day_pnl = pd.concat([usd_series, coin_pnl]).sort_index()
+
+    headline = switched.headline
+    finite = headline.notna().to_numpy()
+    finite_days = {ts.date().isoformat() for ts in headline.index[finite]}
+    realized_terminal = coin.realized_terminal
+    priced_through = coin.priced_through
+    if realized_terminal is None:
+        # No coin day was priced: the series ends on its last USD day. It is stated as a terminal
+        # only when that day is S, whose level (the coin base level at S's close) is the USD
+        # segment's own anchor.
+        priced_through = max(finite_days) if finite_days else None
+        s_close = close_by_day.get(s_ts)
+        if priced_through == s_iso and s_close is not None:
+            realized_terminal = (s_ts, float(switched.coin_base_level) * s_close)
+
+    event_days = set(finite_days)
+    event_days |= {str(flow[0])[:10] for flow in external_flows}
+    event_days |= {
+        ts.date().isoformat() for ts in headline.index[~finite] if ts in day_pnl.index
+    }
+    unpriced = list(coin.unpriced_days)
+    segment_terminals: list[tuple[str, float]] = []
+    for end_iso in hole_segment_ends(event_days, unpriced):
+        end_ts = pd.Timestamp(end_iso)
+        levels_to_end = switched.coin_nav_levels[switched.coin_nav_levels.index <= end_ts]
+        end_close = close_by_day.get(end_ts)
+        if levels_to_end.empty or end_close is None:
+            continue  # no level to state; the compose reports the missing one, never a guess
+        segment_terminals.append((end_iso, float(levels_to_end.iloc[-1]) * end_close))
+
+    return _SwitchedKeyUsd(
+        day_pnl=day_pnl,
+        realized_terminal=realized_terminal,
+        priced_through=priced_through,
+        unpriced_days=unpriced,
+        segment_terminals=segment_terminals,
+    )
+
+
 def _ccxt_full_history_verdict(
     venue: str, realized: Any, funding: Any, now_utc: datetime
 ) -> bool:
@@ -5910,6 +6101,193 @@ async def _read_okx_option_refusal_once_per_day(ctx: Any, marked_at: datetime) -
             type(exc).__name__, key_id,
         )
     return "option_value_unreadable"
+
+
+def _unit_segment_points(series: "pd.Series", *, through: str | None = None) -> list[dict[str, Any]]:
+    """``[{"date": ISO, "value": float}]`` for the finite points of ``series``, optionally only the
+    days on or before ``through``. A NaN or infinite point is a day with no return, never a zero,
+    and JSON cannot hold it, so it is left out."""
+    points: list[dict[str, Any]] = []
+    for ts, value in series.items():
+        day = ts.date().isoformat()
+        if through is not None and day > through:
+            continue
+        number = float(value)
+        if math.isfinite(number):
+            points.append({"date": day, "value": number})
+    return points
+
+
+_UNIT_SEGMENT_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _stored_unit_switch(segments: object) -> UnitSwitch | None:
+    """The switch a stored ``unit_segments`` record states (version 1: a USD segment ending at S and
+    a coin segment based at S), or ``None`` when the record is absent or malformed. The record is a
+    worker-written JSONB read back, so every field is validated; a bad record is no switch, never a
+    half-described one (CR-02)."""
+    if not isinstance(segments, dict) or segments.get("version") != 1:
+        return None
+    parts = segments.get("segments")
+    if not isinstance(parts, list) or len(parts) != 2:
+        return None
+    usd, coin = parts
+    if not (isinstance(usd, dict) and isinstance(coin, dict)) or usd.get("unit") != "USD":
+        return None
+    code, last_usd_day, first_coin_day = coin.get("unit"), usd.get("to_day"), coin.get("from_day")
+    if not (
+        isinstance(code, str)
+        and re.fullmatch(r"[A-Z]{2,10}", code)
+        and isinstance(last_usd_day, str)
+        and isinstance(first_coin_day, str)
+        and _UNIT_SEGMENT_DAY_RE.fullmatch(last_usd_day)
+        and _UNIT_SEGMENT_DAY_RE.fullmatch(first_coin_day)
+    ):
+        return None
+    try:
+        if date.fromisoformat(first_coin_day) != date.fromisoformat(last_usd_day) + timedelta(days=1):
+            return None
+    except ValueError:
+        return None
+    return UnitSwitch(coin=code, last_usd_day=last_usd_day, first_coin_return_day=first_coin_day)
+
+
+def _carry_older_points(
+    stored: object, fresh: "list[dict[str, Any]]", *, through: str | None = None
+) -> "list[dict[str, Any]]":
+    """``fresh`` preceded by the stored segment points dated before its first point (or, with no fresh
+    point, up to ``through``). The bills read reaches back a fixed window, so a derive rebuilds only
+    the days inside it; the older days of the segment live in the record the last derive stored."""
+    older: list[dict[str, Any]] = []
+    if isinstance(stored, dict) and isinstance(stored.get("returns"), list):
+        cut = fresh[0]["date"] if fresh else None
+        for point in stored["returns"]:
+            if not (isinstance(point, dict) and isinstance(point.get("date"), str)):
+                continue
+            value = point.get("value")
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                continue
+            day = point["date"]
+            if (cut is not None and day >= cut) or (through is not None and day > through):
+                continue
+            older.append({"date": day, "value": float(value)})
+    return [*older, *fresh]
+
+
+def _fresh_coin_start(switched: SwitchedSeries) -> str:
+    """The first coin return day this derive rebuilt (the day after the coin base)."""
+    return (date.fromisoformat(switched.coin_base_day) + timedelta(days=1)).isoformat()
+
+
+def _key_binding(key_id: str) -> str:
+    """R3-01: the one-way digest a stored ``unit_segments`` record binds itself to its key by. The
+    record sits in ``strategy_analytics``, which anon can read for a published strategy, and a key id
+    is the handle that targets an exchange key (Phase 170.6.1.1 ANONKEYID), so the id itself is never
+    stored there. A key id is a random UUID, so its unsalted SHA-256 cannot be walked back to it."""
+    return hashlib.sha256(key_id.encode("utf-8")).hexdigest()
+
+
+def _unit_segments_payload(
+    switch: UnitSwitch,
+    switched: SwitchedSeries,
+    final_returns: "pd.Series",
+    stored_segments: object = None,
+    stored_usd_rows: "list[dict[str, Any]] | None" = None,
+    *,
+    api_key_id: str,
+) -> dict[str, Any]:
+    """The stored ``strategy_analytics.unit_segments`` object of a switched strategy (Phase 256
+    plan 02 header): the USD segment is the FINAL headline (after the marks) through the last USD
+    day, the coin segment is the account's NATIVE coin returns from the first coin return day, and
+    ``unpriced_days`` names the coin days that formed a native return but have no priced headline
+    day. The two segments are never chained; each carries its own unit."""
+    fresh_usd_points = _unit_segment_points(final_returns, through=switch.last_usd_day)
+    usd_points = fresh_usd_points
+    coin_points = _unit_segment_points(switched.coin_returns)
+    carried_unpriced: list[str] = []
+    carried_withheld: list[str] = []
+    if _stored_unit_switch(stored_segments) == switch and isinstance(stored_segments, dict):
+        # CR-02: the switch persisted from an earlier derive, whose record holds the days this
+        # derive's bills window no longer reaches. Keep them: the chart's USD segment and the coin
+        # segment cover the whole stored history, not only the window.
+        stored_usd, stored_coin = stored_segments["segments"]
+        usd_points = _carry_older_points(stored_usd, usd_points, through=switch.last_usd_day)
+        coin_points = _carry_older_points(stored_coin, coin_points)
+        stored_unpriced = stored_segments.get("unpriced_days")
+        if isinstance(stored_unpriced, list):
+            carried_unpriced = [
+                day
+                for day in stored_unpriced
+                if isinstance(day, str)
+                and _UNIT_SEGMENT_DAY_RE.fullmatch(day)
+                and day < _fresh_coin_start(switched)
+            ]
+        # R3-06: the withheld mixed days sit before S, so a later derive's window may not reach them;
+        # the ones older than this derive's own USD days are carried.
+        stored_withheld = stored_segments.get("withheld_days")
+        if isinstance(stored_withheld, list):
+            fresh_usd_start = (
+                switched.usd_returns.index.min().date().isoformat()
+                if len(switched.usd_returns)
+                else switch.first_coin_return_day
+            )
+            carried_withheld = [
+                day
+                for day in stored_withheld
+                if isinstance(day, str)
+                and _UNIT_SEGMENT_DAY_RE.fullmatch(day)
+                and day < fresh_usd_start
+            ]
+    if len(usd_points) == len(fresh_usd_points):
+        # R2-03: no record carried older USD points (the first switched derive), but the stored
+        # headline rows through S are the same figures. The chart's USD segment then covers the
+        # whole record, like the KPIs, not only the days of this derive's bills window.
+        usd_points = _carry_older_points(
+            {"returns": stored_usd_rows or []}, fresh_usd_points, through=switch.last_usd_day
+        )
+    # A day the marks (or a carried hole) gave a figure is not withheld: the disclosure names only
+    # the days the FINAL headline lacks (WR-02).
+    final_days = {point["date"] for point in _unit_segment_points(final_returns)}
+    # R3-06: ``unpriced_days`` means "no stored close" and nothing else. The withheld mixed days and
+    # the coin-gap days have closes, so they ride ``withheld_days`` and the reader words them apart.
+    withheld_fresh = set(switched.withheld_days)
+    unpriced_days = [
+        day for day in switched.unpriced_days if day not in final_days and day not in withheld_fresh
+    ]
+    withheld_days = [day for day in switched.withheld_days if day not in final_days]
+    # SF2-03: coin days between the first coin return day and the first coin point have no point
+    # (the bills window starts after S on a first derive). The segment is declared from the first
+    # coin day, so the gap is named and the chart cannot draw a line across it.
+    if coin_points:
+        gap_day = date.fromisoformat(switch.first_coin_return_day)
+        while gap_day.isoformat() < coin_points[0]["date"]:
+            withheld_days.append(gap_day.isoformat())
+            gap_day += timedelta(days=1)
+    return {
+        "version": 1,
+        # R2-05: the key the switch was derived from. A strategy can be re-pointed to another key,
+        # and a record is evidence about its own key only. R3-01: bound by digest, never by the id.
+        "key_binding": _key_binding(api_key_id),
+        "segments": [
+            {
+                "unit": "USD",
+                "from_day": usd_points[0]["date"] if usd_points else switch.last_usd_day,
+                "to_day": switch.last_usd_day,
+                "returns": usd_points,
+            },
+            {
+                "unit": switch.coin,
+                "base_day": switch.last_usd_day,
+                "from_day": switch.first_coin_return_day,
+                "to_day": (
+                    coin_points[-1]["date"] if coin_points else switch.first_coin_return_day
+                ),
+                "returns": coin_points,
+            },
+        ],
+        "unpriced_days": sorted({*carried_unpriced, *unpriced_days}),
+        "withheld_days": sorted({*carried_withheld, *withheld_days}),
+    }
 
 
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
@@ -6198,7 +6576,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         return marked
 
     async def _refuse_incomplete_read(
-        token: str, error_class: str | None, *, permanent: bool, read: str = "realized"
+        token: str,
+        error_class: str | None,
+        *,
+        permanent: bool,
+        read: str = "realized",
+        detail: str | None = None,
     ) -> DispatchResult:
         """Phase 186 D-05 / SC-2: refuse a truncated or failed realized or funding read BY NAME.
 
@@ -6207,11 +6590,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         mode the key is marked ``read_incomplete:<api_key_id>`` (owner-only, never raises) and the
         compose is enqueued so the book names it at once. ``allocator_id`` is the key row's owner,
         never a job-payload value. Only the closed ``token`` and a class NAME reach the log, the
-        marker and the result: never a venue message, which can carry a signed URL."""
+        marker and the result: never a venue message, which can carry a signed URL.
+
+        Phase 256 plan 06: ``detail`` is an optional closed unit-switch token (a member of
+        ``_UNIT_SWITCH_DETAIL_TOKENS``). It rides the log line, the stamp's detail and the result
+        message as ``unit switch: <detail>`` so the refusal says WHICH switch rule refused, while the
+        recorded token stays ``daily_pnl_non_usd_okx``. Anything outside the closed set is dropped."""
+        if detail is not None and detail not in _UNIT_SWITCH_DETAIL_TOKENS:
+            detail = None
+        _token_text = token if detail is None else f"{token}; unit switch: {detail}"
         logger.warning(
             "derive_broker_dailies: %s read incomplete (venue=%s, token=%s, class=%s) - "
             "refusing the key, nothing written",
-            read, venue, token, error_class,
+            read, venue, _token_text, error_class,
         )
         marked = True
         if is_key_mode:
@@ -6273,19 +6664,185 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "We could not read this account's full history from the exchange, so these numbers stay at the last complete read."
                     if _has_numbers
                     else "",
-                    detail=token,
+                    detail=_token_text,
                     heal_series=False,
                     keep_numbers=_has_numbers,
                     final_refusal=_refusal_is_final,
                 )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
-            error_message=f"derive_broker_dailies: {read} read incomplete ({token})",
+            error_message=f"derive_broker_dailies: {read} read incomplete ({_token_text})",
             # A refusal whose marker did not land names nobody and, as a permanent failure, is
             # never retried, so the key would stay unnamed until the next day's derive (review
             # SFH-2). Transient: the retry writes the marker.
             error_kind="permanent" if permanent and marked else "transient",
         )
+
+    # ── Phase 256 OKXUNITSWITCH plans 06 and 09 — the derive's unit-switch resolver ───────────
+    # An OKX account that moves from USDT into a coin has bills in two units. The bills read
+    # (``fetch_daily_pnl``) books the coin bills only when it is handed a resolver, and ONLY this
+    # derive hands it one, in both modes for OKX (plan 06 strategy mode, plan 09 key mode). The
+    # resolver reads the key's stored holdings and answers with the derived switch or a closed
+    # refusal token; it never guesses a date. ``_okx_ccy_share`` is the live per-coin share of the
+    # SAME balance response the equity anchor was read from (drained right after that read); it
+    # stands in for holdings history a key does not have.
+    _okx_ccy_share: dict[str, float] | None = None
+    # WR-01: the live USD price per coin from the same response, the price the coin anchor is
+    # converted at (the live equity is a live-price figure; yesterday's close is not its price).
+    _okx_ccy_price: dict[str, float] | None = None
+    # CR-02: the two-unit record an earlier derive stored for this account (strategy row's
+    # ``unit_segments``, or the key's ``key_inputs`` payload) and the switch it states. A switch,
+    # once derived, persists: the bills read reaches back a fixed window, so the coin bills that
+    # showed it age out and an empty census must not read as "no switch".
+    _stored_segments: dict[str, Any] | None = None
+    _stored_switch: UnitSwitch | None = None
+
+    async def _read_stored_unit_segments() -> dict[str, Any] | str | None:
+        def _read() -> object:
+            if is_key_mode:
+                res = (
+                    ctx.supabase.table("allocator_equity_derived")
+                    .select("payload")
+                    .eq("allocator_id", allocator_id)
+                    .eq("kind", "key_inputs:" + api_key_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None)
+                payload = row.get("payload") if isinstance(row, dict) else None
+                return payload.get("unit_segments") if isinstance(payload, dict) else None
+            res = (
+                ctx.supabase.table("strategy_analytics")
+                .select("unit_segments")
+                .eq("strategy_id", strategy_id)
+                .maybe_single()
+                .execute()
+            )
+            row = getattr(res, "data", None)
+            return row.get("unit_segments") if isinstance(row, dict) else None
+
+        stored = await db_read_with_retry(_read)
+        if stored is None:
+            return None
+        if not isinstance(stored, dict) or _stored_unit_switch(stored) is None:
+            # SF2-01: a record that exists but cannot be read is not "no switch". Treating it as
+            # absent would let this derive overwrite the stored two-unit history with a plain USD
+            # one. Only its shape is logged, never a value.
+            logger.warning(
+                "derive_broker_dailies: stored unit_segments is unreadable (label=%s, type=%s, keys=%s)",
+                funding_label, type(stored).__name__,
+                sorted(str(k) for k in stored) if isinstance(stored, dict) else [],
+            )
+            return _UNIT_SWITCH_STORED_MALFORMED
+        if stored.get("key_binding") != _key_binding(ctx.key_row["id"]):
+            # R2-05: the strategy was re-pointed to another key, so the record says nothing about
+            # this one: the switch is derived from scratch, with no refusal.
+            return None
+        return stored
+
+    # R2-03: the headline rows this account already stores through S, read once a switch is booked,
+    # so the first switched derive seeds the chart's USD segment with the whole stored history.
+    _stored_usd_rows: list[dict[str, Any]] = []
+
+    async def _read_stored_usd_rows(through: str) -> list[dict[str, Any]] | str:
+        """The stored headline rows through ``through``, or the closed transient token when the read
+        (or a row's parse) failed (SF3-03)."""
+
+        def _read() -> list[dict[str, Any]]:
+            builder = (
+                ctx.supabase.table("csv_daily_returns")
+                .select("date, daily_return")
+                .eq("api_key_id" if is_key_mode else "strategy_id", api_key_id if is_key_mode else strategy_id)
+                .lte("date", through)
+            )
+            return paginated_select(
+                builder, order_by=(("date", False),), truncation_hint="csv_daily_returns unit switch seed"
+            )
+
+        try:
+            found = await db_execute(_read)
+            return [
+                {"date": str(r["date"])[:10], "value": float(r["daily_return"])}
+                for r in found
+                if r.get("daily_return") is not None and math.isfinite(float(r["daily_return"]))
+            ]
+        except _READ_PROGRAMMING_ERRORS:
+            raise
+        except Exception as _rows_exc:  # noqa: BLE001 - named refusal, class name only
+            logger.warning(
+                "derive_broker_dailies: unit switch stored returns read failed (label=%s, error=%s)",
+                funding_label, type(_rows_exc).__name__,
+            )
+            return _UNIT_SWITCH_STORED_RETURNS_READ_FAILED
+
+    _unit_switch_read: UnitSwitchRead | None = None
+
+    async def _resolve_unit_switch(census: CoinBillCensus) -> UnitSwitch | str:
+        key_id = ctx.key_row["id"]
+
+        def _read_holdings() -> list[dict[str, Any]]:
+            found: list[dict[str, Any]] = []
+            start = 0
+            for _page in range(_UNIT_SWITCH_HOLDINGS_MAX_PAGES):
+                res = (
+                    ctx.supabase.table("allocator_holdings")
+                    .select("symbol, value_usd, asof, holding_type")
+                    .eq("api_key_id", key_id)
+                    .order("asof")
+                    .order("id")
+                    .range(start, start + _UNIT_SWITCH_HOLDINGS_PAGE - 1)
+                    .execute()
+                )
+                batch = getattr(res, "data", None)
+                if not isinstance(batch, list):
+                    raise RuntimeError("allocator_holdings read returned no row list")
+                if not batch:
+                    return found
+                found.extend(r for r in batch if isinstance(r, dict))
+                # Advance by what came back, and stop only on an EMPTY page: PostgREST clamps a
+                # range to its max_rows, so a short page is not the last one (the
+                # ``read_key_marks`` rule).
+                start += len(batch)
+            raise RuntimeError("allocator_holdings read hit its page cap")
+
+        try:
+            holdings_rows = await db_execute(_read_holdings)
+        except _READ_PROGRAMMING_ERRORS:
+            raise
+        except Exception as _holdings_exc:  # noqa: BLE001 - named refusal, class name only
+            logger.warning(
+                "derive_broker_dailies: unit switch holdings read failed (label=%s, error=%s)",
+                funding_label, type(_holdings_exc).__name__,
+            )
+            return _UNIT_SWITCH_HOLDINGS_READ_FAILED
+        # SF-05: a spot row that does not parse is left out of the shares, so its count is logged and
+        # a history that is mostly unusable is not trusted (closed token, no row content).
+        _spot_rows, _unusable_rows = unusable_holdings_rows(holdings_rows)
+        if _unusable_rows:
+            logger.warning(
+                "derive_broker_dailies: unit switch holdings rows skipped (label=%s, skipped=%d of %d)",
+                funding_label, _unusable_rows, _spot_rows,
+            )
+        if _unusable_rows * 2 > _spot_rows:
+            return "holdings_unavailable"
+        return derive_unit_switch(
+            census,
+            end_of_day_holdings_from_rows(holdings_rows),
+            _okx_ccy_share,
+            prior=_stored_switch,
+        )
+
+    _unit_switch_resolver: UnitSwitchResolver | None = (
+        _resolve_unit_switch if venue == "okx" else None
+    )
+    # The derived switch and its native two-unit series, set at the combine site when the bills
+    # read found a switch. ``None`` for every account that did not switch.
+    _unit_switch: UnitSwitch | None = None
+    _switched: SwitchedSeries | None = None
+    # Key mode only (plan 09): the switched key's whole-history USD inputs (day P&L, realized
+    # terminal, unpriced days, segment terminals), derived from ``_switched`` and the stored closes
+    # at the same combine site. ``None`` for every account that did not switch.
+    _switched_key: "_SwitchedKeyUsd | None" = None
 
     # MTM-01 (Phase 101): the additive single-key mark_to_market SECOND pass
     # (Deribit options books only). Initialized at the branch-OUTER scope so the
@@ -9569,6 +10126,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 # 167.2.1.1.1 D-03: the instant this equity read finished is the mark's read time.
                 _mark_read_at = _utc_now()
+                # Phase 256: drain the live per-coin share the OKX balance response recorded, on the
+                # statement right after the awaited read (a later read on this task would reset it).
+                _okx_ccy_share = get_and_clear_last_okx_ccy_share() if venue == "okx" else None
+                _okx_ccy_price = get_and_clear_last_okx_ccy_price() if venue == "okx" else None
                 if venue in _NAV_MARK_MARKED_EQUITY_VENUES:
                     # Plan 15 (L4, D-16): Bybit and Binance marked equity needs a read the
                     # derive's walletBalance-only figure above does not make. At most once per
@@ -9591,13 +10152,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _okx_option_refusal = await _read_okx_option_refusal_once_per_day(
                         ctx, _mark_read_at
                     )
+                if venue == "okx":
+                    _stored_read = await _read_stored_unit_segments()
+                    if isinstance(_stored_read, str):
+                        return await _refuse_incomplete_read(
+                            "daily_pnl_non_usd_okx",
+                            None,
+                            permanent=_stored_read not in _UNIT_SWITCH_TRANSIENT_TOKENS,
+                            detail=_stored_read,
+                        )
+                    _stored_segments = _stored_read
+                    _stored_switch = _stored_unit_switch(_stored_segments)
                 # since_ms=None ⇒ ENTIRE account history (OKX inception via archive
                 # bills, Binance inception, Bybit last 365 days).
+                # Phase 256: the resolver is passed ONLY when there is one (strategy-mode OKX), so
+                # every other call (key mode, every other venue) is byte-identical to before.
                 realized = await asyncio.wait_for(
-                    fetch_all_trades(
-                        ctx.exchange,
-                        since_ms=None,
-                        read_deadline_s=DAILY_PNL_READ_DEADLINE_S,
+                    (
+                        fetch_all_trades(
+                            ctx.exchange,
+                            since_ms=None,
+                            read_deadline_s=DAILY_PNL_READ_DEADLINE_S,
+                        )
+                        if _unit_switch_resolver is None
+                        else fetch_all_trades(
+                            ctx.exchange,
+                            since_ms=None,
+                            read_deadline_s=DAILY_PNL_READ_DEADLINE_S,
+                            unit_switch=_unit_switch_resolver,
+                        )
                     ),
                     timeout=_BROKER_CRAWL_TIMEOUT_S,
                 )
@@ -9607,6 +10190,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # or failed realized read is refused here, before any funding call and before any
                 # write; a swallowed venue rate limit is re-raised for the outer 429 arm.
                 _realized_dq_flags = get_and_clear_last_dq_flags()
+                # Phase 256: the unit-switch side channel is drained on the same statement run, for
+                # the same reason (the funding crawl below runs on this task and must not see it).
+                _unit_switch_read = get_and_clear_last_unit_switch_read()
                 _realized_verdict = daily_pnl_read_verdict(_realized_dq_flags)
                 _daily_pnl_malformed = sorted(
                     key
@@ -9635,11 +10221,50 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         and isinstance(_attempts_so_far, int)
                         and _attempts_so_far >= 2
                     )
+                    # Phase 256: when the refusal is the non-USD one and the resolver refused, say
+                    # which rule did (closed token only). The recorded token is unchanged.
+                    _switch_refusal: str | None = None
+                    if (
+                        _refusal_token == "daily_pnl_non_usd_okx"
+                        and _unit_switch_read is not None
+                        and _unit_switch_read.refusal in _UNIT_SWITCH_DETAIL_TOKENS
+                    ):
+                        _switch_refusal = _unit_switch_read.refusal
                     return await _refuse_incomplete_read(
                         _refusal_token,
                         _realized_verdict.error_class,
-                        permanent=_refusal_token not in _TRANSIENT_REFUSAL_TOKENS
-                        or _deadline_is_a_repeat,
+                        permanent=(
+                            _refusal_token not in _TRANSIENT_REFUSAL_TOKENS
+                            or _deadline_is_a_repeat
+                        )
+                        and _switch_refusal not in _UNIT_SWITCH_TRANSIENT_TOKENS,
+                        detail=_switch_refusal,
+                    )
+                if venue == "okx" and _unit_switch_read is None and _stored_switch is not None:
+                    # CR-02: no coin bill is in the bills window any more, so the resolver was never
+                    # awaited. The stored switch stands unless the evidence now contradicts it; the
+                    # stable P&L is the records this read returned and there is no coin P&L.
+                    _kept = await _resolve_unit_switch({})
+                    if isinstance(_kept, str):
+                        return await _refuse_incomplete_read(
+                            "daily_pnl_non_usd_okx",
+                            None,
+                            permanent=_kept not in _UNIT_SWITCH_TRANSIENT_TOKENS,
+                            detail=_kept,
+                        )
+                    _kept_stable: dict[str, float] = {}
+                    for _record in realized:
+                        _day = str(_record.get("timestamp", ""))[:10]
+                        _amount = float(_record.get("price") or 0.0)
+                        _kept_stable[_day] = _kept_stable.get(_day, 0.0) + (
+                            _amount if _record.get("side") == "buy" else -_amount
+                        )
+                    _unit_switch_read = UnitSwitchRead(
+                        switch=_kept,
+                        refusal=None,
+                        census={},
+                        stable_by_day=dict(sorted(_kept_stable.items())),
+                        coin_by_day={},
                     )
                 # Phase 186 D-05 ("realized or funding read"): a funding read that hit its page
                 # ceiling or dropped a malformed row (``on_malformed="raise"``, 186-04
@@ -10040,26 +10665,200 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         ):
             open_unrealized_usd = 0.0
 
-        try:
-            # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
-            # core's terminal seam (broker_dailies passes it straight to
-            # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor
-            # is KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
-            # derive path writes ONLY csv_daily_returns and never mutates `equity`
-            # (Q4 tail). OKX subtracts the real wedge (realized-basis terminal);
-            # Bybit/Binance passed 0.0 above (no double-count).
-            returns, meta = combine_realized_and_funding(
-                realized, funding, account_balance=equity,
-                balance_error=balance_error,
-                external_flows=external_flows,
-                open_unrealized_usd=open_unrealized_usd,
-                # 164.6.6.2.3 D-11: the account's first day is its inception when its
-                # P&L history starts inside the venue's flow coverage (the same
-                # verdict the stitched member passes). The derive's own ``_now_utc``.
-                full_history=_ccxt_full_history_verdict(
-                    venue, realized, funding, _now_utc
-                ),
+        async def _book_switched_series(
+            read: UnitSwitchRead, switch: UnitSwitch
+        ) -> SwitchedSeries | str:
+            """Phase 256: the whole-history USD headline of a switched OKX account, or the closed
+            token the derive refuses under. Reads the stored BTC closes ONCE; the P&L split, the
+            two engine runs and the conversion are the pure seam's (``services.unit_switch`` and
+            ``services.unit_switch_series``), so nothing here chooses a date or a price."""
+            from services.benchmark import BtcClosesReadError, read_btc_closes
+            from services.broker_dailies import _funding_iso_day
+            from services.native_to_usd import _usable_closes
+
+            nonlocal _switched_key
+            if (
+                balance_error
+                or equity is None
+                or not math.isfinite(float(equity))
+                or float(equity) <= 0.0
+            ):
+                # No usable live equity: the coin segment cannot be anchored (priced into the coin).
+                return SWITCH_ANCHOR_UNPRICED
+            # The latest COMPLETED UTC day: the last day a close can exist for. A row dated after it
+            # (today, read at 05:30Z) has no close, and the builder would refuse it as
+            # ``coin_segment_unpriced``, which a derive that runs every night would hit on most
+            # days (an OKX funding row lands at 00:00Z). So today's P&L and funding rows are LEFT TO
+            # THE NEXT DERIVE: the series ends at the latest completed day and the live equity is
+            # the anchor of that day, exactly as the builder takes it. Known limit, recorded: the
+            # part of today's realized P&L and funding already inside the live equity stays inside
+            # the anchor for one night.
+            latest_close_day = (_now_utc.date() - timedelta(days=1)).isoformat()
+            _anchor_price = (_okx_ccy_price or {}).get(switch.coin)
+            if _anchor_price is None or not math.isfinite(_anchor_price) or _anchor_price <= 0.0:
+                # The balance response carries no readable live price for the coin, so the equity
+                # cannot be priced into it. Never a fallback to yesterday's close (WR-01).
+                return SWITCH_ANCHOR_UNPRICED
+            if switch.last_usd_day > latest_close_day:
+                # The account switched today: S has no completed close yet, tomorrow it will.
+                return SWITCH_ANCHOR_UNPRICED
+            # A deposit or withdrawal dated today is inside the live equity and has no completed day
+            # to book it on (SF-02). It is left to the next derive like today's P&L and funding rows:
+            # taken out of the anchor, so the series ends at the latest completed day on the equity
+            # of that day, and out of the flows the builder books.
+            _flows_after_close = [
+                flow for flow in (external_flows or []) if str(flow[0])[:10] > latest_close_day
+            ]
+            _booked_flows = [
+                flow for flow in (external_flows or []) if str(flow[0])[:10] <= latest_close_day
+            ]
+            _anchor_usd = float(equity) - sum(float(flow[1]) for flow in _flows_after_close)
+            if not math.isfinite(_anchor_usd) or _anchor_usd <= 0.0:
+                return SWITCH_ANCHOR_UNPRICED
+            try:
+                stored_closes = await read_btc_closes()
+            except BtcClosesReadError:
+                return _UNIT_SWITCH_CLOSES_READ_FAILED
+            if stored_closes is None:
+                # The store answered and holds no usable close at all (a failed ingestion, not a
+                # missing day): nothing can price the anchor, and a later read may find closes.
+                return SWITCH_ANCHOR_UNPRICED
+            closes = stored_closes
+            closes_by_day = {
+                ts.date().isoformat(): value for ts, value in _usable_closes(closes).items()
+            }
+            split = split_daily_pnl_at_switch(
+                {d: v for d, v in read.stable_by_day.items() if d <= latest_close_day},
+                {d: v for d, v in read.coin_by_day.items() if d <= latest_close_day},
+                switch,
+                closes_by_day,
             )
+            funding_rows = [
+                row
+                for row in funding
+                if (day := _funding_iso_day(row.get("timestamp"))) is None
+                or day <= latest_close_day
+            ]
+            if isinstance(split, str):
+                return split
+            try:
+                _stored_marks = await db_execute(
+                    lambda: read_key_marks(ctx.supabase, ctx.key_row["id"])
+                )
+            except _READ_PROGRAMMING_ERRORS:
+                raise
+            except Exception as _marks_exc:  # noqa: BLE001 - named refusal, class name only
+                logger.warning(
+                    "derive_broker_dailies: unit switch marks read failed (label=%s, error=%s)",
+                    funding_label, type(_marks_exc).__name__,
+                )
+                return _UNIT_SWITCH_MARKS_READ_FAILED
+            _usd_marks = {
+                m.mark_day: m.nav_usd - m.open_pnl_usd
+                for m in _stored_marks
+                if m.mark_day <= switch.last_usd_day
+            }
+            built = build_switched_series(
+                switch=switch,
+                split=split,
+                funding_rows=funding_rows,
+                external_flows=_booked_flows,
+                anchor_usd=_anchor_usd,
+                anchor_price=_anchor_price,
+                open_unrealized_usd=float(open_unrealized_usd),
+                closes=closes,
+                latest_close_day=latest_close_day,
+                usd_full_history=_ccxt_full_history_verdict(venue, realized, funding, _now_utc),
+                # WR-02: strategy mode carries the coin level across a day with no close so the
+                # headline loses no return and the runner sees no chain break; key mode keeps
+                # the holes its compose segments at.
+                span_unpriced_days=not is_key_mode,
+                # CR-02: the first UTC day the bills read covers; a persisted switch can be older.
+                bills_from_day=(
+                    _now_utc.date()
+                    - timedelta(days=exchange_module.OKX_BILLS_REACH_DAYS)
+                ).isoformat(),
+                # R2-02: the stored marks are the true USD levels on the mixed days (the held
+                # coin's price move is in no bill); the days a mark does not cover are withheld.
+                usd_marks=_usd_marks,
+                mixed_from_day=(read.census.get(switch.coin) or (None,))[0],
+            )
+            if is_key_mode and not isinstance(built, str):
+                # Plan 09: a key states its whole-history USD inputs beside the headline (the
+                # strategy row has no such record). Priced from the SAME closes read as the series.
+                _switched_key = _switched_key_usd(
+                    switch=switch,
+                    switched=built,
+                    split=split,
+                    funding_rows=funding_rows,
+                    external_flows=_booked_flows,
+                    closes=closes,
+                )
+            return built
+
+        try:
+            if _unit_switch_read is not None and _unit_switch_read.switch is not None:
+                # Phase 256 (SC-1, SC-2): the bills carry a coin the resolver derived a switch for.
+                # The series is the whole-history USD headline (USD through S, the coin segment
+                # converted at the stored closes), so everything after this block (DQ-02 terminus,
+                # marks, csv write) runs unchanged on an all-USD series. A refusal keeps today's
+                # named failure with the closed token appended.
+                _switch_candidate = _unit_switch_read.switch
+                _booked = await _book_switched_series(_unit_switch_read, _switch_candidate)
+                if isinstance(_booked, str):
+                    return await _refuse_incomplete_read(
+                        "daily_pnl_non_usd_okx",
+                        None,
+                        permanent=_booked not in _UNIT_SWITCH_TRANSIENT_TOKENS,
+                        detail=_booked,
+                    )
+                _seed_rows = await _read_stored_usd_rows(_switch_candidate.last_usd_day)
+                if isinstance(_seed_rows, str):
+                    return await _refuse_incomplete_read(
+                        "daily_pnl_non_usd_okx",
+                        None,
+                        permanent=_seed_rows not in _UNIT_SWITCH_TRANSIENT_TOKENS,
+                        detail=_seed_rows,
+                    )
+                _unit_switch = _switch_candidate
+                _switched = _booked
+                _stored_usd_rows = _seed_rows
+                returns, meta = _booked.headline, dict(_booked.meta)
+                if is_key_mode and _switched_key is not None:
+                    # Plan 09: the key's inputs are the whole-history USD ones, in the shape a
+                    # native-unit key stores them minus ``native_unit`` (the series is all USD, so
+                    # no reader converts it again). The realized terminal is the writer's own level
+                    # on the last priced day; the writer basis stays unset (ccxt keys never store one).
+                    _day_pnl_usd = _switched_key.day_pnl
+                    _realized_terminal = _switched_key.realized_terminal
+                    _native_usd_inputs = {
+                        "priced_through": _switched_key.priced_through,
+                        "unpriced_days": _switched_key.unpriced_days,
+                        "segment_terminals": [
+                            {"utc_day_iso": _day, "level_usd": _level}
+                            for _day, _level in _switched_key.segment_terminals
+                        ],
+                    }
+            else:
+                # FLOW-04: the venue-gated, noise-guarded wedge threads into the honest
+                # core's terminal seam (broker_dailies passes it straight to
+                # reconstruct_nav_and_funding). The stored/displayed MTM equity anchor
+                # is KEPT full — the reported CURRENT NAV re-add is DEFINITIONAL, so the
+                # derive path writes ONLY csv_daily_returns and never mutates `equity`
+                # (Q4 tail). OKX subtracts the real wedge (realized-basis terminal);
+                # Bybit/Binance passed 0.0 above (no double-count).
+                returns, meta = combine_realized_and_funding(
+                    realized, funding, account_balance=equity,
+                    balance_error=balance_error,
+                    external_flows=external_flows,
+                    open_unrealized_usd=open_unrealized_usd,
+                    # 164.6.6.2.3 D-11: the account's first day is its inception when its
+                    # P&L history starts inside the venue's flow coverage (the same
+                    # verdict the stitched member passes). The derive's own ``_now_utc``.
+                    full_history=_ccxt_full_history_verdict(
+                        venue, realized, funding, _now_utc
+                    ),
+                )
         except NavReconstructionError as exc:
             # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
             # core (services.nav_twr) via combine_realized_and_funding — a schema
@@ -11064,6 +11863,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             _key_inputs_payload.update(_native_usd_inputs)
             if _unpriced_close_day is not None:
                 _key_inputs_payload["unpriced_close_day"] = _unpriced_close_day
+        if _unit_switch is not None and _switched is not None:
+            # 256 plan 09 (SC-2) - ADDITIVE and present-only, in the same voice: the two native
+            # segments of a key that moved from USDT into a coin, in the shape the strategy row
+            # stores (plan 02). The headline series above is all USD and the payload carries no
+            # ``native_unit``; this record is for the surfaces that draw the two units. Built from
+            # the FINAL ``returns`` (after the marks), the USD segment through S.
+            _key_inputs_payload["unit_segments"] = _unit_segments_payload(
+                _unit_switch, _switched, returns, _stored_segments, _stored_usd_rows,
+                api_key_id=api_key_id,
+            )
         if _realized_terminal is not None:
             # CR-01: the writer's own terminal, on its own day. The compose rolls the
             # stored returns back from it, so the zero-start verdict and every historical
@@ -11991,6 +12800,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # replaces data_quality_flags wholesale, so a re-derive after a unit change clears it.
     if _mt5_unit is not None and _mt5_unit.native:
         _prestamp_flags["native_unit"] = _mt5_unit.code
+    # 256 / SC-2 — an OKX account that moved from USDT into a coin says so with a small marker the
+    # list surfaces read without the sidecar. It is NOT a native_unit: the headline series is
+    # all USD (USD through S, the coin segment converted at the stored closes), so unmodified USD
+    # readers stay correct, and ``native_unit`` / ``daily_pnl_non_usd_okx`` are never written for
+    # it. NEVER a member of NAV_TWR_GUARD_KEYS (a denomination is not a warning, the native_unit
+    # precedent above). The prestamp replaces data_quality_flags wholesale, so a re-derive that
+    # finds no switch clears it.
+    if _unit_switch is not None:
+        _prestamp_flags["unit_switch"] = {
+            "coin": _unit_switch.coin,
+            "last_usd_day": _unit_switch.last_usd_day,
+            "first_coin_return_day": _unit_switch.first_coin_return_day,
+        }
     # 164.6.6.2 / D-25 — a MEASURED day on a very small balance (prior NAV under the unit's
     # material equity) is kept exact and ANNOTATED. A BOOL only (the smallest prior NAV is an
     # account-size magnitude, T-73-02), present-only, and NEVER a member of
@@ -12025,6 +12847,29 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # ``marks_covered_from`` is the boundary the series runner (plan 08) reindexes at, stamped
     # here because the stored rows lack the NaN days that would let it re-derive it. The prestamp
     # replaces data_quality_flags wholesale, so a re-derive without marks clears all four.
+    # The record is built once, before the stamp: its ``unpriced_days`` are the FINAL ones (carried
+    # from the stored record plus this derive's own), which is what the stamp must see (R2-04).
+    _unit_segments_record = (
+        _unit_segments_payload(
+            _unit_switch, _switched, returns, _stored_segments, _stored_usd_rows,
+            api_key_id=ctx.key_row["id"],
+        )
+        if _unit_switch is not None and _switched is not None
+        else None
+    )
+    _named_days = (
+        [*_unit_segments_record["unpriced_days"], *_unit_segments_record["withheld_days"]]
+        if _unit_segments_record is not None
+        else []
+    )
+    if _applied_marks is None and _named_days:
+        # WR-02: a switched strategy's day with no close has no row of its own; the next priced day
+        # carries its move (the builder's spanning conversion). Say so the way marks do, so the
+        # series runner does not turn the absent day into a chain break. Without marks only: from
+        # the marks' own boundary on, the marks block above owns it. The boundary is the OLDEST named
+        # day (the list is ascending): a hole older than this derive's bills window, or older than a
+        # fresh one, would otherwise fall before it and become an interior NaN (R2-04).
+        _prestamp_flags["marks_covered_from"] = min(_named_days)
     if _applied_marks is not None:
         _prestamp_flags["marks_since"] = _applied_marks.marks_since
         _prestamp_flags["marks_covered_from"] = _applied_marks.covered_from
@@ -12102,6 +12947,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # strategy_analytics row to stamp, so key-mode series get the assert but no
         # verdict of record.
         "series_completeness": _verdict,
+        # Phase 256 / SC-2, T-256-19: the two native segments of a switched strategy, or an
+        # EXPLICIT null on every other strategy-mode prestamp, so a sidecar left by an earlier
+        # switched derive can never survive a re-derive that no longer finds the switch.
+        "unit_segments": _unit_segments_record,
     }
     # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
     # to AFTER both basis-series persists below (see the moved block just above the

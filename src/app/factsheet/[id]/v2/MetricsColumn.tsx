@@ -12,6 +12,7 @@ import { COMPARATOR_CALENDARS, isPastCoverage, startsAfterCoverage, type Weekday
 import { flatLegReason, pairedFloorReason } from "@/lib/factsheet/joint";
 import { OPTIONS_CASH_WALLET_CAUSE, OPTIONS_CASH_WALLET_PHRASES, joinGuardPhrases } from "@/lib/factsheet/headline-basis";
 import { benchmarkWithheldReason, nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
+import { unitSwitchKpiNote } from "@/lib/factsheet/unit-segments";
 import { drawdownTone, signTone } from "@/lib/factsheet/display-sign";
 import {
   VAR_METHOD_LINE,
@@ -629,6 +630,18 @@ export function MetricsColumn({
     return null;
   };
 
+  // Phase 256 OKXUNITSWITCH (SC-3, UI-SPEC C): a switched strategy's headline figures are
+  // whole-record USD, with the coin part converted at the stored daily close. The note states
+  // that rule directly under the Main metrics heading, before the first figure. It is NOT a
+  // withhold: every figure below still renders. Absent without a switch, so a USD rail's DOM
+  // is unchanged. Both mounts that carry the Main metrics panel (`main` and the whole rail)
+  // render it; the `detailed` half does not, and the two never mount together.
+  const unitSwitchNote = payload.unitSwitch ? (
+    <p className="mt-2 text-fixed-11 text-text-muted" data-testid="metrics-unit-switch-note">
+      {unitSwitchKpiNote(payload.unitSwitch)}
+    </p>
+  ) : null;
+
   // Phase 196 (D-04, LEAN-05) — the two halves of the rail the one-page layout mounts: `main` in
   // the opening view, `detailed` inside Advanced. Every figure below is the same expression the
   // whole rail uses (same `gv` / `wr` wrappers and formatters), moved; none is re-derived, so the
@@ -638,6 +651,7 @@ export function MetricsColumn({
       <aside className="flex flex-col gap-6">
         <RangeEyebrow scope={scope} surface="rail" />
         <Panel title="Main metrics" benchHeader={bnDated}>
+          {unitSwitchNote}
           {/* Phase 196 (UI-SPEC "One small-sample warning"): the rail's `figure-gate-note` is not
               rendered here; the KPI strip's note is the page's one small-sample statement.
               `bench-figure-gate-note` (comparator-specific) and the span note stay. */}
@@ -774,6 +788,7 @@ export function MetricsColumn({
           </Kpm>
         </Panel>
         <Panel title="Main Metrics" benchHeader={bnDated}>
+          {unitSwitchNote}
           {/* Phase 194 (D-15): the amber observation-count sentence of 167.1.2 plan 07
               is gone; `figure-gate-note` below is the one note, from the shared gate. */}
           {gateNote && (
