@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.133.101.0] - 2026-11-27 — Phase 252 DERIBITOPTIONS plan 07: the smoothed-MTM probe names which refusal fired
+
+### Why
+- The wave-2 probe read `fail` on PROD on 2026-11-26. Member m3's smoothed build refused with `LedgerValuationError:position`. Three different smoothed-only refusals print exactly that detail: the D-07 daily-mark hole, the D-09 `exercise` refusal and the D-09 `expiry` refusal. So the reading could not name the cause. Founder decision 2026-11-26: fix the cause inside Phase 252 and keep the phase open until the probe passes, inventing no data and not narrowing the MTM span. This PR is the diagnostic half (gap G252-PROBE-M3). The cause is not fixed yet.
+
+### Added
+- Each of the three refusals in `services/deribit_txn.py` now raises its own subclass of `LedgerValuationError`, with closed-word attributes computed at the raise:
+  - `OptionMarkHoleError` (D-07 hole in `option_mtm_daily`) carries three words: `vs_marks` (no-marks, before-first-bar, between-bars, after-last-bar), `vs_retention` (older, not-older or unknown against the hard retention cutoff) and `vs_expiry` (past-expiry, not-past-expiry or unknown).
+  - `OptionExerciseRowError` (D-09 `exercise` in `replay_option_positions`) carries the refusing row's change shape and position shape plus a same-instrument type census.
+  - `OptionExpiryRowError` (every refusal in `_expiry_close`, including the two non-numeric paths) carries the same three.
+- The read-only probe `scripts/deribit_options_smoothed_probe.py` prints a new `refusal_shape` record key in closed vocabulary only. It never prints a date, instrument, amount or id. An attribute outside its closed set prints `unreadable`, and the record still emits.
+- `scripts/navbreach_anchor_probe.py`'s shared build-error allow-list names the three classes, so both probes print them instead of `other`.
+
+### Changed
+- `option_mtm_daily` takes a keyword-only `retention_cutoff` (default `None`). `_build_smoothed_option_mtm` passes the hard cutoff it already computed. Bucketing, the 30-day tolerance band and the horizon are unchanged.
+- `_option_expiry_iso` and its regex and month map moved, unchanged, from `deribit_ingest.py` to `deribit_txn.py`, so the hole's `vs_expiry` and the marks-fetch cap read one definition. `deribit_ingest` imports it back.
+
+### Notes
+- **No refusal changed.** The same rows refuse at the same point, and `str(exc)` and `exc.args` are byte-identical (pinned by hand-written strings). The three classes subclass `LedgerValuationError` directly, never `OptionRowFieldMissingError`, so the job worker's mark_to_market degrade reason, its permanent-ledger-error tuples and the composite handlers behave as before. A cross-basis pin proves cash_settlement and mark_to_market builds cannot raise the new classes. `type(exc).__name__` now reads the subclass in `_record_refusal`'s `refusal_class` and in a Sentry tag, on paths the smoothed build does not reach; nothing outside tests reads `refusal_class`.
+- **The probe names only the first refusal per member.** The position replay refuses before any mark is fetched, and the hole guard stops at the earliest missing day.
+- **Next step:** after deploy, re-run the founder-gated probe for the evidence composite and read m3's `refusal_shape`. Every remedy that narrows the MTM span (a retention straddler) and every unmeasured row shape goes to the founder. Phase 252 stays open until the probe passes.
+- Review: gsd-code-reviewer and silent-failure-hunter found 0 MEDIUM or above. One LOW, that `after-last-bar` merged marks stopping early with a position open past expiry, was fixed as a phase-goal gap (`vs_expiry`). The other LOW and INFO items are recorded in the phase review and not fixed.
+- No `TODOS.md` entry is closed by this PR.
+
+### Tests
+- Hole matrix (4 sides × the retention words), the three expiry words, exact-message pins, hierarchy pin, cross-basis pin at the build seam, emitter accept/refuse cases for every shape, and a tracer through the real `build_deribit_native_ledger` showing a retention straddler prints `before-first-bar` + `older` with nothing identifying on stdout. Every gate was shown RED on a neutered byte copy, then restored (`cmp` exit 0) and GREEN.
+
 ## [0.133.100.5] - 2026-11-27 — Phase 225 validation pass: the MT5 short-circuit server bracket is pinned, and SF-M1 gets an owner
 
 ### Tests
