@@ -22,6 +22,9 @@
 - `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.108.1 → 0.133.108.2.
 - The gates on the composed tree, verbatim: `baseline-currency: carried=348 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
 
+
+### Tests
+- `analytics-service/tests/fixtures/mt5_parity/capture_synthetic.json`: the synthetic MT5 capture's `strategy_analytics` slice row gains `"unit_segments": null`. `test_mt5_parity_capture.py::test_whole_row_slices_carry_exactly_their_tables_columns` compares each whole-row slice with the baseline's column list, so it went red the moment the dump carried Phase 256's new column (re-dump PR CI on the bot commit). Human commit on the bot branch, added by the Phase 256 agent.
 ### Notes
 - The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46057037202` succeeded, and this entry was composed by the `redump-pr` job. Run `46057037202` is the provenance anchor.
 - The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
