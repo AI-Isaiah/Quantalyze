@@ -191,3 +191,82 @@ CONTEXT says "P3 no option day inside the span is valued at cash for mark retent
 _Reviewed: 2026-11-27_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: deep_
+
+
+---
+
+## Round 2 (re-review of the fix commits, 2026-11-28)
+
+**Scope.** Fix commits `7be54fbf3`, `72a624982`, `6bbe725d5` and `301f5e2a8` (`git diff 924df402d..HEAD -- . ':!.planning'`: `job_worker.py`, `test_stitch_composite_job.py`, `composite-read-path.ts` and its headline-basis test). Also the records commit `89cba0971` (CONTEXT and ROADMAP). For the whole-phase verdict on `33d4cf863..HEAD`, I relied on the round-1 deep review at `5eb1fda9e` plus this fix diff. Between `5eb1fda9e` and `924df402d` I measured no source change outside `.planning`: only the two review-document commits.
+
+**Gates re-run at head:** `pytest tests/test_stitch_composite_job.py tests/test_stitch_composite.py tests/test_composite_headline_parity.py` gave 174 passed. `mypy --strict services/job_worker.py services/stitch_composite.py` passed with no issues. `vitest run src/lib/factsheet/composite-read-path.headline-basis.test.ts` gave 50 passed.
+
+**Frontmatter note.** The frontmatter counts above are the round-1 counts. The round-2 result is stated here.
+
+### Verdict per round-1 MEDIUM
+
+| Finding | Round-2 status |
+|---|---|
+| WR-01 | **Fixed for the exits round 1 named. One residual of the same class stays open: R2-WR-01 below (MEDIUM).** |
+| WR-02 | **Fixed.** Part (a), the record, is done by `89cba0971`. Part (b), WARNING plus Sentry, is done by `72a624982`. |
+| SFH-MEDIUM-1 | **Fixed**, and fully: the fixer's one stated residual cannot occur (see below). |
+
+### What I verified
+
+**Last-attempt detection (WR-01).** `_smoothed_final_attempt` is `attempts >= max_attempts`, and both values must be `int`.
+- This matches `mark_compute_job_failed` (latest definition, `20261124120000`: `ELSIF v_attempts >= v_max_attempts THEN v_new_status := 'failed_final'`).
+- The claim RPCs run `attempts = attempts + 1 ... RETURNING *`, so the handler sees the post-increment count. On the run that `mark_compute_job_failed` would make `failed_final`, the flag is True.
+- `max_attempts` is `INTEGER NOT NULL DEFAULT 3` (`20260411144407:122`). No enqueue site in `supabase/migrations`, `src/` or `analytics-service/services|routers` overrides it, so no path makes every attempt "last".
+- A synthetic job dict without the counts reads as not final, which keeps the old retry behaviour. The reconcile watchdog resets a stalled row without decrementing `attempts`; that only makes a row final earlier, which agrees with the SQL rule.
+- The same expression already appears at three sibling sites in the file.
+
+**A degrade can never promote.** Every degrade sets `smoothed_result = None`. `smoothed_metrics_json` and `_smoothed_basis_result` are initialised to `None` before the block and are only assigned inside `if smoothed_result is not None`. `smoothed_headline_promotion(smoothed_computed=False, ...)` returns `(False, "smoothed_basis_not_computed")` first, and the `assert` in the headline selection guards the promoted branch. A DEFERRED preflight result carries `error_kind=None`, so the new branch never converts it. The new tests pin both directions: attempt 3/3 ships DONE with no `headline_basis` and the cash headline, and attempt 1/3 still raises. The fixer's two neuters show the tests can fail.
+
+**Sentry content (WR-02).** The message text is `"... a promoted smoothed headline was withdrawn ({cause})"`, where the cause is one of the closed literals or `not_option_active`. It carries no strategy id, member id, date or amount, and the test asserts the strategy id is absent from it. Two caveats are stated, not filed:
+- The event carries a `compute_job_id` tag (a job UUID). That matches the file's ten existing `set_tag("compute_job_id", ...)` sites. It is not a member or strategy id.
+- With the SDK's default logging integration, the `logger.warning` line, which carries the strategy id like every other line in the function, rides as a breadcrumb. This is also the file's existing pattern.
+
+`_not_promoted_cause` is read only when `smoothed_ok` is True, so the conditional expression never touches an unbound name. mypy agrees.
+
+**TS seed condition (SFH-MEDIUM-1).** `smoothedHeadline` now follows the `Promise.all`, and it is the only place `headlineBasis` is derived: `FactsheetView`'s provider seed and its flag-off segment condition both read `payload.headlineBasis`. The fixer worried about duplicate dates. `normalizeDailyReturns` on an array input (`portfolio-math-utils.ts:24`) filters on a string date and a finite value only, and it does **not** dedup. `parseMtmSeriesPayload` already enforces those same predicates and returns null below two rows. So a non-null parsed series always yields at least two normalised points, and `build-payload` always emits `seriesByBasis.smoothed_mtm`. The duplicate-date residual in the fix report cannot occur. With a marker and no usable series, `applyHeadlineBasis` still redacts the cash object on the marker, which is the fail-safe state.
+
+### R2-WR-01: WR-01 is closed only for the Deribit marks read; a raw ccxt network error, or the degraded-set divergence, in the smoothed pass still sinks the cash composite on the last attempt (MEDIUM, user-facing)
+
+**File:** `analytics-service/services/job_worker.py`. The new `except DeribitTransientReadError` arm is at about `:15009`. The degraded-set divergence `return DispatchResult(... error_kind="transient")` is right after `smoothed_member_metas = list(_sm_metas)`. In `_reconstruct_all`, the ccxt member arm ends `except Exception: if is_geo_blocked(exc): ...; raise`.
+
+**Issue:** WR-01's criterion is that the additive smoothed pass must not fail a healthy cash composite on the last attempt. The fix catches only `DeribitTransientReadError` and a returned transient `DispatchResult`. The smoothed `_reconstruct_all` re-crawls **every** member, ccxt members included (the divergence check exists because it does). Two exits are still open:
+
+1. **A raw `ccxt.NetworkError` from a ccxt member's re-crawl.** `fetch_ccxt_transfers` (`services/ccxt_flow_fetch.py`, WR-04 comment) deliberately lets every non-`NotSupported` exception bubble, network failures included. In `_reconstruct_all`'s ccxt arm, a `RequestTimeout` or `ExchangeNotAvailable` is not `RateLimitExceeded`, not structural and not geo-blocked, so it hits the bare `raise`. It escapes the smoothed call site, because no arm there catches it, and `classify_exception` files it `transient`. On attempt 3/3 that is `failed_final`, and branch (b) of the bridge then writes `failed` on an unprotected row. The Deribit side is covered: its ledger, chart and account-state reads wrap network errors into `DeribitTransientReadError` or a DQ flag.
+2. **The degraded-member-set divergence.** It still returns `error_kind="transient"` on every attempt, the last one included. It is a live-read race (a ccxt member degrades in one pass and not the other), so it is rare. Round 1, though, counted its rarest exit inside the MEDIUM.
+
+**Population:** option-active composites (P1) that also have a binance, okx or bybit member. I did not measure how many exist on PROD. Exit 1 is reachable by code for any such composite. If none exists today, this is latent until one is created.
+
+**Fix (minimal, mirrors the existing arm):**
+```python
+# at the smoothed call site, widen the WR-01 arm to the ccxt transient class
+except (DeribitTransientReadError, ccxt.NetworkError) as _sm_exc:
+    if not _smoothed_final_attempt:
+        raise
+    smoothed_result = None
+    logger.warning(...)  # same scrubbed text
+...
+# the divergence check: degrade on the last attempt instead of returning
+if _sm_degraded_seqs != {int(d["seq"]) for d in degraded_members}:
+    if not _smoothed_final_attempt:
+        return DispatchResult(...)  # unchanged
+    smoothed_member_metas = []   # drop the metas the MED-01 union would read
+    logger.warning(...)
+    # skip the derive: leave smoothed_metrics_json None (P2 fails, no promotion)
+```
+`ccxt.RateLimitExceeded` is a `NetworkError` subclass, but `_reconstruct_all` already turns it into a transient `DispatchResult`, so it never reaches the widened arm. Add one parametrised case to `test_g252_smoothed_transient_on_the_last_attempt_ships_the_cash_composite` with a ccxt member whose smoothed crawl raises `ccxt.RequestTimeout`, plus one for the divergence.
+
+### Round-2 LOW / Info (recorded here only, not fixed, not booked)
+
+- **R2-IN-01:** the WR-02 report fires before the persist. If the headline upsert then fails and the job retries, the next attempt reports again, and on a failed final attempt the "withdrawn" report describes a row that still holds the promoted headline. That is noise, not loss.
+- **R2-IN-02:** on a final-attempt degrade of a promoted row, WR-02 reports the cause `smoothed_basis_not_computed`. That does not tell a transient degrade apart from a structural one. The WARNING line just before it does.
+
+### Whole-phase verdict (`33d4cf863..HEAD`, MEDIUM+ only)
+
+**One MEDIUM open: R2-WR-01.** I found no CRITICAL or HIGH. WR-02 and SFH-MEDIUM-1 are closed. Round 1 found no other MEDIUM+ in the phase diff, and the fix diff introduces none beyond R2-WR-01, which is a gap left by the WR-01 fix, not a regression it caused: before the fix, these exits failed on every attempt.
+
+_Round 2 reviewed: 2026-11-28 · Reviewer: Claude (gsd-code-reviewer) · Depth: deep (fix diff), round-1 reliance for the rest of the phase diff_
