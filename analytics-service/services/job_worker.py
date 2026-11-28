@@ -13792,13 +13792,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         native_ledger_realized_terminal,
     )
     from services.deribit_ingest import (
+        CompletenessReport,
         CurrencyEnumerationError,
+        DeribitNativeAccountState,
         DeribitTransientReadError,
         LedgerCompletenessError,
         LedgerTruncatedError,
         ScopeAuthError,
         assert_ledger_complete,
         build_deribit_native_ledger,
+        _last_settled_option_mark_day,
+        build_deribit_options_basis_ledger,
         fetch_deribit_native_account_state,
     )
     from services.deribit_txn import (
@@ -14360,6 +14364,24 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # L3: a member whose stored marks cannot be applied stops the whole composite (a permanent
     # refusal, nothing persisted), never a silent member degrade that would drop its history.
     member_marked: dict[int, MarkedSeries] = {}
+    # Plan 252-11 (G252-MTM-PROMOTION, founder decision 2026-11-28): each Deribit member's
+    # cash-pass crawl, kept by member seq so the smoothed pass can assemble that member's
+    # smoothed ledger from the SAME crawl and the SAME account-state read (key mode's
+    # ``retain_raw_rows`` precedent, Phase 185) instead of crawling the transaction log a
+    # second time. Holds raw rows (instruments, sizes, amounts): never logged or persisted,
+    # and released by ``_release_cash_crawl`` on every path that stops using them.
+    # Each entry also carries the settled option-mark day read with the account state: the
+    # smoothed assembly caps its marks at the wall clock's settled day, so a reuse across an
+    # 08:00 UTC settlement would reconcile a state and a book from different sides of it.
+    member_cash_crawl: dict[
+        int, tuple[CompletenessReport, DeribitNativeAccountState, str]
+    ] = {}
+
+    def _release_cash_crawl() -> None:
+        for _kept_report, _kept_state, _kept_day in member_cash_crawl.values():
+            _kept_report.raw_rows = None
+        member_cash_crawl.clear()
+
     # SFH round 2 N2: the first day a member's rows stop, by member seq, for a member whose window
     # can still receive a mark but whose last applied mark is older than the day this run labels.
     member_trailing: dict[int, str] = {}
@@ -14709,6 +14731,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         basis: str,
         mark_seq: int | None = None,
         allocated_mark_seq: int | None = None,
+        *,
+        member_seq: int | None = None,
+        retain_cash_crawl: bool = False,
+        reuse_cash_crawl: bool = False,
     ) -> tuple[pd.Series, bool, dict[str, Any]]:
         """One Deribit member's dense daily-return series for ``basis`` + its
         option-activity signal + the NavTWRMeta guard dict, through the EXISTING
@@ -14746,21 +14772,67 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 mark_day_for(_utc_now()), denominator_config
             )
             _twin_kwargs = dict(nav_twin=_member_wants_nav_twin)
-        account_state = await asyncio.wait_for(
-            fetch_deribit_native_account_state(ctx.exchange),
-            timeout=_BROKER_CRAWL_TIMEOUT_S,
-        )
-        ledger, completeness = await asyncio.wait_for(
-            build_deribit_native_ledger(
-                ctx.exchange,
-                account_state=account_state,
-                pnl_basis=basis,
-                exclude_spot_extraction=exclude_spot,
-                **_twin_kwargs,
-            ),
-            timeout=_BROKER_CRAWL_TIMEOUT_S,
-        )
-        assert_ledger_complete(completeness)
+        if reuse_cash_crawl:
+            # Plan 252-11 (founder decision 2026-11-28): the smoothed pass makes NO second
+            # transaction-log crawl. It assembles this member's smoothed ledger from the rows
+            # and the account-state read its own cash pass kept. A missing entry is a
+            # programming error (never a fresh crawl, never a silent degrade), the same
+            # disposition ``build_deribit_options_basis_ledger`` gives a report with no rows.
+            # ``assert_ledger_complete`` is not run again: it already judged this same
+            # crawl's report in the cash pass (key-mode precedent). ``completeness`` below is
+            # the report RETURNED by the options build, never the retained cash report: only
+            # the returned one carries the smoothed pass's retention list (P3 reads it).
+            _kept = member_cash_crawl.pop(member_seq, None) if member_seq is not None else None
+            if _kept is None:
+                raise ValueError(
+                    "run_stitch_composite_job: no retained cash-pass crawl for member "
+                    f"seq {member_seq}"
+                )
+            _cash_report, account_state, _settled_at_read = _kept
+            if _last_settled_option_mark_day() != _settled_at_read:
+                # The smoothed assembly caps its option marks at the settled day read from
+                # the wall clock, while this state was read in the cash pass: a settlement
+                # fell between the two, so state and marks sit on different sides of it.
+                # Transient: the retry reads both on one side (the last attempt degrades).
+                _cash_report.raw_rows = None
+                raise DeribitTransientReadError(
+                    "run_stitch_composite_job: the 08:00 UTC option settlement passed "
+                    "between the member's cash-pass read and its smoothed assembly"
+                )
+            try:
+                ledger, completeness = await asyncio.wait_for(
+                    build_deribit_options_basis_ledger(
+                        ctx.exchange,
+                        report=_cash_report,
+                        account_state=account_state,
+                        pnl_basis=basis,
+                        exclude_spot_extraction=exclude_spot,
+                    ),
+                    timeout=_BROKER_CRAWL_TIMEOUT_S,
+                )
+            finally:
+                _cash_report.raw_rows = None
+        else:
+            account_state = await asyncio.wait_for(
+                fetch_deribit_native_account_state(ctx.exchange),
+                timeout=_BROKER_CRAWL_TIMEOUT_S,
+            )
+            if retain_cash_crawl:
+                _twin_kwargs["retain_raw_rows"] = True
+                _settled_at_read = _last_settled_option_mark_day()
+            ledger, completeness = await asyncio.wait_for(
+                build_deribit_native_ledger(
+                    ctx.exchange,
+                    account_state=account_state,
+                    pnl_basis=basis,
+                    exclude_spot_extraction=exclude_spot,
+                    **_twin_kwargs,
+                ),
+                timeout=_BROKER_CRAWL_TIMEOUT_S,
+            )
+            assert_ledger_complete(completeness)
+            if retain_cash_crawl and member_seq is not None:
+                member_cash_crawl[member_seq] = (completeness, account_state, _settled_at_read)
         # WEDGE-01: combine_native_ledger is SYNCHRONOUS CPU-bound pandas
         # (broker_dailies.py:174). On the shared loop it blocks the healthz
         # heartbeat → false-stale → restart. Offload to a worker thread (the
@@ -15071,6 +15143,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         report_progress: bool = False,
         structural_degrade: bool = False,
         apply_member_marks: bool = False,
+        retain_cash_crawl: bool = False,
+        reuse_cash_crawl: bool = False,
     ) -> tuple[
         list[tuple[int, pd.Series]], list[MemberBasisSignal], list[str],
         list[dict[str, Any]], list[dict[str, Any]],
@@ -15094,6 +15168,12 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
         NAVMTM plan 09: ``apply_member_marks`` is True on the CASH pass only; the
         mark_to_market and smoothed passes leave it False, so those bases are not marked.
+
+        Plan 252-11: ``retain_cash_crawl`` is True on the CASH pass only (each Deribit member
+        keeps its crawl in ``member_cash_crawl``); ``reuse_cash_crawl`` is True on the smoothed
+        pass only (each Deribit member rebuilds from that crawl, no second transaction-log
+        crawl). ccxt members take neither: their smoothed pass is a live re-read, as before.
+        The MTM second pass passes neither and is unchanged.
 
         PROG-02: when ``report_progress`` is True (the CASH pass only — Pitfall 1:
         the MTM second pass must NOT restart the per-member counter), publish
@@ -15418,6 +15498,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     basis,
                     mark_seq=_member_mark_seq,
                     allocated_mark_seq=_member_allocated_mark_seq,
+                    member_seq=seq,
+                    retain_cash_crawl=retain_cash_crawl,
+                    reuse_cash_crawl=reuse_cash_crawl,
                 )
             except (MarkApplyRefusal, _MemberNavUnreconciled, _MemberFlowIndexUnavailable) as _mark_exc:
                 # L3 (NAVMTM plan 09): see the ccxt arm. Only the cash pass applies marks, so the
@@ -15512,11 +15595,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # the cash pass — the MTM second pass (below) stays default False so it can
     # never restart the per-member progress counter (Pitfall 1).
     cash_result = await _reconstruct_all(
-        cash_pnl_basis, report_progress=True, apply_member_marks=True
+        cash_pnl_basis, report_progress=True, apply_member_marks=True,
+        retain_cash_crawl=True,
     )
     if isinstance(cash_result, DispatchResult):
         return cash_result
     clipped_cash, member_signals, venues, member_metas, degraded_members = cash_result
+    if not smoothed_mtm_available(member_signals):
+        # Plan 252-11: nothing will use the retained crawls (no option-active Deribit member),
+        # so a perp-only composite does not hold its rows through the MTM pass's own crawl.
+        _release_cash_crawl()
 
     # HARD-05 honest floor: if NO member reconstructed (all members degraded or an
     # all-ccxt composite), fail PERMANENT with a scrubbed terminal stamp rather than
@@ -15916,6 +16004,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # per-Deribit-member ledger fan-out in smoothed_mtm basis, stitched through the ONE
     # shared derive_basis_series.
     #
+    # Phase 252 plan 11 (founder decision 2026-11-28): this pass makes NO second transaction-
+    # log crawl. Each Deribit member's smoothed ledger is assembled from the raw rows and the
+    # account-state read its OWN cash pass kept (``member_cash_crawl``), through
+    # ``build_deribit_options_basis_ledger``, as key mode does (Phase 185). It still runs the
+    # per-member preflight, the option daily marks and the dense index marks (public reads),
+    # the combine, and the live re-read of any ccxt member.
+    #
     # GLB-3 (v1.14 kill-switch safety): the smoothed basis is ADDITIVE and NEVER
     # load-bearing, so this pass DEGRADES (omit the smoothed by-basis key, keep the
     # cash+MTM composite + persist) rather than sinking the whole job — mirroring the
@@ -15929,13 +16024,16 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     #       the stitch/derive-stage failures below (degenerate-length / day-collision /
     #       compute chain-break) DEGRADE too — single-key parity (:3915/:3972, where
     #       the identical book's smoothed compute-reject omits the key, cash unaffected).
-    #   (b) BUDGET: this third per-member fan-out (+ dense-marks fetch) runs inside the
-    #       SAME fixed stitch_composite wall-clock budget the cash + MTM passes already
-    #       drew from. An at-cap options composite could push the smoothed fan-out past
-    #       the outer dispatch wait_for → transient → retried forever → failed_final,
-    #       sinking the healthy cash headline. Mirror the single-key FIX-2: bound the
-    #       fan-out to _MTM_SECOND_PASS_BUDGET_FRACTION of the REMAINING budget, REFUSE
-    #       below the _MTM_SECOND_PASS_MIN_SECONDS floor, degrade on timeout.
+    #   (b) BUDGET: this third per-member fan-out runs inside the SAME fixed
+    #       stitch_composite wall-clock budget the cash + MTM passes already drew from. It
+    #       no longer re-crawls the Deribit members (it rebuilds each from the cash pass's
+    #       retained crawl, founder decision 2026-11-28); what stays bounded is the
+    #       preflight, the option and index marks, the combine and any ccxt re-read. An
+    #       at-cap options composite could still push that past the outer dispatch
+    #       wait_for → transient → retried forever → failed_final, sinking the healthy
+    #       cash headline. Mirror the single-key FIX-2: bound the fan-out to
+    #       _MTM_SECOND_PASS_BUDGET_FRACTION of the REMAINING budget, REFUSE below the
+    #       _MTM_SECOND_PASS_MIN_SECONDS floor, degrade on timeout. No constant changed.
     # A TRANSIENT reconstruction result (429 / geo-block) or a preflight/unsupported-
     # venue permanent DispatchResult still SURFACES (whole-job retry / fail-loud),
     # exactly as the cash pass — those are not smoothed-structural degrades. There is
@@ -15997,9 +16095,11 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         ) = None
         if _smoothed_pass_timeout < _MTM_SECOND_PASS_MIN_SECONDS:
             # The cash (+ MTM) passes already consumed most of the budget — do NOT
-            # start a third full fan-out that cannot plausibly finish. DEGRADE:
-            # smoothed_result stays None → no smoothed compute, no by-basis key;
-            # cash/MTM composite ships unaffected.
+            # start a third pass (preflights, option marks and index marks) that cannot
+            # plausibly finish. DEGRADE: smoothed_result stays None → no smoothed compute,
+            # no by-basis key; cash/MTM composite ships unaffected. The kept cash-pass
+            # crawls are released: nothing will use them.
+            _release_cash_crawl()
             logger.warning(
                 "run_stitch_composite_job: skipping smoothed_mtm third pass for "
                 "strategy %s — only %.0fs of the %.0fs stitch budget remained "
@@ -16009,13 +16109,25 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 _MTM_SECOND_PASS_MIN_SECONDS,
             )
         else:
+            _smoothed_pass_started = asyncio.get_running_loop().time()
             try:
                 smoothed_result = await asyncio.wait_for(
                     _reconstruct_all(
-                        PNL_BASIS_SMOOTHED_MTM, structural_degrade=True
+                        PNL_BASIS_SMOOTHED_MTM, structural_degrade=True,
+                        reuse_cash_crawl=True,
                     ),
                     timeout=_smoothed_pass_timeout,
                 )
+                if isinstance(smoothed_result, tuple):
+                    # Plan 252-11: the headroom reading for the post-deploy check. Seconds
+                    # and the strategy id only: no amount, date or member id.
+                    logger.info(
+                        "run_stitch_composite_job: smoothed_mtm pass "
+                        "built from the cash pass's crawl in %.0fs of its %.0fs bound "
+                        "for strategy %s",
+                        asyncio.get_running_loop().time() - _smoothed_pass_started,
+                        _smoothed_pass_timeout, strategy_id,
+                    )
             except asyncio.TimeoutError:
                 # GLB-3(b): the bounded fan-out overran its slice. DEGRADE (never let
                 # it escape to the outer dispatch wait_for, which retries the WHOLE
@@ -16056,6 +16168,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "additive smoothed object, cash composite unaffected: %s",
                     strategy_id, scrub_freeform_string(str(_sm_exc)),
                 )
+            finally:
+                # Plan 252-11: step 6b is over on every path (built, timed out, degraded,
+                # re-raised), so any member crawl the pass did not consume is released.
+                _release_cash_crawl()
         if isinstance(smoothed_result, DispatchResult):
             if smoothed_result.error_kind == "transient" and _smoothed_final_attempt:
                 # WR-01: a per-leg TRANSIENT (429 / geo-block) on the LAST attempt

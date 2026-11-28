@@ -3051,6 +3051,7 @@ async def build_deribit_options_basis_ledger(
     report: CompletenessReport,
     account_state: DeribitNativeAccountState,
     pnl_basis: str,
+    exclude_spot_extraction: bool = False,
     sleep: SleepFn = asyncio.sleep,
 ) -> tuple[NativeLedger, CompletenessReport]:
     """The OPTIONS-basis ledger of a key, assembled from the SAME crawl as its cash ledger.
@@ -3059,8 +3060,12 @@ async def build_deribit_options_basis_ledger(
     mark-to-market assembly, not a new basis. ``report`` is the report of a
     ``build_deribit_native_ledger(..., retain_raw_rows=True)`` build; its retained rows run
     through :func:`_assemble_deribit_native_ledger`, the code path the cash build itself runs,
-    so the result equals what an independent second crawl would build. The key-mode NAV path
-    only (``exclude_spot_extraction=False``, no NAV twin).
+    so the result equals what an independent second crawl would build. No NAV twin is built.
+
+    ``exclude_spot_extraction`` is the extraction mode of the assembly. Key mode passes the
+    default (``False``, the NAV path), so its call is unchanged. The composite stitch (252-11,
+    founder decision 2026-11-28) passes its configured mode, so a member's smoothed ledger is
+    assembled in the same mode as the crawl it replaces.
 
     It makes NO transaction-log call (a second full crawl cannot fit the derive budget): the
     only venue reads are the public chart and index data the assembly already makes. The
@@ -3099,7 +3104,7 @@ async def build_deribit_options_basis_ledger(
         report=options_report,
         state_in=account_state,
         pnl_basis=pnl_basis,
-        exclude_spot_extraction=False,
+        exclude_spot_extraction=exclude_spot_extraction,
         nav_twin=False,
         sleep=sleep,
     )
