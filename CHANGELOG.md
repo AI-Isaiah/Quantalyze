@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.120.0] - 2026-11-28 — Phase 259 OKXARCHIVEFILLS fix: a tradeId alone does not make an OKX archive bill a fill
+
+### Fixed
+- **The OKX bills-archive fills read no longer stops on funding and transfer bills.** The second real calibrate on PROD stopped with `unproven_inst_type` (`unmapped_trade_subtype` 430, `unproven_inst_type` 6). Measured on the real quarter files: funding bills (subType 173/174) and transfer bills (11/12) carry a `tradeId` too, and transfer bills carry no `instType`. The reader treated any bill with a `tradeId` as a fill, so bills that record no trade stopped the whole read.
+- A bill now counts as a fill when it has a mapped trade subType (1-6), carries an `execType` (OKX marks every fill taker or maker), or has a documented fill-like subType outside the mapped set. The last group is still refused by name (`unmapped_trade_subtype`), never skipped.
+
+### Tests
+- `test_funding_and_transfer_bills_with_a_trade_id_are_not_fills` builds the measured shape: funding 173/174 and a blank-`instType` transfer 11, each with a `tradeId`, beside one real trade. It asserts only the trade is mapped, and that subType 104 with a blank `execType` is still refused. It was RED on the previous reader with the same `unproven_inst_type` stop PROD saw.
+
+### Notes
+- No migration. The PROD calibrate and the runbook backfill run after this deploys.
+
 ## [0.133.118.3] - 2026-11-28 — records: Phase 257 SEEDHOLD closed (verification passed), and its NAME_SET_RATCHET row deleted after the re-dump
 
 This is a records PR. Apart from one gate allowlist row, it changes no source, test, workflow or migration file.

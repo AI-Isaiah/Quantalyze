@@ -65,6 +65,15 @@ SUBTYPE_SIDES: Final[Mapping[str, tuple[str, str]]] = {
     "6": ("buy", "short"),
 }
 
+#: SubTypes whose ``px`` OKX documents as a fill, liquidation, delivery or exercise price but which
+#: are not mapped above: block trades (204-209), forced repayment (114, 115), liquidations
+#: (100-107), delivery (112, 113) and option exercise (170-172). A bill of one is refused as
+#: ``unmapped_trade_subtype``, never silently skipped.
+FILL_LIKE_UNMAPPED_SUBTYPES: Final[frozenset[str]] = frozenset(
+    {"100", "101", "102", "103", "104", "105", "106", "107", "112", "113", "114", "115",
+     "170", "171", "172", "204", "205", "206", "207", "208", "209"}
+)
+
 #: The instTypes and settle currencies proven on a real archive file (measured on PROD).
 PROVEN_INST_TYPES: Final[frozenset[str]] = frozenset({"SWAP"})
 PROVEN_SETTLE_CCYS: Final[frozenset[str]] = frozenset({"USDT"})
@@ -171,7 +180,16 @@ def _settle_of(inst_id: str) -> str:
 
 
 def _is_trade_shaped(row: ArchiveRow) -> bool:
-    return row.sub_type in SUBTYPE_SIDES or bool(row.trade_id)
+    """A bill that records a fill: a mapped trade subType, any bill carrying an ``execType``
+    (OKX marks every fill taker or maker), or a subType whose ``px`` the docs define as a fill
+    price outside the mapped set (refused by name, never skipped). Measured on the real PROD
+    files 2026-11-28: funding (173/174) and transfer (11/12) bills ALSO carry a ``tradeId``, so a
+    ``tradeId`` alone does not make a bill a fill."""
+    return (
+        row.sub_type in SUBTYPE_SIDES
+        or bool(row.exec_type.strip())
+        or row.sub_type in FILL_LIKE_UNMAPPED_SUBTYPES
+    )
 
 
 def _unique_bills(files: Sequence[ArchiveFile]) -> list[ArchiveRow]:
