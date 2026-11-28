@@ -910,7 +910,7 @@ Plans:
 - ⚠️ **Known limit (review WR-02, 2026-11-27):** a promoted smoothed headline is time-limited by venue mark retention; as marks age out a later refresh returns it to the named withhold on its own (WARNING log plus Sentry report). When that happens is unmeasured; a remedy needs a founder ruling.
 - ⭐ **FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim "Keep always-on (Recommended)" (recorded in `252-CONTEXT.md`):** options composites use smoothed mark-to-market regardless of `SMOOTHED_MTM_ENABLED`; this confirms the 2026-11-27 gap-planning decision.
 - ⭐ **FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim "Fix inside 252 first" (recorded in `252-CONTEXT.md`):** the post-deploy re-stitch did not promote (the smoothed third crawl hit its bounded budget), so one more gap plan inside 252 builds the smoothed ledger from the cash pass's own crawl (key-mode precedent, Phase 185 `retain_raw_rows`), with no third crawl; then re-stitch, read PROD, close 252.
-**Plans:** 10/10 plans executed
+**Plans:** 10/11 plans executed
 
 Plans:
 - [x] 252-01-PLAN.md — tracer: one predicate `isOptionsCashWalletBook`, a named withhold cause in the headline verdict, the factsheet read path and the share card name the reason (SC-2 RED fixture)
@@ -923,6 +923,7 @@ Plans:
 - [x] 252-08-PLAN.md — accept the measured exercise shape (change 0, position 0) as an option close (G252-PROBE-M3, gap closure)
 - [x] 252-09-PLAN.md — the composite stitch stores the smoothed mark-to-market result as an option-active composite's headline when criteria P1 to P4 hold, else keeps the wave-1 withhold (G252-MTM-PROMOTION, gap closure)
 - [x] 252-10-PLAN.md — the factsheet opens a promoted composite on the smoothed basis with "Cash settlement" still withheld; a census proves every surface agrees; cache key v30, shipped as v31 (G252-MTM-PROMOTION, gap closure)
+- [ ] 252-11-PLAN.md — the composite smoothed pass rebuilds each Deribit member from the cash pass's own crawl, with no third crawl (founder decision 2026-11-28 "Fix inside 252 first"; G252-MTM-PROMOTION, gap closure)
 
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - PROOF-01: each gate goes RED on a neutered copy with its arm named, is restored by cp from a byte backup with cmp exit 0, and goes GREEN; outputs verbatim in the SUMMARY
