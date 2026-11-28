@@ -183,7 +183,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 236 (FIGUREMATH) closed 2026-11-27 (FIG-05 passed); v1.22 phases run in parallel
 Plan: 7 of 7
 Status: Phases complete; 225 (ONEACCOUNTONCE) closed 2026-11-27 with verification passed (plan 18 control passed 2026-11-26, plan 21 post-deploy poll read passed 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stays human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
-Last activity: 2026-11-28 — records PR: 258 REDUMPDIRECT (v1.23, CI-only) closed (verification passed, shipped v0.133.111.0, #1408); 2026-11-27 — records PR: 254 OPENINGDEPOSIT (v1.23) closed (verification passed, shipped v0.133.109.0, #1407); 242 SECRETSHYGIENE (v1.23) closed (verification passed, SECR-03 and SECR-04 complete); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
+Last activity: 2026-11-28 — records PR: 256 OKXUNITSWITCH (v1.23) shipped (PR-1 v0.133.108.0 #1402, PR-2 v0.133.112.0 #1411), verification human_needed until the post-deploy SC-5 read; 261 UNITSWITCHEDGES booked; records PR: 258 REDUMPDIRECT (v1.23, CI-only) closed (verification passed, shipped v0.133.111.0, #1408); 2026-11-27 — records PR: 254 OPENINGDEPOSIT (v1.23) closed (verification passed, shipped v0.133.109.0, #1407); 242 SECRETSHYGIENE (v1.23) closed (verification passed, SECR-03 and SECR-04 complete); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
 Progress: [████████░░] 83%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -483,6 +483,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - SC2-NOSCROLL stays open. Plans 170-11 and 170-13 also declare it. (k), (l) and CHIP have no later plan and no REQUIREMENTS.md checkbox.
 
 ### Roadmap Evolution
+- Phase 261 added (2026-11-27, /gsd-phase add, founder "Book a follow-up phase (Recommended)"): UNITSWITCHEDGES, from Phase 256 OKXUNITSWITCH review round 3 (R3-02, R3-04, R3-05, R3-07, SF3-01); moved into v1.23 HARDEN by hand
 
 - Phase 171 added (2026-10-27, /gsd-phase add, founder "You can use add"): READCEILING, from TRADEPAGES plan 06 (a6 read ceiling)
 - Phase 172 added (2026-10-27, /gsd-phase add, founder "You can use add"): OKXANCHOR, from TRADEPAGES plan 06 (a4 implausible anchor)

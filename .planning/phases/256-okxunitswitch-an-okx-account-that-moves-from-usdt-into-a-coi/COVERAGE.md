@@ -1,0 +1,1 @@
+No external API integration: the phase changes how two OKX reads that are already integrated (account bills via private_get_account_bills and its archive, and the account balance via private_get_account_balance) are booked and parsed inside the analytics worker; it adds no new endpoint, SDK or service.
