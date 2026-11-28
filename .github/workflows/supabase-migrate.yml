@@ -30,6 +30,13 @@ name: Supabase Migrate
 #   6. `redump-pr` composes that dump onto current main and opens or edits the
 #      ONE bot PR on `automation/baseline-redump`. It never merges it: a human
 #      reviews and merges every re-dump (Phase 164.9.5).
+#      ⛔ CORRECTED 2026-11-27 (Phase 258): `redump-push` (the job formerly
+#      called `redump-pr`) composes the gated dump onto current `main` and pushes
+#      the bot commit straight to `main` with the job token. No PR, no bot
+#      branch, no approval, no human merge (founder ruling 2026-11-27, "Push to
+#      main directly"). A push refused because `main` moved is re-composed onto
+#      the fresh `main`, three attempts at most. The three lines above are kept
+#      as lineage.
 #      Both jobs sit ABOVE `apply` in this file; run order comes from `needs:`.
 #
 # Backdated-migration policy is enforced at PR-time, NOT here. See
@@ -165,6 +172,8 @@ concurrency:
 # workflow DEFAULT stays `contents: read`, and exactly one job, `redump-pr`, is
 # uplifted to `contents: write` + `pull-requests: write`; `redump-dump` adds only
 # `packages: read`. The sentence above is kept as lineage.
+# ⛔ CORRECTED 2026-11-27 (Phase 258): the one uplifted job is now `redump-push`,
+# with `contents: write` only; `pull-requests: write` was dropped with the PR.
 # The actual DB-mutation power comes from the
 # SUPABASE_ACCESS_TOKEN secret + the workflow_dispatch-only trigger +
 # the PR-time backdated-migration policy enforced by
@@ -1260,6 +1269,8 @@ jobs:
   # which is exactly what the ghcr contract demands of any job that pulls an image
   # ("the workflow's permissions plus packages: read, nothing more"). `redump-pr`
   # below holds the write token and no PROD credential.
+  # ⛔ CORRECTED 2026-11-27 (Phase 258): that job is now `redump-push`. It still
+  # holds the write token and no PROD credential, and D-21 is kept.
   #
   # ⚠️ `environment: Production` is here for the audit trail, and it is NOT a stop.
   # CORRECTED 2026-09-23 (Phase 164.4.2, CLAUDE.md): the founder removed the
@@ -1272,6 +1283,9 @@ jobs:
   # marker defect) is one a human must see before a dump can reach a public PR.
   # The cost is accepted: a red run may hold the Railway deploy that waits on
   # this workflow's checks (assumption A7).
+  # ⛔ CORRECTED 2026-11-27 (Phase 258): a refusal here is now what stands between
+  # a dump and public `main`, because the bot commit is pushed straight to `main`
+  # and no reviewer comes after it. The sentence above is kept as lineage.
   redump-dump:
     needs: [apply]
     if: needs.apply.result == 'success' && github.ref == 'refs/heads/main'
@@ -1385,6 +1399,7 @@ jobs:
       # after every gate above passed (D-21), so it carries no always(). The
       # artifact is kept for one day: this repo is public, and the dump is only
       # needed until `redump-pr` below has read it.
+      # ⛔ CORRECTED 2026-11-27 (Phase 258): the reader is `redump-push`.
       - name: Upload the gated dump (1 day)
         if: steps.gate.outputs.changed == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -1395,6 +1410,8 @@ jobs:
           if-no-files-found: error
 
   # ── PHASE 164.9.5: PUT THE GATED RE-DUMP IN FRONT OF A HUMAN, AS ONE BOT PR ──
+  # ⛔ CORRECTED 2026-11-27 (Phase 258): the heading above is lineage. This job no longer opens a PR
+  # and shows nothing to a human; the corrected block below the four paragraphs says what it does.
   # This job holds the WRITE token and NO PROD credential (D-21): the dump reaches
   # it only as the artifact `redump-dump` uploaded after every gate passed. It
   # runs no third-party code beyond the SHA-pinned checkout, setup-node and
@@ -1414,21 +1431,81 @@ jobs:
   # reach main. That residual is accepted until a ruleset exists, and it is
   # bounded by the ONE hard-coded refspec below, which plan 09's wiring test pins
   # as the only push in this file.
-  redump-pr:
+  #
+  # ⛔ CORRECTED 2026-11-27 (Phase 258 REDUMPDIRECT). The heading and the four
+  # paragraphs above are kept as LINEAGE; they describe the bot PR this job used to
+  # open. Read this block for what the job does now.
+  #
+  # (a) The founder ruling of 2026-11-27 is "Push to main directly". It overrides
+  #     D-13 (a human merges every re-dump) and D-23 (approval-required PR runs), and
+  #     it retires D-11 (one reused PR), D-12 (approve or reopen) and D-24 (never
+  #     force-push over a human commit) together with the bot branch. There is no
+  #     pull request, no bot branch, no approval environment and no human merge. This
+  #     job pushes ONE bot commit straight to `main`.
+  # (b) D-25's principle is KEPT: ONE hard-coded push, now `HEAD:refs/heads/main`. It
+  #     lives in `scripts/baseline-redump.mjs` as `PUSH_ARGV`, so this file holds no
+  #     git push line at all. `src/__tests__/baseline-redump-wiring.test.ts` pins both
+  #     facts. The push is plain and never forced. A refused push is retried by
+  #     re-composing onto the fresh `main` (never a rebase), at most
+  #     `MAX_PUSH_ATTEMPTS` times (three).
+  # (c) D-21 is KEPT: the job runs no `npm ci` and holds no PROD credential, and the
+  #     token reaches the push child only.
+  # (d) A push made with the workflow token starts no workflow (GitHub's rule for
+  #     `GITHUB_TOKEN`). The bot commit on `main` therefore carries ZERO Actions runs:
+  #     no `ci.yml`, no `sql-function-snapshot.yml`. That is its normal shape, by
+  #     construction. It is NOT the skip-trailer failure that CLAUDE.md "CI gate
+  #     integrity" section 1 describes; that one is a human commit whose runs were
+  #     suppressed by its own message.
+  # (e) `ci.yml` and `sql-function-snapshot.yml` first run over the re-dump tree on
+  #     the NEXT push to `main`. A class such as a stale `NAME_SET_RATCHET` row
+  #     (precedent: PR #1398) turns that push red by name, and an ordinary PR fixes it.
+  # (f) Railway deploys every push to `main`. A check-less bot commit gives the API
+  #     service nothing to wait for, so after a migration merge the bot commit is what
+  #     deploys the API. Accepted and recorded in the phase CONTEXT.
+  # (g) The next push's `predecessorVerdict` reads `absent`, so that push runs the
+  #     FULL `sql-mutation` corpus and skips the docs-only short path. That costs
+  #     runner time, never correctness.
+  # (h) This workflow's `concurrency:` group still serialises re-dump runs, so the
+  #     retry only ever meets a human merge.
+  #
+  # WHAT VERIFIES THE BOT COMMIT, stated plainly, since no workflow runs on it and
+  # no human reads it. Everything below runs BEFORE the push and is automated:
+  #   1. `redump-dump` (PROD credential, read-only token): the five-class secret scan
+  #      over every dump line, the sha256-pinned gitleaks scan, the integrity gate
+  #      (no NUL bytes, `client_encoding`, no home path), the shape gate, which
+  #      refuses any dump carrying a data statement, so the content is schema only
+  #      and never table rows, and the regeneration of the carried-migrations marker.
+  #      The artifact uploads only when all of them pass.
+  #   2. This job (write token, no PROD credential): the compose-side re-scan of the
+  #      same dump, which trusts no verdict it did not measure, the offline gates
+  #      (the no-op and older-dump refusals, `--check-currency`, the baseline
+  #      content-drift gate, the staleness check, the version-bump mirror, the
+  #      six-path staged-set judge), and the skip-token judge over the commit
+  #      message, the CHANGELOG entry and the Regenerated section.
+  # RECORDED RESIDUALS, accepted and not fixed here: (i) the D-33 limit, a dump
+  # truncated after its CREATE EXTENSION lines is not refused, and it now reaches
+  # `main` with no reviewer; (ii) the full CI verdict on the re-dump tree arrives
+  # only at the next push, see (e); (iii) Railway deploys the check-less commit,
+  # see (f).
+  #
+  # Deferred and NOT planned by this phase: waiting for the parent's CI before the
+  # push, a tokenless pre-push verify job, and `predecessorVerdict` looking through a
+  # bot commit.
+  redump-push:
     needs: [redump-dump]
     if: needs.redump-dump.result == 'success' && needs.redump-dump.outputs.changed == 'true' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Uplifted for this job only (D-05 as amended by D-21): push the bot branch
-    # and open or edit its PR. No actions: write (D-12).
+    # Uplifted for this job only (D-05 as amended by D-21): push one bot commit to
+    # main. No pull-requests or actions scope: nothing here opens, edits or merges
+    # a PR, and nothing dispatches a workflow.
     permissions:
       contents: write
-      pull-requests: write
     steps:
       # Compose judges CURRENT main, not the merge the dump was taken after
-      # (D-15, RESEARCH F6), and the bot-branch check needs origin/main (D-24),
-      # hence the full history. The job token is NOT persisted into .git/config:
-      # the push step below authenticates explicitly, for that step only.
+      # (D-15, RESEARCH F6), hence the full history. The job token is NOT persisted
+      # into .git/config: the last step's env is the only place it appears, and the
+      # script hands it to the push child alone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           ref: main
@@ -1443,37 +1520,10 @@ jobs:
           path: ${{ runner.temp }}/redump-in
       - name: baseline-redump self-test
         run: node scripts/baseline-redump.mjs --self-test
-      - name: Compose the re-dump onto current main
-        id: compose
-        run: node scripts/baseline-redump.mjs --compose --in "${RUNNER_TEMP}/redump-in" --out "${RUNNER_TEMP}/redump-pr"
-      # D-24: a commit on the bot branch by anyone but the bot is a human edit,
-      # and it is refused loudly rather than force-pushed away while an OPEN pull
-      # request has the branch as its head (CR-02). Once that PR is merged or
-      # closed, the branch is reset under the lease with a ::notice::, so a
-      # squash merge cannot wedge every later run. The public repo is fetched,
-      # and its open PRs listed through the REST API, anonymously, so this step
-      # carries no token.
-      - name: Refuse to overwrite a human commit on the bot branch
-        id: botbranch
-        if: steps.compose.outputs.committed == 'true'
-        run: node scripts/baseline-redump.mjs --check-bot-branch --remote origin
-      # The ONLY place the job token is exposed (D-05). One push, to the one
-      # hard-coded bot ref (D-25), with a lease on the sha the step above observed.
-      # The credential helper is cleared and then delegated to `gh auth
-      # git-credential` for this invocation only (RESEARCH F10, assumption A3).
-      # If the first real run's push is refused, the remedy is F10's fallback
-      # (assumption A4): an `http.https://github.com/.extraheader` basic-auth
-      # header built from the same token, masked first, scoped to the same
-      # single push.
-      - name: Push the bot branch and open or edit its PR
-        if: steps.compose.outputs.committed == 'true'
+      - name: Compose the re-dump onto current main and push it straight to main
         env:
           GH_TOKEN: ${{ github.token }}
-          LEASE: ${{ steps.botbranch.outputs.lease }}
-        run: |
-          set -euo pipefail
-          git -c credential.helper= -c 'credential.helper=!gh auth git-credential' push --force-with-lease="refs/heads/automation/baseline-redump:${LEASE}" origin HEAD:refs/heads/automation/baseline-redump
-          node scripts/baseline-redump.mjs --open-or-edit-pr --title-file "${RUNNER_TEMP}/redump-pr/pr-title.txt" --body-file "${RUNNER_TEMP}/redump-pr/pr-body.md"
+        run: node scripts/baseline-redump.mjs --compose-and-push --in "${RUNNER_TEMP}/redump-in"
 
   apply:
     # Area 1 Q2, LOCKED: a TEST apply that FAILED or was SKIPPED blocks the PROD

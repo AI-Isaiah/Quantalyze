@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * BASELINE RE-DUMP automation (Phase 164.9.5 AUTOREDUMP) — the offline half of
- * the `redump-dump` / `redump-pr` jobs in `.github/workflows/supabase-migrate.yml`.
+ * the `redump-dump` / `redump-push` jobs in `.github/workflows/supabase-migrate.yml`.
  *
  * ⚠️ WHY THIS EXISTS: after a PROD migration apply, `supabase/schema/baseline.sql`
  * no longer describes production, and `baseline-content-drift` goes red on `main`
@@ -15,17 +15,21 @@
  *                 carried-migrations marker from the MERGE tree (never the working
  *                 tree, D-09), and write a gated out dir. A dump byte-identical to
  *                 the committed pair is a no-op (D-10): `changed=false`, exit 0.
- *   --compose     (write-token job) copy the gated pair onto a checkout of `main`,
- *                 run the real offline gates as child processes, write VERSION,
- *                 package.json, CHANGELOG.md and BASELINE.md, stage EXACTLY the six
- *                 paths by explicit path (D-17), and commit as github-actions[bot].
+ *   --compose-and-push  (write-token job, Phase 258) copy the gated pair onto a
+ *                 checkout of `main`, run the real offline gates as child processes,
+ *                 write VERSION, package.json, CHANGELOG.md and BASELINE.md, stage
+ *                 EXACTLY the six paths by explicit path (D-17), commit as
+ *                 github-actions[bot], then ONE plain push of HEAD to
+ *                 refs/heads/main through PUSH_ARGV. The token reaches the push
+ *                 child only (D-21 kept): takePushToken removes it from process.env
+ *                 before anything is composed.
  *
  * ⛔ THIS REPOSITORY IS PUBLIC and the dump is a pg_dump of the production
  * catalogue. Nothing here prints a line of the dump, a DSN, a token or a project
  * ref (D-06). Every printed value is a sha prefix, a byte count, a shape count or
  * a gate's own summary line.
  *
- * ⛔ node builtins only. `redump-pr` runs this with no `npm ci`, so the three
+ * ⛔ node builtins only. `redump-push` runs this with no `npm ci`, so the three
  * offline gates run as CHILD PROCESSES rather than being imported — with one
  * exception: `RECORDED_SHA_RE_ALL` is imported from check-baseline-staleness.mjs
  * (node builtins only itself, and its `main` is guarded by `invokedDirectly()`),
@@ -40,16 +44,9 @@
  *     node scripts/baseline-redump.mjs --self-test [--with-gitleaks]
  *     node scripts/baseline-redump.mjs --gate-dump --dump <file> --merge <40-hex> \
  *          --run-id <digits> --cli-version <x.y.z> --out <dir>
- *     node scripts/baseline-redump.mjs --compose --in <dir> --out <dir>
- *     node scripts/baseline-redump.mjs --check-bot-branch --remote <name>
- *     node scripts/baseline-redump.mjs --open-or-edit-pr --title-file <f> --body-file <f>
+ *     node scripts/baseline-redump.mjs --compose-and-push --in <dir>
  *
- *   --check-bot-branch  (write-token job, a step holding NO token) refuse to let the
- *                 force-push discard a commit on the bot branch not authored by the
- *                 bot, naming the pull request it sits on (D-24), and emit the
- *                 observed tip as the push's lease (`lease=`, empty when absent).
- *   --open-or-edit-pr  (the push step, GH_TOKEN set) create the one bot PR or edit
- *                 it; refuse more than one; never merge (D-11, D-13). `pr_number=`.
+ * ⛔ CORRECTED 2026-11-27 (Phase 258): the write-token job opened ONE bot pull request on a fixed bot branch until this phase; it now pushes the bot commit straight to main (founder ruling, CONTEXT).
  */
 import { createHash, randomBytes } from "node:crypto";
 import {
@@ -108,13 +105,12 @@ export const SECRET_SCAN_RE = new RegExp(SECRET_SCAN_PATTERN);
 /**
  * STRICTER than `check-baseline-currency.mjs`'s `MIGRATION_BASENAME_RE`
  * (`^[0-9]+_…`): exactly fourteen timestamp digits. A basename is interpolated
- * into a commit message, a CHANGELOG entry and a PR body here (D-27), so the
+ * into a commit message and a CHANGELOG entry here (D-27), so the
  * shape every real migration has (measured: all 278 at plan time) is the only
  * shape accepted — anything else is refused before it is written anywhere.
  */
 export const MIGRATION_BASENAME_STRICT_RE = /^[0-9]{14}_[a-z0-9_]+\.sql$/;
 
-export const BOT_BRANCH = "automation/baseline-redump";
 export const BOT_NAME = "github-actions[bot]";
 export const BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com";
 /** The six paths of PR #864's footprint (D-15, D-16, D-17), sorted. */
@@ -126,13 +122,6 @@ export const STAGED_PATHS = [
   "supabase/schema/baseline-carried-migrations.txt",
   "supabase/schema/baseline.sql",
 ];
-/**
- * The repository the PR body's SHA-bound `gh api` command names. `redump-pr` reads
- * `GITHUB_REPOSITORY`, which Actions always sets; a local run outside Actions
- * (the plan-03 scratch-clone verify) has none and falls back to this.
- */
-export const DEFAULT_REPO = "AI-Isaiah/Quantalyze";
-const REPO_SLUG_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 /** Must equal `ci.yml`'s `secret-scan` job `GITLEAKS_VERSION:` (D-26; plan 09 pins the equality). */
 export const GITLEAKS_VERSION = "8.30.1";
 
@@ -537,7 +526,7 @@ function shapeProse(s) {
 const short = (sha, n = 8) => String(sha).slice(0, n);
 
 /*
- * ── The composers (D-14, D-16, D-23) ──
+ * ── The composers (D-14, D-16) ──
  * Each takes the measured object `--compose` assembles (the run id, the merge,
  * the old and new sha256 and shapes, the newly carried basenames, the captured
  * gate lines) and nothing else: no composer reads a file or re-measures, so every
@@ -560,8 +549,8 @@ const NONE_CARRIED = "none — the marker diff added no migration basename";
 
 /**
  * The CHANGELOG entry (D-16), in this repo's vocabulary: `### Changed` for what
- * the six paths now say, `### Notes` for provenance and the judgment left to the
- * reviewer. The drift gate's `SCOPE —` line is never carried: only the two
+ * the six paths now say, `### Notes` for provenance and for the statement that the
+ * bot does not write the "what it adds" judgment. The drift gate's `SCOPE —` line is never carried: only the two
  * captured lines (`functions compared …`, `findings …`) reach it.
  */
 export function composeChangelogEntry(m) {
@@ -582,8 +571,10 @@ export function composeChangelogEntry(m) {
     "",
     "### Notes",
     `- The dump was taken read-only by the \`redump-dump\` job after the \`apply\` job of Supabase Migrate run ` +
-      `\`${m.runId}\` succeeded, and this entry was composed by the \`redump-pr\` job. Run \`${m.runId}\` is the provenance anchor.`,
-    '- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. ' +
+      `\`${m.runId}\` succeeded, ` +
+      "and this entry was composed and pushed straight to `main` by the `redump-push` job. " +
+      `Run \`${m.runId}\` is the provenance anchor.`,
+    '- The "what it adds" judgment for each newly carried migration is a human one, so the bot does not write it. ' +
       "Every figure above is measured.",
   ].join("\n");
 }
@@ -601,8 +592,8 @@ export function composeRegeneratedSection(m) {
     `### Regenerated ${m.date} — automated re-dump after Supabase Migrate run ${m.runId}`,
     "",
     `Taken read-only by the \`redump-dump\` job of Supabase Migrate run \`${m.runId}\`, after that run's \`apply\` job ` +
-      `applied merge \`${short(m.merge)}\` to PRODUCTION, and composed onto \`main\` by the \`redump-pr\` job. Every value ` +
-      "below is measured.",
+      `applied merge \`${short(m.merge)}\` to PRODUCTION, ` +
+      "and composed and pushed straight to `main` by the `redump-push` job. Every value below is measured.",
     "",
     "**Which migrations the new dump now carries** — from the marker diff:",
     "",
@@ -622,61 +613,14 @@ export function composeRegeneratedSection(m) {
   ].join("\n");
 }
 
-/**
- * The PR body (D-12 as amended by D-23, D-13, D-16). GitHub holds a
- * `GITHUB_TOKEN` PR's `pull_request` runs for approval, and branch protection is
- * off, so without these instructions the PR can be merged with no check ever
- * run. `m.repo` and `m.headSha` are the repository and the bot commit's own sha.
- */
-export function composePrBody(m) {
-  const carried = m.newlyCarried.length === 0 ? NONE_CARRIED : m.newlyCarried.map((b) => `\`${b}\``).join(", ");
-  return [
-    `Automated baseline re-dump after Supabase Migrate run \`${m.runId}\`, which applied merge \`${short(m.merge)}\` to ` +
-      `PRODUCTION. sha256 \`${short(m.oldSha)}…\` → \`${short(m.newSha)}…\`, VERSION \`${m.oldVersion}\` → \`${m.newVersion}\`.`,
-    "",
-    "This PR is never auto-merged. A human reviews it and merges it, or closes it.",
-    "",
-    "## Before you review: CI has not run yet",
-    "",
-    "1. GitHub creates the CI runs of a PR opened or updated by the workflow token in an approval-required state. " +
-      "Click **Approve workflows to run** in the merge box first.",
-    "2. Branch protection is off, so this PR can be merged with zero completed checks. A merge box with nothing red is not a verdict.",
-    "3. Read the conclusion of every run bound to the head sha, not only how many there are. " +
-      "A run waiting for approval is already listed:",
-    "",
-    "   ```",
-    `   gh api "repos/${m.repo}/actions/runs?head_sha=${m.headSha}" -q '.workflow_runs[] | [.name, .status, .conclusion] | @tsv'`,
-    "   ```",
-    "",
-    "   Every run must read `completed` with the conclusion `success`.",
-    "4. Fallback only, if the approve button does not appear: close and reopen the PR, then repeat steps 1 to 3.",
-    "",
-    "## What the bot did not write",
-    "",
-    `Newly carried migrations: ${carried}.`,
-    "",
-    `The bot writes measured values only. Add the "what it adds" column for each newly carried migration to the ` +
-      `\`### Regenerated ${m.date}\` section of \`supabase/schema/BASELINE.md\`, as a commit on this branch. While this PR ` +
-      "is open, a later re-dump refuses to force-push over a commit that is not the bot's, and names this PR instead. Once " +
-      "this PR is merged or closed, the next re-dump resets the branch, so land that commit through this PR.",
-    "",
-    `## If \`main\` has moved, or VERSION \`${m.newVersion}\` collides`,
-    "",
-    `Do not rebase or hand-edit this branch. If \`main\` has moved since this PR was composed, or VERSION \`${m.newVersion}\` ` +
-      "collides with another PR's version, re-dispatch `supabase-migrate.yml` on `main` " +
-      "(`gh workflow run supabase-migrate.yml --ref main`). The bot recomposes onto the current `main` and updates this branch.",
-    "",
-  ].join("\n");
-}
-
-export function composePrTitle(m) {
+export function composeCommitTitle(m) {
   return `chore(release): v${m.newVersion} — baseline re-dump after the PROD apply of ${short(m.merge)}`;
 }
 
 export function composeCommitMessage(m) {
   const carried = m.newlyCarried.length === 0 ? "(none)" : m.newlyCarried.join(", ");
   return [
-    composePrTitle(m),
+    composeCommitTitle(m),
     "",
     `Automated by the redump jobs of Supabase Migrate run ${m.runId}, after the PROD apply of merge ${short(m.merge)}.`,
     "",
@@ -968,14 +912,85 @@ export function runGitleaksGate({ gitleaks, repoRoot, target }) {
   return version;
 }
 
-// ── the bot branch and the pull requests at its tip (D-11, D-13, D-24) ────────
+// ── the one push, straight to main (Phase 258 REDUMPDIRECT) ───────────────────
 
-const BOT_REF = `refs/heads/${BOT_BRANCH}`;
-/** A remote NAME, never an option or a URL: it is the first positional of `git ls-remote`/`git fetch`. */
+/**
+ * The ONE git invocation in this file that writes to the remote. D-25's principle is
+ * kept (CONTEXT A6): a single hard-coded refspec, and nothing builds the remote or the
+ * ref, which is now HEAD:refs/heads/main. The push is plain: no lease, no plus-prefixed
+ * refspec, no force, mirror, all, tags, delete or prune flag. A refusal is answered by
+ * re-composing onto the fresh main, never by forcing. The credential helper is cleared,
+ * then delegated to `gh auth git-credential`, the form proven live by run 46036945243.
+ * ⛔ Production code must not put the word for this operation inside quote characters
+ * anywhere but the array below, and must not repeat the argv constant's spread outside
+ * pushToMain: the wiring test counts both in the production region.
+ */
+export const PUSH_ARGV = Object.freeze([
+  "-c",
+  "credential.helper=",
+  "-c",
+  "credential.helper=!gh auth git-credential",
+  "push",
+  "origin",
+  "HEAD:refs/heads/main",
+]);
+
+/**
+ * The push credential leaves `process.env` before any child is spawned. `realRunner`
+ * passes no env option, and `git()`, `anonGit` and compose's merge-base spawn all
+ * inherit `process.env`, so this delete is what keeps compose and its gates from ever
+ * seeing the token (CONTEXT: the job token is exposed to the push invocation ONLY).
+ */
+export function takePushToken(env) {
+  const token = env.GH_TOKEN ?? env.GITHUB_TOKEN ?? "";
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  return token;
+}
+
+/**
+ * The only consumer of the token and the only spawn of the argv constant. git's
+ * refusal text carries no secret and the token is never in argv, so the first 2000
+ * characters of stderr are passed through for the log.
+ */
+function pushToMain({ repoRoot, token }) {
+  const r = spawnSync("git", [...PUSH_ARGV], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    env: { ...process.env, GH_TOKEN: token, GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (r.stderr) process.stderr.write(r.stderr.slice(0, 2000));
+  return { status: r.error ? -1 : r.status };
+}
+
+/**
+ * How many times --compose-and-push may attempt the plain push of HEAD to main, in total
+ * (CONTEXT: bounded at three attempts). Only a refusal caused by a concurrent merge
+ * counts toward a retry; any other refusal fails at once.
+ */
+export const MAX_PUSH_ATTEMPTS = 3;
+
+/**
+ * The tip of the remote's CURRENT main, fetched fresh (never a stale tracking ref) and
+ * anonymously: anonGit clears the credential helper and the repository is public, so
+ * this holds no token. Any failure is MEASURE_FAIL: whether main moved was not measured.
+ */
+function fetchMainTip({ repoRoot, remote }) {
+  assertRemoteName(remote);
+  const fetched = anonGit(repoRoot, ["fetch", "--quiet", "--no-tags", remote, `+refs/heads/main:refs/remotes/${remote}/main`]);
+  if (fetched.status !== 0) {
+    throw new Error(`MEASURE_FAIL: git fetch of main exit ${fetched.status}; whether main moved was not measured, so nothing more is pushed`);
+  }
+  const tip = anonGit(repoRoot, ["rev-parse", "--verify", "--quiet", `refs/remotes/${remote}/main^{commit}`]).stdout.trim();
+  if (!/^[0-9a-f]{40}$/.test(tip)) throw new Error("MEASURE_FAIL: main's fetched tip is unreadable");
+  return tip;
+}
+
+// ── anonymous git and main's migration listing ───────────────────────────────
+
+/** A remote NAME, never an option or a URL: it is the first positional of `git fetch`. */
 const REMOTE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
-/** A SHA-1 or SHA-256 object name, as `git ls-remote` and `git log %H` print it. */
-const OBJECT_SHA_RE = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-const PULL_HEAD_LINE_RE = /^([0-9a-f]+)\trefs\/pull\/([0-9]+)\/head$/;
 
 function assertRemoteName(remote) {
   if (!REMOTE_NAME_RE.test(String(remote))) {
@@ -984,52 +999,9 @@ function assertRemoteName(remote) {
 }
 
 /**
- * The pull requests whose `refs/pull/<n>/head` in `git ls-remote` output carries
- * exactly `sha`, as ascending numbers. Only `/head` refs count: GitHub moves a PR's
- * head ref with its branch while the PR is open and freezes it when the PR closes,
- * so a tip match names the PR(s) that branch state belongs to. `/merge` refs are
- * GitHub's trial merges and name nothing a human pushed.
- */
-export function findPullRefsForSha(lsRemoteText, sha) {
-  const prs = new Set();
-  for (const line of String(lsRemoteText).split("\n")) {
-    const m = PULL_HEAD_LINE_RE.exec(line.replace(/\r$/, ""));
-    if (m && m[1] === sha) prs.add(Number(m[2]));
-  }
-  return [...prs].sort((a, b) => a - b);
-}
-
-/** The bot branch's tip in `git ls-remote` output; null when the branch is absent. An unreadable line is MEASURE_FAIL. */
-export function botBranchTip(lsRemoteText) {
-  const tips = String(lsRemoteText)
-    .split("\n")
-    .map((l) => l.replace(/\r$/, "").split("\t"))
-    .filter((cols) => cols[1] === BOT_REF)
-    .map((cols) => cols[0]);
-  if (tips.length > 1 || (tips.length === 1 && !OBJECT_SHA_RE.test(tips[0]))) {
-    throw new Error("MEASURE_FAIL: git ls-remote printed an unreadable line for the bot branch");
-  }
-  return tips.length === 1 ? tips[0] : null;
-}
-
-/**
- * D-24 over `git log --format=%H%x09%an%x09%ae <main>..<bot branch>`: every commit
- * must be authored by BOT_NAME with BOT_EMAIL. Returns the verdict, the commit count
- * and the SHORT shas of the foreign commits; author names, emails and messages
- * never leave this function. A line that does not parse is MEASURE_FAIL (a refusal).
- */
-export function judgeForeignCommits(logText) {
-  const rows = String(logText).split("\n").filter(Boolean).map((l) => l.split("\t"));
-  if (rows.some((r) => r.length !== 3 || !OBJECT_SHA_RE.test(r[0]))) return { verdict: "measure_fail", total: rows.length, foreign: [] };
-  const foreign = rows.filter(([, name, email]) => name !== BOT_NAME || email !== BOT_EMAIL).map(([sha]) => short(sha));
-  return { verdict: foreign.length > 0 ? "refuse" : "pass", total: rows.length, foreign };
-}
-
-/**
  * git with NO credential: the helper list is reset and the terminal prompt is off, so
  * this can never pick up a token or hang waiting for one. The repository is public,
- * so `ls-remote` and `fetch` of the bot branch and `refs/pull/*` need none, and the
- * steps that run them hold none (plan 04). stderr is not passed through.
+ * so a fetch of `main` needs none. stderr is not passed through.
  */
 function anonGit(repoRoot, args) {
   const r = spawnSync("git", ["-c", "credential.helper=", ...args], {
@@ -1039,11 +1011,6 @@ function anonGit(repoRoot, args) {
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   return { status: r.error ? -1 : r.status, stdout: r.stdout ?? "" };
-}
-
-/** ONE anonymous `git ls-remote` for the bot branch and every `refs/pull/<n>/head` together. */
-function lsRemoteBotRefs(repoRoot, remote) {
-  return anonGit(repoRoot, ["ls-remote", remote, BOT_REF, "refs/pull/*/head"]);
 }
 
 /** The `.sql` basenames of one `git ls-tree --name-only <ref> supabase/migrations/` listing, in listing order. */
@@ -1107,304 +1074,6 @@ export function judgeMainListing(mergeListing, mainListing) {
     };
   }
   return { verdict: "equal", text: null };
-}
-
-/**
- * The bot-PR status the D-10 no-op notice carries (RESEARCH Open Question 3). It
- * never throws and never touches a PR (D-13): a lookup that fails yields a
- * `::warning::` naming the exit code, because the dump gate already passed and a
- * failed status lookup must not turn a legitimate no-op red (RESEARCH A7).
- */
-export function botPrStatus(repoRoot, remote, lsRemote = lsRemoteBotRefs) {
-  const notMeasured = (why) => ({
-    warning: `::warning::baseline-redump: bot-PR status not measured (${why})`,
-    text: "bot branch status not measured (see the warning above)",
-  });
-  let ls;
-  try {
-    assertRemoteName(remote);
-    ls = lsRemote(repoRoot, remote);
-  } catch {
-    return notMeasured("git ls-remote exit -1");
-  }
-  if (ls.status !== 0) return notMeasured(`git ls-remote exit ${ls.status}`);
-  let tip;
-  try {
-    tip = botBranchTip(ls.stdout);
-  } catch {
-    return notMeasured("git ls-remote exit 0, unreadable output");
-  }
-  if (tip === null) return { warning: null, text: "bot branch absent" };
-  const prs = findPullRefsForSha(ls.stdout, tip);
-  return {
-    warning: null,
-    text:
-      prs.length > 0
-        ? `bot branch at ${short(tip)}; pull request(s) ${prs.map((n) => `#${n}`).join(", ")} point at it (not closed automatically)`
-        : `bot branch at ${short(tip)}; no pull request points at it`,
-  };
-}
-
-/**
- * CR-02: judge the REST answer to "open pull requests whose head is the bot
- * branch". Only an array of objects with a positive-integer `number`, `state`
- * `open` and `head.ref` equal to BOT_BRANCH is read; anything else is
- * MEASURE_FAIL, because an unreadable answer is never "no open PR".
- */
-export function judgeOpenBotPrs(bodyText) {
-  let parsed;
-  try {
-    parsed = JSON.parse(bodyText);
-  } catch {
-    return { verdict: "measure_fail", detail: "the answer is not JSON", numbers: [] };
-  }
-  if (!Array.isArray(parsed)) return { verdict: "measure_fail", detail: "the answer is not a JSON array", numbers: [] };
-  const readable = parsed.every(
-    (p) => p && Number.isInteger(p.number) && p.number > 0 && p.state === "open" && p.head && p.head.ref === BOT_BRANCH,
-  );
-  if (!readable) return { verdict: "measure_fail", detail: "an entry is not an open pull request headed by the bot branch", numbers: [] };
-  return { verdict: "pass", detail: "", numbers: parsed.map((p) => p.number).sort((a, b) => a - b) };
-}
-
-/**
- * CR-02: the curl argv for the anonymous open-PR lookup. `-q` FIRST stops curl
- * reading a `.curlrc`, and no header carries a credential: the repository is
- * public, and the step that runs this holds no token. `gh` is deliberately not
- * used here, because it picks up GH_TOKEN / GITHUB_TOKEN by itself.
- */
-export function openBotPrsCurlArgv(repo) {
-  if (!REPO_SLUG_RE.test(String(repo))) throw new Error("the repository slug is not <owner>/<name>; refusing to look up its pull requests");
-  const head = encodeURIComponent(`${repo.split("/")[0]}:${BOT_BRANCH}`);
-  return [
-    "-q", "-sS", "--max-time", "30",
-    "-H", "Accept: application/vnd.github+json",
-    "-H", "X-GitHub-Api-Version: 2022-11-28",
-    "-H", "User-Agent: baseline-redump",
-    "-w", "\n%{http_code}",
-    `https://api.github.com/repos/${repo}/pulls?head=${head}&state=open&per_page=100`,
-  ];
-}
-
-/**
- * The real lookup. Anonymous api.github.com calls share a small per-IP budget on
- * hosted runners, so a non-200 (403 above all) is MEASURE_FAIL naming the status,
- * never "no open PR". It runs only when a foreign commit was found.
- */
-function anonOpenBotPrs({ repo }) {
-  const r = spawnSync("curl", openBotPrsCurlArgv(repo), { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  if (r.error || r.status !== 0) {
-    throw new Error(`MEASURE_FAIL: curl exit ${r.error ? -1 : r.status}; the bot branch's open pull requests were not measured, so nothing may be pushed`);
-  }
-  const out = String(r.stdout ?? "");
-  const cut = out.lastIndexOf("\n");
-  const code = out.slice(cut + 1).trim();
-  if (code !== "200") {
-    const shown = /^[0-9]{3}$/.test(code) ? code : "unreadable";
-    throw new Error(`MEASURE_FAIL: the open pull request lookup answered HTTP ${shown}; nothing may be pushed until it is measured (re-dispatch supabase-migrate.yml on main)`);
-  }
-  const judged = judgeOpenBotPrs(out.slice(0, cut));
-  if (judged.verdict !== "pass") throw new Error(`MEASURE_FAIL: the open pull request lookup: ${judged.detail}; nothing may be pushed`);
-  return judged.numbers;
-}
-
-/**
- * --check-bot-branch (D-24, D-11). Emits `lease` for the push, or refuses.
- *
- * ⛔ The lease closes the window between this check and the push: plan 04's push
- * step passes `--force-with-lease=refs/heads/automation/baseline-redump:<lease>`,
- * so the force-push succeeds only while the remote branch is still the exact sha
- * whose commits were judged here. An EMPTY lease means "must not exist": if anyone
- * creates the branch after this check, the push is rejected.
- *
- * A commit the bot did not author (D-24) refuses ONLY while an OPEN pull request
- * has the bot branch as its head (CR-02), and the refusal names that PR. With no
- * open PR, the branch is reset under the lease, and a `::notice::` records the
- * released commits' short shas and the closed or merged PRs at the tip (or the
- * measured negative that none points at it). The open-PR lookup is anonymous
- * (`openBotPrsCurlArgv`) and runs only when a foreign commit was found; a lookup
- * that fails is MEASURE_FAIL and emits no lease.
- */
-export function checkBotBranch({ repoRoot, remote, emit, repo = DEFAULT_REPO, lsRemote = lsRemoteBotRefs, openPrs = anonOpenBotPrs }) {
-  assertRemoteName(remote);
-  const ls = lsRemote(repoRoot, remote);
-  if (ls.status !== 0) {
-    throw new Error(`MEASURE_FAIL: git ls-remote exit ${ls.status}; the bot branch was not measured, so no lease is emitted and nothing may be pushed`);
-  }
-  const tip = botBranchTip(ls.stdout);
-  if (tip === null) {
-    console.log("baseline-redump bot-branch: absent");
-    emit("lease", "");
-    return { present: false, lease: "", prs: [] };
-  }
-
-  const trackBot = `refs/remotes/${remote}/${BOT_BRANCH}`;
-  const trackMain = `refs/remotes/${remote}/main`;
-  const fetched = anonGit(repoRoot, ["fetch", "--quiet", "--no-tags", remote, `+${BOT_REF}:${trackBot}`, `+refs/heads/main:${trackMain}`]);
-  if (fetched.status !== 0) throw new Error(`MEASURE_FAIL: git fetch exit ${fetched.status}; the bot branch's commits were not measured`);
-  const fetchedTip = anonGit(repoRoot, ["rev-parse", "--verify", "--quiet", `${trackBot}^{commit}`]).stdout.trim();
-  if (fetchedTip !== tip) {
-    throw new Error(
-      `MEASURE_FAIL: the bot branch moved between ls-remote (${short(tip)}) and fetch (${short(fetchedTip) || "nothing"}); ` +
-        "the lease must be the sha whose commits were judged, so re-dispatch supabase-migrate.yml on main",
-    );
-  }
-  // R2-06: "Re-run failed jobs" on an older run's redump-pr composes that run's
-  // artifact onto main, and while a newer proposal is still open and unmerged,
-  // main's committed marker has not moved, so compose's subset check passes. The
-  // bot branch's own marker is what says the open proposal is newer: it carries a
-  // migration this composed commit (HEAD) lacks and main's checkout still holds.
-  // A name main's checkout lacks is a rename or deletion on main (WR-07), not newer.
-  const shown = (rev, what) => {
-    const r = anonGit(repoRoot, rev);
-    if (r.status !== 0) throw new Error(`MEASURE_FAIL: git ${rev[0]} of ${what} exit ${r.status}; whether the open proposal is newer was not measured`);
-    return r.stdout;
-  };
-  const headCarried = new Set(markerBasenames(shown(["show", `HEAD:${MARKER_REL}`], "this commit's marker")));
-  const headTree = new Set(migrationBasenames(shown(["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL], "this commit's migrations")));
-  const newer = markerBasenames(shown(["show", `${trackBot}:${MARKER_REL}`], "the bot branch's marker")).filter(
-    (b) => !headCarried.has(b) && headTree.has(b),
-  ).length;
-  if (newer > 0) {
-    throw new Error(
-      `the proposal on ${BOT_BRANCH} (tip ${short(tip)}) carries ${newer} migration(s) this composed commit does not, and main's checkout holds ` +
-        "them: it is newer than this run's dump (a re-run of an older run), so it is not replaced and nothing is pushed. " +
-        "Review the open proposal; to re-dump PROD now, dispatch a fresh run: gh workflow run supabase-migrate.yml --ref main",
-    );
-  }
-  const log = anonGit(repoRoot, ["log", "--format=%H%x09%an%x09%ae", `${trackMain}..${trackBot}`]);
-  if (log.status !== 0) throw new Error(`MEASURE_FAIL: git log exit ${log.status}; the bot branch's authors were not measured`);
-  const judged = judgeForeignCommits(log.stdout);
-  if (judged.verdict === "measure_fail") throw new Error("MEASURE_FAIL: git log printed a line this check cannot read; refusing to push");
-
-  const prs = findPullRefsForSha(ls.stdout, tip);
-  const prList = prs.map((n) => `#${n}`).join(", ");
-  if (judged.verdict === "pass") {
-    console.log(`baseline-redump bot-branch: present tip=${short(tip)} prs=${prs.length > 0 ? prs.map((n) => `#${n}`).join(",") : "none"}`);
-    emit("lease", tip);
-    return { present: true, lease: tip, prs };
-  }
-  // CR-02: a human commit is protected only while it is under review. The repo
-  // squash-merges and keeps merged branches, so after a merge the commit is never
-  // an ancestor of main and would wedge every later run; once no OPEN pull request
-  // has the branch as its head, a human has accepted or abandoned that work.
-  const foreignText = `${judged.foreign.length} of ${judged.total} commit(s) over main are not authored by ${BOT_NAME} (${judged.foreign.slice(0, MAX_LINES_PRINTED).join(", ")})`;
-  const open = openPrs({ repo });
-  if (open.length > 0) {
-    const openList = open.map((n) => `#${n}`).join(", ");
-    throw new Error(
-      `a human commit sits on ${BOT_BRANCH} and the redump will not overwrite it while it is under review: ${foreignText}. ` +
-        `It is on OPEN pull request(s) ${openList}. Merge ${openList} (or close it, or move the commit to a branch of your own), ` +
-        "then re-dispatch supabase-migrate.yml on main: once no open pull request has the branch as its head, the re-dump resets it",
-    );
-  }
-  const closed = prs.length > 0 ? `closed or merged pull request(s) ${prList} point at its tip` : "no pull request points at its tip";
-  console.log(
-    `::notice::baseline-redump: ${foreignText} on ${BOT_BRANCH}, and no OPEN pull request has the branch as its head (${closed}); ` +
-      `the branch is reset under the lease on tip ${short(tip)}`,
-  );
-  console.log(`baseline-redump bot-branch: present tip=${short(tip)} prs=${prs.length > 0 ? prs.map((n) => `#${n}`).join(",") : "none"} released=${judged.foreign.length}`);
-  emit("lease", tip);
-  return { present: true, lease: tip, prs, released: judged.foreign };
-}
-
-// ── the one pull request: create or edit, never merge (D-11, D-13, D-14) ──────
-
-const PR_URL_RE = /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/([0-9]+)$/;
-
-/**
- * The `gh` argv for the one bot PR: `pr create` when none is open, `pr edit <n>` when
- * one is. These two subcommands are the ONLY ones this function can return (D-13:
- * no merge, no auto-merge, no review or approval; the self-test asserts it). The
- * title and body file are bound with `--flag=value`, so neither can be read as a flag.
- */
-export function buildPrArgv({ existing, title, bodyFile, repo }) {
-  const common = ["--repo", repo, `--title=${title}`, `--body-file=${bodyFile}`];
-  if (existing === null) return ["pr", "create", "--base", "main", "--head", BOT_BRANCH, ...common];
-  if (!Number.isInteger(existing) || existing <= 0) throw new Error("the open pull request's number is not a positive integer");
-  return ["pr", "edit", String(existing), ...common];
-}
-
-/** A non-empty regular file's text; refused by FLAG name, before any gh call. */
-function readArgFile(path, flag) {
-  let st;
-  try {
-    st = statSync(path);
-  } catch {
-    throw new Error(`${flag} does not exist; refusing before any gh call`);
-  }
-  if (!st.isFile()) throw new Error(`${flag} is not a regular file; refusing before any gh call`);
-  const text = readFileSync(path, "utf8");
-  if (text.trim() === "") throw new Error(`${flag} is empty; refusing before any gh call`);
-  return text;
-}
-
-/** The real gh runner: argv only, never a shell. Its stderr is passed through only on a failure. */
-function realGh(argv) {
-  const r = spawnSync("gh", argv, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, env: process.env });
-  if (r.status !== 0 && r.stderr) process.stderr.write(r.stderr.slice(0, 2000));
-  return { status: r.error ? -1 : r.status, stdout: r.stdout ?? "" };
-}
-
-/**
- * --open-or-edit-pr. Creates the bot PR when none is open, edits it when exactly one
- * is, refuses when more than one is (D-11). The skip-token judge re-runs over the
- * title and body before gh is called at all (D-14). It needs the job token in
- * GH_TOKEN and the repository in GITHUB_REPOSITORY, and never falls back to a local
- * gh login or DEFAULT_REPO: a local run must not be able to open a real PR.
- */
-export function openOrEditPr({ titleFile, bodyFile, repo, token, gh = realGh, emit }) {
-  const title = readArgFile(titleFile, "--title-file").replace(/\r?\n$/, "");
-  const body = readArgFile(bodyFile, "--body-file");
-  if (/[\r\n]/.test(title) || title.length > 256) throw new Error("--title-file must hold ONE line of at most 256 characters");
-  const hits = [
-    ["the PR title", title],
-    ["the PR body", body],
-  ].flatMap(([where, text]) => judgeSkipTokens(text).map((cls) => `${where} carries skip-token class ${cls} of 6`));
-  if (hits.length > 0) {
-    for (const h of hits) console.error(`::error::baseline-redump: skip-token: ${h}`);
-    throw new Error(`refusing to open or edit the PR: ${hits.join("; ")}; gh was not called`);
-  }
-  if (typeof token !== "string" || token === "") {
-    throw new Error("GH_TOKEN is not set; --open-or-edit-pr runs only with the job token, never a local gh login");
-  }
-  if (!REPO_SLUG_RE.test(String(repo ?? ""))) throw new Error("GITHUB_REPOSITORY is not <owner>/<name>; refusing to guess the repository");
-
-  const list = gh(["pr", "list", "--repo", repo, "--head", BOT_BRANCH, "--base", "main", "--state", "open", "--json", "number"]);
-  if (list.status !== 0) throw new Error(`MEASURE_FAIL: gh pr list exit ${list.status}; the open PR count was not measured, so nothing is created or edited`);
-  let numbers;
-  try {
-    const parsed = JSON.parse(list.stdout);
-    if (!Array.isArray(parsed) || !parsed.every((p) => p && Number.isInteger(p.number) && p.number > 0)) throw new Error("shape");
-    numbers = parsed.map((p) => p.number).sort((a, b) => a - b);
-  } catch {
-    throw new Error("MEASURE_FAIL: gh pr list did not answer with an array of PR numbers; nothing is created or edited");
-  }
-  if (numbers.length > 1) {
-    throw new Error(
-      `${numbers.length} open pull requests have ${BOT_BRANCH} as their head (${numbers.map((n) => `#${n}`).join(", ")}); ` +
-        "refusing to pick one. Close all but one, then re-dispatch supabase-migrate.yml on main",
-    );
-  }
-  const existing = numbers.length === 1 ? numbers[0] : null;
-  const verb = existing === null ? "create" : "edit";
-  const r = gh(buildPrArgv({ existing, title, bodyFile, repo }));
-  if (r.status !== 0) throw new Error(`MEASURE_FAIL: gh pr ${verb} exit ${r.status}; no pr_number is emitted`);
-  const url = String(r.stdout)
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => PR_URL_RE.test(l))
-    .pop();
-  const printed = url ? Number(PR_URL_RE.exec(url)[1]) : null;
-  if (existing === null && printed === null) {
-    throw new Error("MEASURE_FAIL: gh pr create exited 0 but printed no pull request URL; check the bot branch's PRs by hand");
-  }
-  if (existing !== null && printed !== null && printed !== existing) {
-    throw new Error(`MEASURE_FAIL: gh pr edit #${existing} printed the URL of a different pull request (#${printed})`);
-  }
-  const number = existing ?? printed;
-  console.log(`baseline-redump pr: ${verb === "create" ? "created" : "edited"} ${url ?? `https://github.com/${repo}/pull/${number}`}`);
-  emit("pr_number", String(number));
-  return { number, created: existing === null };
 }
 
 // ── modes ─────────────────────────────────────────────────────────────────────
@@ -1478,7 +1147,7 @@ export function gateDump({
   }
   // SFH-01: refuse when main LACKS one of the merge's migrations. D-31: when main
   // is AHEAD, skip as the D-10 no-op does (changed=false, no out dir), so
-  // `redump-pr` skips and a superseded dump never turns main red.
+  // `redump-push` skips and a superseded dump never turns main red.
   const mainJudged = judgeMainListing(listed, mainListing({ repoRoot, remote }));
   console.log(`baseline-redump main-listing: ${mainJudged.verdict === "equal" ? "equal to the merge's" : "differs from the merge's"}`);
   if (mainJudged.verdict === "behind") throw new Error(mainJudged.text);
@@ -1529,11 +1198,8 @@ export function gateDump({
       `policies=${shapes.policies} carried=${listed.length} changed=${changed}`,
   );
   if (!changed) {
-    // Open Question 3: say whether a bot PR is still open, from the same token-free
-    // lookup --check-bot-branch uses. Nothing here closes, comments on or edits a PR (D-13).
-    const status = botPrStatus(repoRoot, remote);
-    if (status.warning) console.log(status.warning);
-    console.log(`::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; ${status.text}`);
+    // D-10: a no-op prints one notice. ⛔ CORRECTED 2026-11-27 (Phase 258): it also reported the bot PR's status until the bot branch was retired (CONTEXT A7).
+    console.log("::notice::baseline-redump: dump and marker are byte-identical to the committed pair — nothing to commit");
     emit("changed", "false");
     return { changed, measured };
   }
@@ -1580,8 +1246,7 @@ function captureLine(stdout, prefix, gateName) {
  * --compose. Run from the repo root of a checkout of `main`. Returns
  * `{committed, staged, measured}`. Throws on any refusal.
  */
-export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAULT_REPO }) {
-  if (!REPO_SLUG_RE.test(repo)) throw new Error("the repository slug is not <owner>/<name>; refusing to compose a PR body around it");
+export function compose({ repoRoot, inDir, runner, emit, date }) {
   const judgedMeasured = judgeMeasured(readFileSync(join(inDir, "measured.json"), "utf8"));
   if (judgedMeasured.defects.length > 0) refuseWriterDefects(judgedMeasured.defects);
   const measured = judgedMeasured.measured;
@@ -1679,8 +1344,8 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   // D-09: each gate needs a zero exit (runGate) AND a green verdict line.
   // ⛔ `scripts/dump-sql-functions.ts --check` is deliberately NOT run here
   // (RESEARCH Open Question 4, resolved): it needs `npm ci`, which would put
-  // third-party code in the job holding the write token. CI runs it on the bot
-  // PR through `sql-function-snapshot.yml` once the PR's runs are approved.
+  // third-party code in the job holding the write token. That check first runs
+  // on the next push to `main` after the bot commit (CONTEXT "Main's CI").
   const currencyLine = passedLine(
     judgeCurrencyLine(runGate(runner, repoRoot, "bash", ["scripts/local-stack/run.sh", "--check-currency"])),
     "the currency gate",
@@ -1718,15 +1383,17 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   const pkgPath = join(repoRoot, "package.json");
   const clPath = join(repoRoot, "CHANGELOG.md");
   const mdPath = join(repoRoot, BASELINE_MD_REL);
+  const entry = composeChangelogEntry(m);
+  const section = composeRegeneratedSection(m);
   const pkg = bumpPackageJson(readFileSync(pkgPath, "utf8"), oldVersion, newVersion);
-  const cl = insertChangelogEntry(readFileSync(clPath, "utf8"), composeChangelogEntry(m));
+  const cl = insertChangelogEntry(readFileSync(clPath, "utf8"), entry);
   const md = rewriteBaselineMd(readFileSync(mdPath, "utf8"), {
     date,
     cliVersion: m.cliVersion,
     runId: m.runId,
     sha: m.newSha,
     shapes: m.shapes,
-    section: composeRegeneratedSection(m),
+    section,
   });
   const writerDefects = [...pkg.defects, ...cl.defects, ...md.defects];
   if (writerDefects.length > 0) refuseWriterDefects(writerDefects);
@@ -1752,15 +1419,14 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
   const stagedDefects = judgeStagedSet(staged);
   if (stagedDefects.length > 0) refuseWriterDefects(stagedDefects, "nothing was committed");
 
-  // D-14: the message, title and body are judged BEFORE the commit. The body's
-  // head sha exists only after the commit, so it is judged with a 40-zero
-  // placeholder; the real value is `git rev-parse` hex and cannot carry a token.
+  // D-14: the composed CHANGELOG entry and Regenerated section are judged beside
+  // the commit message (CONTEXT A8), the only inputs that carry free text (the date).
+  // All three run BEFORE the commit, on every call, a retry's re-compose included.
   const message = composeCommitMessage(m);
-  const title = composePrTitle(m);
   const tokenHits = [
     ["the commit message", message],
-    ["the PR title", title],
-    ["the PR body", composePrBody({ ...m, repo, headSha: "0".repeat(40) })],
+    ["the CHANGELOG entry", entry],
+    ["the Regenerated section", section],
   ].flatMap(([where, text]) => judgeSkipTokens(text).map((cls) => `${where} carries skip-token class ${cls} of 6`));
   if (tokenHits.length > 0) {
     for (const h of tokenHits) console.error(`::error::baseline-redump: skip-token: ${h}`);
@@ -1787,16 +1453,70 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
     rmSync(tmp, { recursive: true, force: true });
   }
 
-  mkdirSync(out, { recursive: true });
-  writeFileSync(join(out, "pr-title.txt"), title + "\n");
-  // The head sha exists only now, after the bot commit: it is the sha the PR's runs bind to.
-  writeFileSync(join(out, "pr-body.md"), composePrBody({ ...m, repo, headSha: git(repoRoot, ["rev-parse", "HEAD"]).trim() }));
   console.log(
     `baseline-redump compose: VERSION ${oldVersion} -> ${newVersion} sha256=${short(oldSha)}… -> ${short(m.newSha)}… ` +
       `newly-carried=${newlyCarried.length} staged=${staged.length}`,
   );
   emit("committed", "true");
   return { committed: true, staged, measured: m };
+}
+
+/**
+ * --compose-and-push (Phase 258, replacing --compose). Compose the gated pair onto the
+ * checked-out main exactly as before, then push HEAD to refs/heads/main through the
+ * frozen argv. A refusal while origin/main moved is retried by re-composing onto the
+ * fresh main, at most MAX_PUSH_ATTEMPTS attempts in all. Returns `{ pushed, attempts }`;
+ * throws on every refusal.
+ *
+ * `token` is the credential `takePushToken` removed from `process.env` first; this
+ * function hands it to the push seam and to nothing else. The seam is injectable so
+ * the self-test can race it; the self-test's real-push arm uses the real one.
+ */
+export function composeAndPush({ repoRoot, inDir, runner, emit, date, token, remote = "origin", push = pushToMain, fetchMain = fetchMainTip }) {
+  // An empty token would let `gh auth git-credential` fall back to a local keyring login.
+  if (typeof token !== "string" || token === "") {
+    throw new Error("no push credential: GH_TOKEN is unset or empty in this step's env, so nothing was composed or pushed");
+  }
+  for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt += 1) {
+    const base = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+    const { committed } = compose({ repoRoot, inDir, runner, emit: () => {}, date });
+    if (!committed) {
+      console.log("::notice::baseline-redump: nothing was pushed: the composed pair is already on main");
+      emit("committed", "false");
+      emit("pushed", "false");
+      return { pushed: false, attempts: attempt };
+    }
+    const { status } = push({ repoRoot, token });
+    if (status === 0) {
+      console.log(
+        `baseline-redump push: ${short(git(repoRoot, ["rev-parse", "HEAD"]).trim())} pushed to main on attempt ${attempt} of ${MAX_PUSH_ATTEMPTS}`,
+      );
+      emit("committed", "true");
+      emit("pushed", "true");
+      return { pushed: true, attempts: attempt };
+    }
+    const fresh = fetchMain({ repoRoot, remote });
+    if (fresh === base) {
+      throw new Error(
+        `the push to main was refused although origin/main did not move from ${short(base)}: not a race ` +
+          "(auth, a ruleset or a network fault); nothing was retried",
+      );
+    }
+    if (attempt === MAX_PUSH_ATTEMPTS) {
+      throw new Error(
+        `the push to main was refused ${MAX_PUSH_ATTEMPTS} time(s) and main moved each time (now ${short(fresh)}); nothing was pushed`,
+      );
+    }
+    console.log(
+      `::notice::baseline-redump: the push was refused because main moved from ${short(base)} to ${short(fresh)}; ` +
+        `re-composing onto the fresh main (attempt ${attempt + 1} of ${MAX_PUSH_ATTEMPTS})`,
+    );
+    // Re-compose, never rebase and never force: every merge moves VERSION, package.json and
+    // the top of CHANGELOG.md, so a rebased bot commit would carry a stale version. compose
+    // re-reads VERSION, re-picks the next one, and re-runs every refusal on each call.
+    git(repoRoot, ["reset", "--hard", fresh]);
+  }
+  throw new Error("unreachable: the attempt loop ended without a verdict");
 }
 
 // ── self-test ─────────────────────────────────────────────────────────────────
@@ -1806,7 +1526,7 @@ export function compose({ repoRoot, inDir, out, runner, emit, date, repo = DEFAU
  * together with the arm that adds one; lowering it to make a run green is
  * deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 226;
+export const EXPECTED_ASSERTIONS = 201;
 /**
  * How many MORE `ok()` calls `--self-test --with-gitleaks` runs: the real-binary
  * arms the `redump-dump` job runs (D-18, D-21). Same rule as above.
@@ -2084,7 +1804,7 @@ function selfTest({ withGitleaks = false } = {}) {
     "[real package.json + VERSION, read-only] the bump has no defect and reads back as the next version",
   );
 
-  console.log("=== SELF-TEST 1c/4: every D-16 value in the entry and the section, every D-23 instruction in the PR body");
+  console.log("=== SELF-TEST 1c/4: every D-16 value in the CHANGELOG entry and the Regenerated section");
   /** A composer that is missing or throws renders as "", so its presence arms read FAIL instead of crashing the run. */
   const safe = (fn) => {
     try {
@@ -2105,7 +1825,6 @@ function selfTest({ withGitleaks = false } = {}) {
     driftComparedLine:
       "baseline-content-drift: functions compared 119 — MATCH 116, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0",
     driftFindingsLine: "baseline-content-drift: findings 0",
-    repo: "fixture-owner/fixture-repo", headSha: "f00dfeed" + "7".repeat(32),
   };
   const M0 = { ...M, newlyCarried: [] };
   const entry = safe(() => composeChangelogEntry(M));
@@ -2146,24 +1865,19 @@ function selfTest({ withGitleaks = false } = {}) {
       !/what it adds/i.test(section) && !/[0-9a-f]{64}/.test(section) && section.includes("| sha256 | `a1b2c3d4…` → `e6f7a8b9…` |"),
     "the section heading ends with the run id, it has no 'what it adds' column, zero full-64-hex values, and a prefix-form sha256 row",
   );
-  const body = safe(() => composePrBody(M));
-  const prArms = [
-    ["the 'Approve workflows to run' instruction", body.includes("**Approve workflows to run**")],
-    ["reading each run's conclusion", /\bconclusion\b/i.test(body)],
-    ["branch protection is off, so a zero-check merge is possible", /branch protection is off/i.test(body) && /zero completed checks/i.test(body)],
-    [
-      "the SHA-bound gh api command with the real repo and head sha",
-      body.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${M.headSha}"`),
-    ],
-    ["the invitation to add the 'what it adds' column", /add the "what it adds" column/i.test(body)],
-    [
-      "re-dispatching supabase-migrate.yml on main when main moved or VERSION collides",
-      body.includes("re-dispatch `supabase-migrate.yml` on `main`") && /`main` has moved/.test(body) && /VERSION `4\.5\.6\.8` collides/.test(body),
-    ],
-    ["close-and-reopen named only as a fallback", /fallback only[^\n]*close and reopen/i.test(body)],
-    ["the PR is never auto-merged", /never auto-merged/i.test(body)],
-  ];
-  for (const [label, cond] of prArms) ok(cond, `D-23 presence (PR body): ${label}`);
+  const oldJob = ["redump", "pr"].join("-");
+  ok(
+    [entry, section].every(
+      (t) =>
+        t.includes("`redump-push`") && t.includes("straight to `main`") && !t.includes(oldJob) && !/reviewer/i.test(t) && !/pull request/i.test(t),
+    ),
+    "the CHANGELOG entry and the Regenerated section each name the `redump-push` job and say the commit went straight to `main`, and neither names the old job, a reviewer or a pull request (T-258-07)",
+  );
+  const commitTitle = "chore(release): v4.5.6.8 — baseline re-dump after the PROD apply of 0a1b2c3d";
+  ok(
+    safe(() => composeCommitTitle(M)) === commitTitle && safe(() => composeCommitMessage(M)).split("\n")[0] === commitTitle,
+    "composeCommitTitle(M) is exactly the commit title text, and the first line of composeCommitMessage(M) equals it",
+  );
   const shapesFixture = [
     'CREATE TABLE IF NOT EXISTS "public"."a" (',
     '  x int); CREATE TABLE "not"."anchored" (',
@@ -2193,10 +1907,10 @@ function selfTest({ withGitleaks = false } = {}) {
   const guardRe = new RegExp(`\\[(${["skip", "ci"].join(" ")}|${["ci", "skip"].join(" ")}|${["no", "ci"].join(" ")}|${["skip", "actions"].join(" ")}|${["actions", "skip"].join(" ")})\\]|${["skip", "checks"].join("-")}\\s*:\\s*true`, "i");
   ok(
     ![M, M0].some((x) =>
-      [safe(() => composeChangelogEntry(x)), composeCommitMessage(x), composePrTitle(x), safe(() => composeRegeneratedSection(x)), safe(() => composePrBody(x))]
+      [safe(() => composeChangelogEntry(x)), composeCommitMessage(x), composeCommitTitle(x), safe(() => composeRegeneratedSection(x))]
         .some((t) => guardRe.test(t)),
     ),
-    "the fixed templates (entry, commit message, PR title, regenerated section, PR body) carry no CI skip token (D-14)",
+    "the fixed templates (entry, commit message, commit title, regenerated section) carry no CI skip token (D-14)",
   );
 
   console.log("=== SELF-TEST 1e/4: the staged-set (D-17) and skip-token (D-14) refusals");
@@ -2247,9 +1961,9 @@ function selfTest({ withGitleaks = false } = {}) {
   );
   ok(
     [M, M0].every((x) =>
-      [composeCommitMessage(x), composePrTitle(x), safe(() => composePrBody(x))].every((t) => t !== "" && list(() => judgeSkipTokens(t))?.length === 0),
+      [composeCommitMessage(x), composeCommitTitle(x)].every((t) => t !== "" && list(() => judgeSkipTokens(t))?.length === 0),
     ),
-    "judgeSkipTokens passes the commit message, PR title and PR body composed from the fixed templates",
+    "judgeSkipTokens passes the commit message and commit title composed from the fixed templates",
   );
 
   console.log("=== SELF-TEST 1d/4: each child gate is judged by its VERDICT line's content, not only its exit code (D-09)");
@@ -2396,8 +2110,7 @@ function selfTest({ withGitleaks = false } = {}) {
       buildMarker({ headerLines: ["# fixture marker", "#", "# second header line"], sha: fixtureSha, basenames: [M1, M2] }),
     );
     g(["init", "-q"], { cwd: repo });
-    // Every D-10 no-op now asks `origin` for the bot branch (Open Question 3), so the
-    // fixture carries a local bare `origin`: no arm reaches a missing remote by accident.
+    // The fixture carries a local bare `origin`, so no arm reaches a missing remote by accident.
     g(["init", "-q", "--bare", join(dir, "origin.git")], { cwd: dir });
     g(["remote", "add", "origin", join(dir, "origin.git")]);
     g(["add", "-A"]);
@@ -2713,7 +2426,7 @@ function selfTest({ withGitleaks = false } = {}) {
     let stagedBeforeCommit = null;
     outputs.length = 0;
     const cp = compose({
-      repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr"), runner: fakeRunner, emit, date: "2026-02-03", repo: "fixture-owner/fixture-repo",
+      repoRoot: repo, inDir: join(dir, "art"), runner: fakeRunner, emit, date: "2026-02-03",
     });
     stagedBeforeCommit = cp.staged;
     ok(cp.committed === true && outputs.join(",") === "committed=true", "compose emits committed=true");
@@ -2744,12 +2457,6 @@ function selfTest({ withGitleaks = false } = {}) {
       "the capture table's Taken and Shape rows carry the composed date and measured shapes",
     );
     ok(g(["log", "-1", "--format=%an|%ae|%cn|%ce"]).trim() === `${BOT_NAME}|${BOT_EMAIL}|${BOT_NAME}|${BOT_EMAIL}`, "author and committer are the bot");
-    const botHead = g(["rev-parse", "HEAD"]).trim();
-    const prBody = existsSync(join(dir, "pr/pr-body.md")) ? readFileSync(join(dir, "pr/pr-body.md"), "utf8") : "";
-    ok(
-      prBody.includes(`gh api "repos/fixture-owner/fixture-repo/actions/runs?head_sha=${botHead}"`) && !guardRe.test(prBody),
-      "--compose writes <out>/pr-body.md beside pr-title.txt, carrying the repo and the bot commit's own head sha, and no skip token",
-    );
     const fakeCompared =
       "`baseline-content-drift: functions compared 123 — MATCH 120, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`";
     ok(
@@ -2765,14 +2472,14 @@ function selfTest({ withGitleaks = false } = {}) {
 
     console.log("=== SELF-TEST 4/4: the second D-10 check and a red gate");
     outputs.length = 0;
-    const again = compose({ repoRoot: repo, inDir: join(dir, "art"), out: join(dir, "pr2"), runner: fakeRunner, emit, date: "2026-02-03" });
+    const again = compose({ repoRoot: repo, inDir: join(dir, "art"), runner: fakeRunner, emit, date: "2026-02-03" });
     ok(again.committed === false && outputs.join(",") === "committed=false", "composing the already-committed pair is a no-op: committed=false");
     writeFileSync(dumpPath, Buffer.concat([realDump, Buffer.from("\n\n")]));
     const head2 = g(["rev-parse", "HEAD"]).trim();
     gateDumpT({ repoRoot: repo, dump: dumpPath, merge: head2, runId: "5", cliVersion: "2.98.2", out: join(dir, "art2"), emit, gitleaks: cleanGl() });
     const redRunner = (cmd, args) => (args.includes("--check-currency") ? { status: 1, stdout: "", stderr: "" } : fakeRunner(cmd, args));
     ok(
-      throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), out: join(dir, "pr3"), runner: redRunner, emit, date: "2026-02-03" })) &&
+      throws(() => compose({ repoRoot: repo, inDir: join(dir, "art2"), runner: redRunner, emit, date: "2026-02-03" })) &&
         g(["rev-parse", "HEAD"]).trim() === head2,
       "a red child gate refuses and no commit is made",
     );
@@ -2784,13 +2491,13 @@ function selfTest({ withGitleaks = false } = {}) {
     g(["commit", "-q", "-am", "a colliding CHANGELOG heading"], { cwd: repo3 });
     const head3pre = g(["rev-parse", "HEAD"], { cwd: repo3 }).trim();
     const collided = capture(() =>
-      compose({ repoRoot: repo3, inDir: join(dir, "art2"), out: join(dir, "pr4"), runner: fakeRunner, emit, date: "2026-02-03" }),
+      compose({ repoRoot: repo3, inDir: join(dir, "art2"), runner: fakeRunner, emit, date: "2026-02-03" }),
     );
     ok(
       collided.threw !== null && /^::error::.*changelog-duplicate-heading/m.test(collided.text) &&
         g(["diff", "--cached", "--name-only"], { cwd: repo3 }).trim() === "" &&
         g(["status", "--porcelain", "--", "VERSION", "package.json", "CHANGELOG.md", BASELINE_MD_REL], { cwd: repo3 }).trim() === "" &&
-        g(["rev-parse", "HEAD"], { cwd: repo3 }).trim() === head3pre && !existsSync(join(dir, "pr4")),
+        g(["rev-parse", "HEAD"], { cwd: repo3 }).trim() === head3pre,
       "a writer defect in --compose prints ::error:: with its kind and refuses before VERSION, package.json, CHANGELOG or BASELINE.md is written or anything is staged",
     );
 
@@ -2824,8 +2531,7 @@ function selfTest({ withGitleaks = false } = {}) {
       const c = freshClone();
       prep(c);
       const headBefore = g(["rev-parse", "HEAD"], { cwd: c }).trim();
-      const prOut = `${c}-pr`;
-      const r = capture(() => compose({ repoRoot: c, inDir, out: prOut, runner, emit, date: "2026-02-03", ...extra }));
+      const r = capture(() => compose({ repoRoot: c, inDir, runner, emit, date: "2026-02-03", ...extra }));
       return {
         ...r,
         clone: c,
@@ -2833,25 +2539,24 @@ function selfTest({ withGitleaks = false } = {}) {
         noCommit: g(["rev-parse", "HEAD"], { cwd: c }).trim() === headBefore,
         nothingStaged: g(["diff", "--cached", "--name-only"], { cwd: c }).trim() === "",
         untouched: g(["status", "--porcelain", "--", ...STAGED_PATHS], { cwd: c }).trim() === "",
-        noPr: !existsSync(prOut),
       };
     };
     const art2Dump = readFileSync(join(dir, "art2/baseline.sql"));
     const rescanSecret = composeIn(artVariant("art-rescan-secret", { dump: Buffer.concat([art2Dump, Buffer.from(`-- ${jwtValue}\n`)]) }));
     ok(
       rescanSecret.threw !== null && /re-scan/.test(rescanSecret.threw.message) && /1 hit/.test(rescanSecret.text) &&
-        !rescanSecret.text.includes(jwtValue) && rescanSecret.noCommit && rescanSecret.untouched && rescanSecret.noPr,
+        !rescanSecret.text.includes(jwtValue) && rescanSecret.noCommit && rescanSecret.untouched,
       "compose re-runs the five-class scan on the artifact dump: a hit measured.json does not admit refuses before any file is copied, printing no line text",
     );
     const rescanNul = composeIn(artVariant("art-rescan-nul", { dump: Buffer.concat([art2Dump, Buffer.from([0])]) }));
     ok(
       rescanNul.threw !== null && /re-scan/.test(rescanNul.threw.message) && /NUL byte/.test(rescanNul.threw.message) &&
-        rescanNul.noCommit && rescanNul.untouched && rescanNul.noPr,
+        rescanNul.noCommit && rescanNul.untouched,
       "compose re-runs the integrity judge on the artifact dump: an appended NUL byte refuses before any file is copied",
     );
     const badMeasured = composeIn(artVariant("art-bad-measured", { measuredPatch: { gitleaks: "findings" } }));
     ok(
-      badMeasured.threw !== null && /^::error::.*measured-value/m.test(badMeasured.text) && badMeasured.noCommit && badMeasured.untouched && badMeasured.noPr,
+      badMeasured.threw !== null && /^::error::.*measured-value/m.test(badMeasured.text) && badMeasured.noCommit && badMeasured.untouched,
       "compose runs judgeMeasured first: a measured.json whose gitleaks is not 'clean' refuses by kind before anything is copied",
     );
     const runnerWith = ({ currency, drift }) => (cmd, args) => {
@@ -2864,7 +2569,7 @@ function selfTest({ withGitleaks = false } = {}) {
       runnerWith({ currency: { status: 0, stdout: "baseline-currency: carried=2 replay=0 marker-sha=mismatch defects=1\n", stderr: "" } }),
     );
     ok(
-      curRed.threw !== null && /currency/.test(curRed.threw.message) && curRed.noCommit && curRed.nothingStaged && curRed.noPr,
+      curRed.threw !== null && /currency/.test(curRed.threw.message) && curRed.noCommit && curRed.nothingStaged,
       "a currency gate that exits 0 but prints marker-sha=mismatch refuses (content, not exit code), and no commit is made",
     );
     const driftRed = composeIn(
@@ -2874,12 +2579,12 @@ function selfTest({ withGitleaks = false } = {}) {
     ok(
       driftRed.threw !== null &&
         driftRed.threw.message.includes("main holds a migration that has not applied to PROD yet; the queued apply run will produce the right dump") &&
-        driftRed.noCommit && driftRed.nothingStaged && driftRed.noPr,
+        driftRed.noCommit && driftRed.nothingStaged,
       "a content-drift gate that exits 0 but prints 'findings 2' refuses, naming the likely cause (D-09), and no commit is made",
     );
     const driftSilent = composeIn(join(dir, "art2"), runnerWith({ drift: { status: 0, stdout: "", stderr: "" } }));
     ok(
-      driftSilent.threw !== null && /MEASURE_FAIL/.test(driftSilent.threw.message) && driftSilent.noCommit && driftSilent.nothingStaged && driftSilent.noPr,
+      driftSilent.threw !== null && /MEASURE_FAIL/.test(driftSilent.threw.message) && driftSilent.noCommit && driftSilent.nothingStaged,
       "a content-drift gate that exits 0 and prints nothing is MEASURE_FAIL: a gate that printed nothing is not a green gate",
     );
     // SFH-02: a real commit in every clone that is NOT an ancestor of head2 (commit-tree
@@ -2889,13 +2594,13 @@ function selfTest({ withGitleaks = false } = {}) {
     const notAncestor = composeIn(artVariant("art-side-merge", { measuredPatch: { merge: sideMerge } }));
     ok(
       notAncestor.threw !== null && notAncestor.threw.message.startsWith("the dump's merge is not an ancestor of this checkout's main") &&
-        notAncestor.noCommit && notAncestor.untouched && notAncestor.noPr,
+        notAncestor.noCommit && notAncestor.untouched,
       "compose refuses an artifact whose merge is a real commit that is not an ancestor of main, before any file is written (SFH-02)",
     );
     const absentMerge = composeIn(artVariant("art-absent-merge", { measuredPatch: { merge: "d".repeat(40) } }));
     ok(
       absentMerge.threw !== null && /^MEASURE_FAIL: git merge-base --is-ancestor exit 128/.test(absentMerge.threw.message) &&
-        absentMerge.noCommit && absentMerge.untouched && absentMerge.noPr,
+        absentMerge.noCommit && absentMerge.untouched,
       "compose refuses as MEASURE_FAIL when the artifact's merge is not in the checkout at all (exit 128 is never 'is an ancestor')",
     );
     const droppedArt = artVariant("art-dropped-m1");
@@ -2911,7 +2616,7 @@ function selfTest({ withGitleaks = false } = {}) {
       !droppedMarker.includes(M1) && dropped.threw !== null &&
         dropped.threw.message.startsWith("the new marker omits 1 migration(s) main's committed marker carries and main's checkout still holds") &&
         !dropped.text.includes(M1) &&
-        dropped.noCommit && dropped.untouched && dropped.noPr,
+        dropped.noCommit && dropped.untouched,
       "compose refuses a marker that omits a migration main's committed marker carries, by count only, before any file is written (SFH-02)",
     );
 
@@ -2955,15 +2660,15 @@ function selfTest({ withGitleaks = false } = {}) {
       g(["add", "--", tempRef], { cwd: c });
     });
     ok(
-      stagedRef.threw !== null && /^::error::.*staged-extra/m.test(stagedRef.text) && stagedRef.noCommit && stagedRef.noPr,
+      stagedRef.threw !== null && /^::error::.*staged-extra/m.test(stagedRef.text) && stagedRef.noCommit,
       "a path already in the index beyond the six refuses at judgeStagedSet as 'staged-extra', and no commit is made",
     );
     const tokenDate = ["2026-02-03 ", "[", "skip", " ", "ci", "]"].join("");
     const tokenRun = composeIn(join(dir, "art2"), fakeRunner, { date: tokenDate });
     ok(
       tokenRun.threw !== null && /skip-token class 1 of 6/.test(tokenRun.threw.message) && !tokenRun.text.includes(tokenDate.slice(11)) &&
-        tokenRun.noCommit && tokenRun.noPr,
-      "a skip token reaching the composed PR body refuses before the commit, naming the class index and never the token",
+        tokenRun.noCommit,
+      "a skip token reaching the composed CHANGELOG entry or Regenerated section refuses before the commit, naming the class index and never the token",
     );
 
     console.log("=== SELF-TEST 4b/4: the MERGE-tree marker, the argument validators and D-10 idempotency");
@@ -3007,9 +2712,9 @@ function selfTest({ withGitleaks = false } = {}) {
       gateDumpT({ repoRoot: repo, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, "noop"), emit, gitleaks: cleanGl() }),
     );
     ok(
-      noop.threw === null && /^::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; bot branch absent$/m.test(noop.text) &&
+      noop.threw === null && /^::notice::baseline-redump: dump and marker are byte-identical to the committed pair — nothing to commit$/m.test(noop.text) &&
         outputs.join(",") === "changed=false" && !existsSync(join(dir, "noop")),
-      "a dump and marker byte-identical to HEAD's committed pair: changed=false, a ::notice:: that also says the bot branch is absent, and no out dir at all",
+      "a dump and marker byte-identical to HEAD's committed pair: changed=false, a ::notice:: that says nothing is committed, and no out dir at all",
     );
     // $GITHUB_OUTPUT: exactly one `changed=` line per run when set; nothing when unset.
     const ghOut = join(dir, "github-output.txt");
@@ -3155,374 +2860,299 @@ function selfTest({ withGitleaks = false } = {}) {
       "a main that cannot be fetched is MEASURE_FAIL and writes nothing: a comparison that could not run is never a match",
     );
 
-    console.log("=== SELF-TEST 4c/4: --check-bot-branch and the bot-PR status of the D-10 no-op (D-11, D-24, Open Question 3)");
-    // A helper that does not exist yet (or throws) reads as a FAIL, never a crash.
-    const fp = (text, sha) => {
-      try {
-        const r = findPullRefsForSha(text, sha);
-        return Array.isArray(r) ? r.join(",") : null;
-      } catch {
-        return null;
-      }
-    };
-    const shaA = "a".repeat(40);
-    const lsFixture = [
-      `${shaA}\trefs/heads/${BOT_BRANCH}`,
-      `${shaA}\trefs/pull/12/head`,
-      `${shaA}\trefs/pull/12/merge`,
-      `${shaA}\trefs/pull/100/head`,
-      `${shaA}\trefs/pull/7/head`,
-      `${shaA}\trefs/pull/30/merge`,
-      `${"b".repeat(40)}\trefs/pull/9/head`,
-      `${shaA}\trefs/pull/8/head/extra`,
-      "",
-    ].join("\n");
-    ok(
-      fp(lsFixture, shaA) === "7,12,100",
-      "findPullRefsForSha returns the refs/pull/<n>/head refs at the sha in NUMERIC ascending order, ignoring /merge refs, other shas and other refs",
-    );
-    ok(fp(lsFixture, "c".repeat(40)) === "" && fp("", shaA) === "", "findPullRefsForSha returns an empty list when no /head ref carries the sha");
-
-    // A local bare "remote": `main` at repo's HEAD and, unless absent, the bot branch
-    // over it, optionally with a human commit and a refs/pull/7/head at its tip. The
-    // mode runs in a clone of `repo` whose `origin` is that bare repository.
-    const foreignMessage = ["self-test", "distinctive", "foreign", "message", randomBytes(4).toString("hex")].join("-");
-    let bareN = 0;
-    const botRemote = ({ branch = true, foreign = false, pull7 = false, markerAdd = [] } = {}) => {
-      bareN += 1;
-      const bare = join(dir, `bot-remote-${bareN}.git`);
-      const work = join(dir, `bot-work-${bareN}`);
-      const checkout = join(dir, `bot-checkout-${bareN}`);
+    console.log("=== SELF-TEST 4e/4: --compose-and-push composes onto main and pushes HEAD to refs/heads/main with one frozen argv (D-25, CONTEXT A6)");
+    const SENTINEL_TOKEN = "self-test-sentinel-token";
+    // A local bare origin that carries a fresh clone's HEAD as `main`. A push to a local
+    // path never invokes the credential helper, so the REAL pushToMain runs here.
+    // Self-contained on purpose: it shares nothing with the fixtures above.
+    let pushN = 0;
+    const pushOrigin = () => {
+      pushN += 1;
+      const clone = freshClone();
+      const bare = join(dir, `push-origin-${pushN}.git`);
       g(["init", "-q", "--bare", bare], { cwd: dir });
-      g(["clone", "-q", repo, work], { cwd: dir });
-      g(["push", "-q", bare, "HEAD:refs/heads/main"], { cwd: work });
-      let tip = null;
-      if (branch) {
-        if (markerAdd.length > 0) {
-          // R2-06: the bot's proposal carries migrations the checkout's marker lacks.
-          const mk = join(work, MARKER_REL);
-          writeFileSync(mk, readFileSync(mk, "utf8") + markerAdd.map((b) => `${b}\n`).join(""));
-          g(["add", "--", MARKER_REL], { cwd: work });
-        }
-        g(["commit", "-q", "--allow-empty", "--author", `${BOT_NAME} <${BOT_EMAIL}>`, "-m", "bot re-dump"], { cwd: work });
-        if (foreign) g(["commit", "-q", "--allow-empty", "-m", foreignMessage], { cwd: work });
-        tip = g(["rev-parse", "HEAD"], { cwd: work }).trim();
-        g(["push", "-q", bare, `HEAD:refs/heads/${BOT_BRANCH}`], { cwd: work });
-        if (pull7) g(["push", "-q", bare, `${tip}:refs/pull/7/head`], { cwd: work });
-      }
-      g(["clone", "-q", repo, checkout], { cwd: dir });
-      g(["remote", "set-url", "origin", bare], { cwd: checkout });
-      return { bare, checkout, tip };
+      g(["push", "-q", bare, "HEAD:refs/heads/main"], { cwd: clone });
+      g(["remote", "set-url", "origin", bare], { cwd: clone });
+      return { clone, bare };
     };
-    // CR-02: the open-PR lookup is injected in every arm, so the self-test never
-    // reaches the network. By default it counts its calls and THROWS, so an arm that
-    // should never look (every all-bot branch) fails loud if it does.
-    const noLookup = () => {
+    const bareTip = (bare) => g(["rev-parse", "refs/heads/main"], { cwd: bare }).trim();
+    const expectedPushArgv = [
+      "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", "push", "origin", "HEAD:refs/heads/main",
+    ];
+    ok(
+      JSON.stringify(PUSH_ARGV) === JSON.stringify(expectedPushArgv) && Object.isFrozen(PUSH_ARGV) &&
+        PUSH_ARGV.filter((a) => a === "push").length === 1 && !PUSH_ARGV.some((a) => a.startsWith("+")) &&
+        !PUSH_ARGV.some((a) => /^--(force|force-with-lease|mirror|all|tags|delete|prune)(=|$)/.test(a)),
+      "PUSH_ARGV is the frozen seven elements, one push, HEAD:refs/heads/main, no plus prefix and no force, lease, mirror, all, tags, delete or prune flag (D-25)",
+    );
+    const envBoth = { GH_TOKEN: "a", GITHUB_TOKEN: "b", OTHER: "c" };
+    const tokBoth = takePushToken(envBoth);
+    const envOne = { GITHUB_TOKEN: "b" };
+    const tokOne = takePushToken(envOne);
+    const envNone = {};
+    const tokNone = takePushToken(envNone);
+    ok(
+      tokBoth === "a" && JSON.stringify(envBoth) === JSON.stringify({ OTHER: "c" }) &&
+        tokOne === "b" && Object.keys(envOne).length === 0 && tokNone === "" && Object.keys(envNone).length === 0,
+      "takePushToken returns GH_TOKEN over GITHUB_TOKEN, an empty string for neither, and leaves neither key in the env it was given",
+    );
+    // The artifact `art2` composes on a fresh clone of `repo` (HEAD = head2, its merge), the
+    // one the 4a arms compose; its own committed === true is asserted below.
+    outputs.length = 0;
+    const firstTry = pushOrigin();
+    const firstBase = g(["rev-parse", "HEAD"], { cwd: firstTry.clone }).trim();
+    let firstRes = null;
+    const firstCap = capture(() => {
+      firstRes = composeAndPush({
+        repoRoot: firstTry.clone, inDir: join(dir, "art2"), runner: fakeRunner, emit, date: "2026-02-03", token: SENTINEL_TOKEN,
+      });
+    });
+    const firstTip = bareTip(firstTry.bare);
+    const firstVersion = g(["show", `${firstTip}:VERSION`], { cwd: firstTry.bare });
+    ok(
+      firstCap.threw === null && firstRes?.pushed === true && firstRes.attempts === 1 &&
+        firstTip === g(["rev-parse", "HEAD"], { cwd: firstTry.clone }).trim() &&
+        g(["rev-parse", `${firstTip}^`], { cwd: firstTry.bare }).trim() === firstBase &&
+        g(["diff", "--name-only", `${firstTip}^`, firstTip], { cwd: firstTry.bare }).split("\n").filter(Boolean).sort().join(",") === STAGED_PATHS.join(",") &&
+        /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(firstVersion) &&
+        JSON.parse(g(["show", `${firstTip}:package.json`], { cwd: firstTry.bare })).version === firstVersion &&
+        outputs.join(",") === "committed=true,pushed=true",
+      "--compose-and-push: the real push lands the six-path commit on a bare origin's main on attempt 1, VERSION equal to package.json's as a 4-digit string, and emits committed=true then pushed=true",
+    );
+    outputs.length = 0;
+    const noCred = pushOrigin();
+    const noCredHead = g(["rev-parse", "HEAD"], { cwd: noCred.clone }).trim();
+    let noCredPushes = 0;
+    const noCredRun = capture(() =>
+      composeAndPush({
+        repoRoot: noCred.clone, inDir: join(dir, "art2"), runner: fakeRunner, emit, date: "2026-02-03", token: "",
+        push: () => {
+          noCredPushes += 1;
+          return { status: 0 };
+        },
+      }),
+    );
+    ok(
+      noCredRun.threw !== null && noCredRun.threw.message.startsWith("no push credential") &&
+        g(["rev-parse", "HEAD"], { cwd: noCred.clone }).trim() === noCredHead &&
+        g(["status", "--porcelain", "--", ...STAGED_PATHS], { cwd: noCred.clone }).trim() === "" &&
+        noCredPushes === 0 && outputs.length === 0,
+      "an empty token refuses with 'no push credential' before anything is composed: HEAD and the six paths are untouched and the push seam is never called (T-258-06)",
+    );
+
+    console.log("=== SELF-TEST 4f/4: a refused push retries by re-composing onto the fresh main, three attempts at most, never by force (CONTEXT)");
+    // ONE commit by a non-bot author, pushed to the bare main: what a human merge does between
+    // this run's compose and its push. `merge` moves VERSION, package.json and the top of
+    // CHANGELOG.md, as every real merge does.
+    let raceN = 0;
+    const raceCommit = (bare, kind) => {
+      raceN += 1;
+      const work = join(dir, `race-work-${raceN}`);
+      // `-b main`: the bare repo was created by `git init --bare` and holds only `main`. A git whose
+      // init.defaultBranch is unset (ubuntu CI runners) points the bare HEAD at `master`, so a plain
+      // clone would check out nothing.
+      g(["clone", "-q", "-b", "main", bare, work], { cwd: dir });
+      if (kind === "merge") {
+        const oldV = readFileSync(join(work, "VERSION"), "utf8");
+        const newV = nextVersion(oldV).text;
+        writeFileSync(join(work, "VERSION"), newV);
+        writeFileSync(join(work, "package.json"), bumpPackageJson(readFileSync(join(work, "package.json"), "utf8"), oldV, newV).text);
+        writeFileSync(
+          join(work, "CHANGELOG.md"),
+          insertChangelogEntry(readFileSync(join(work, "CHANGELOG.md"), "utf8"), `## [${newV}] - 2026-02-02 — a race merge`).text,
+        );
+        g(["add", "--", "VERSION", "package.json", "CHANGELOG.md"], { cwd: work });
+      } else if (kind === "same-pair") {
+        writeFileSync(join(work, BASELINE_SQL_REL), readFileSync(join(dir, "art2/baseline.sql")));
+        writeFileSync(join(work, MARKER_REL), readFileSync(join(dir, "art2/baseline-carried-migrations.txt")));
+        g(["add", "--", BASELINE_SQL_REL, MARKER_REL], { cwd: work });
+      } else if (kind === "newer-marker") {
+        const landed = "20990101000000_race_landed.sql";
+        writeFileSync(join(work, "supabase/migrations", landed), "SELECT 4;\n");
+        writeFileSync(join(work, MARKER_REL), readFileSync(join(work, MARKER_REL), "utf8") + `${landed}\n`);
+        g(["add", "--", `supabase/migrations/${landed}`, MARKER_REL], { cwd: work });
+      } else {
+        throw new Error(`self-test: unknown race kind ${kind}`);
+      }
+      g(["-c", "user.name=self-test human", "-c", "user.email=human@example.invalid", "commit", "-q", "-m", `a race ${kind} commit`], { cwd: work });
+      g(["push", "-q", bare, "HEAD:refs/heads/main"], { cwd: work });
+    };
+    /** A push seam: on call i it first lands `kinds[i]` on the bare main (when defined), then runs the REAL pushToMain. */
+    const racingPush = (bare, kinds) => {
+      const f = ({ repoRoot, token }) => {
+        const i = f.calls;
+        f.calls += 1;
+        f.tokens.push(token);
+        if (kinds[i] !== undefined) {
+          raceCommit(bare, kinds[i]);
+          f.raceTips.push(bareTip(bare));
+        }
+        return pushToMain({ repoRoot, token });
+      };
+      f.calls = 0;
+      f.tokens = [];
+      f.raceTips = [];
+      return f;
+    };
+    /** A seam that never touches the remote and always reports a refusal. */
+    const refusingPush = () => {
       const f = () => {
         f.calls += 1;
-        throw new Error("self-test: the open-PR lookup ran on a path that must not look");
+        return { status: 1 };
       };
       f.calls = 0;
       return f;
     };
-    const openAre = (numbers) => {
-      const f = ({ repo }) => {
+    /** The fake gate runner, recording whether a push credential was visible in process.env at each call. */
+    const recordingRunner = ({ findingsOnDriftCall } = {}) => {
+      const f = (cmd, args) => {
         f.calls += 1;
-        f.repo = repo;
-        return numbers;
+        f.leaks.push(process.env.GH_TOKEN !== undefined || process.env.GITHUB_TOKEN !== undefined);
+        if (args[0] === "scripts/baseline-content-drift-check.mjs" && args.length === 1) {
+          f.driftCalls += 1;
+          if (f.driftCalls === findingsOnDriftCall) {
+            return { status: 0, stdout: driftOut(["baseline-content-drift: findings 2"]), stderr: "" };
+          }
+        }
+        return fakeRunner(cmd, args);
       };
       f.calls = 0;
+      f.driftCalls = 0;
+      f.leaks = [];
       return f;
     };
-    const botRun = (scenario, remote = "origin", extra = {}) => {
+    const isAncestor = (bare, a, b) => {
+      try {
+        g(["merge-base", "--is-ancestor", a, b], { cwd: bare });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    /** composeAndPush as the 4f arms call it; `threw` is the Error or null, `res` its return value. */
+    const pushRun = (o, extra = {}) => {
       outputs.length = 0;
-      const openPrs = extra.openPrs ?? noLookup();
-      const r = capture(() => checkBotBranch({ repoRoot: scenario.checkout, remote, emit, repo: "fixture-owner/fixture-repo", ...extra, openPrs }));
-      return { ...r, outputs: [...outputs], lookups: openPrs.calls };
+      let res = null;
+      const cap = capture(() => {
+        res = composeAndPush({
+          repoRoot: o.clone, inDir: join(dir, "art2"), runner: fakeRunner, emit, date: "2026-02-03", token: SENTINEL_TOKEN, ...extra,
+        });
+      });
+      return { ...cap, res, outputs: [...outputs] };
     };
-    const absentScenario = botRemote({ branch: false });
-    const absentRun = botRun(absentScenario);
+
+    const raced = pushOrigin();
+    const racedBase = bareTip(raced.bare);
+    const racedPush = racingPush(raced.bare, ["merge"]);
+    const racedRun = pushRun(raced, { push: racedPush });
+    const racedTip = bareTip(raced.bare);
+    const racedVersion = racedPush.raceTips[0] ? g(["show", `${racedPush.raceTips[0]}:VERSION`], { cwd: raced.bare }) : "";
+    const racedTipVersion = g(["show", `${racedTip}:VERSION`], { cwd: raced.bare });
     ok(
-      absentRun.threw === null && absentRun.outputs.join(",") === "lease=" && /^baseline-redump bot-branch: absent$/m.test(absentRun.text),
-      "an absent bot branch emits an EMPTY lease (the push's 'must not exist') and prints 'bot-branch: absent'",
-    );
-    const allBot = botRemote();
-    const allBotRun = botRun(allBot);
-    ok(
-      allBotRun.threw === null && allBotRun.outputs.join(",") === `lease=${allBot.tip}` && allBotRun.lookups === 0 &&
-        allBotRun.text.includes(`baseline-redump bot-branch: present tip=${short(allBot.tip)} prs=none`),
-      "a bot branch whose commits over main are all bot-authored emits lease=<its tip sha> and prs=none",
-    );
-    const present7 = botRemote({ pull7: true });
-    const present7Run = botRun(present7);
-    ok(
-      present7Run.threw === null && present7Run.outputs.join(",") === `lease=${present7.tip}` &&
-        present7Run.text.includes(`baseline-redump bot-branch: present tip=${short(present7.tip)} prs=#7`),
-      "an all-bot branch whose tip refs/pull/7/head points at prints prs=#7 beside its lease",
-    );
-    const foreign7 = botRemote({ foreign: true, pull7: true });
-    const open7 = openAre([7]);
-    const foreign7Run = botRun(foreign7, "origin", { openPrs: open7 });
-    ok(
-      foreign7Run.threw !== null && /^::error::/m.test(foreign7Run.text) && foreign7Run.text.includes(BOT_BRANCH) &&
-        /\b1 of 2 commit/.test(foreign7Run.text) && foreign7Run.text.includes("It is on OPEN pull request(s) #7. Merge #7") &&
-        open7.calls === 1 && open7.repo === "fixture-owner/fixture-repo" && foreign7Run.outputs.length === 0,
-      "a commit on the bot branch authored by anyone but the bot, while OPEN pull request #7 has the branch as its head, REFUSES (D-24, CR-02), naming the branch, a foreign count of 1 and #7 with the remedy, and emits no lease",
-    );
-    ok(
-      foreign7Run.threw !== null && foreign7Run.text.includes(BOT_BRANCH) && /\b1 of 2 commit/.test(foreign7Run.text) &&
-        !foreign7Run.text.includes(foreignMessage) && !foreign7Run.text.includes("self-test@invalid"),
-      "the refusal never prints the foreign commit's message or its author's email",
-    );
-    // CR-02: the squash-merge wedge. PR #7 was merged (or closed): its head ref is
-    // frozen at the tip, the human commit is not an ancestor of main, and no PR is open.
-    const closed7Run = botRun(foreign7, "origin", { openPrs: openAre([]) });
-    ok(
-      closed7Run.threw === null && closed7Run.outputs.join(",") === `lease=${foreign7.tip}` &&
-        closed7Run.text.includes("closed or merged pull request(s) #7 point at its tip") &&
-        closed7Run.text.includes(`the branch is reset under the lease on tip ${short(foreign7.tip)}`) && /^::notice::/m.test(closed7Run.text) &&
-        !closed7Run.text.includes(foreignMessage),
-      "the same human commit after PR #7 was merged or closed, with no OPEN pull request, PASSES with lease=<tip> and a ::notice:: naming #7 (CR-02: no permanent wedge)",
-    );
-    const foreignNone = botRemote({ foreign: true });
-    const foreignNoneRun = botRun(foreignNone, "origin", { openPrs: openAre([]) });
-    ok(
-      foreignNoneRun.threw === null && foreignNoneRun.outputs.join(",") === `lease=${foreignNone.tip}` &&
-        foreignNoneRun.text.includes("no pull request points at its tip") && !/#[0-9]/.test(foreignNoneRun.text),
-      "a foreign commit with NO pull ref at its tip and no open pull request passes too, stating the measured negative that no pull request points at the tip",
-    );
-    const lookupFail = botRun(foreign7, "origin", {
-      openPrs: () => {
-        throw new Error("MEASURE_FAIL: the open pull request lookup answered HTTP 403; nothing may be pushed until it is measured");
-      },
-    });
-    ok(
-      lookupFail.threw !== null && /MEASURE_FAIL: .*HTTP 403/.test(lookupFail.threw.message) && lookupFail.outputs.length === 0,
-      "an open-PR lookup that fails (HTTP 403, the shared anonymous budget) refuses as MEASURE_FAIL and emits no lease: unmeasured is never 'no open PR'",
-    );
-    // R2-06: a re-run of an older run's redump-pr. The bot branch's proposal carries a
-    // migration main's checkout holds and this composed commit's marker lacks, so it
-    // is newer: refused before any lease, the open-PR lookup never runs.
-    const repoHeadMarker = g(["show", `HEAD:${MARKER_REL}`]);
-    const repoHeadTree = migrationBasenames(g(["ls-tree", "--name-only", "HEAD", MIGRATIONS_REL]));
-    const NEWER = repoHeadTree.find((b) => !markerBasenames(repoHeadMarker).includes(b));
-    const newerScenario = botRemote({ markerAdd: [NEWER] });
-    const newerRun = botRun(newerScenario);
-    ok(
-      NEWER !== undefined && newerRun.threw !== null &&
-        newerRun.threw.message.startsWith(`the proposal on ${BOT_BRANCH} (tip ${short(newerScenario.tip)}) carries 1 migration(s) this composed commit does not`) &&
-        newerRun.outputs.length === 0 && newerRun.lookups === 0,
-      "a bot-branch proposal whose marker carries a migration main's checkout holds and this commit's marker lacks is NEWER: refused, no lease, no lookup (R2-06)",
-    );
-    const staleNameScenario = botRemote({ markerAdd: ["20251230000000_renamed_on_main.sql"] });
-    const staleNameRun = botRun(staleNameScenario);
-    ok(
-      staleNameRun.threw === null && staleNameRun.outputs.join(",") === `lease=${staleNameScenario.tip}`,
-      "a bot-branch marker naming a migration main's checkout no longer holds (renamed or deleted on main) is not 'newer': the lease is emitted (R2-06, WR-07)",
-    );
-    const pr = (o) => ({ number: 7, state: "open", head: { ref: BOT_BRANCH }, ...o });
-    const jo = (v) => {
-      try {
-        return judgeOpenBotPrs(JSON.stringify(v));
-      } catch {
-        return null;
-      }
-    };
-    ok(
-      jo([pr({ number: 12 }), pr()])?.numbers.join(",") === "7,12" && jo([])?.verdict === "pass" && jo([])?.numbers.length === 0 &&
-        [{ message: "API rate limit exceeded" }, [pr({ state: "closed" })], [pr({ head: { ref: "main" } })], [pr({ number: 0 })]].every(
-          (bad) => jo(bad)?.verdict === "measure_fail",
-        ) &&
-        judgeOpenBotPrs("not json").verdict === "measure_fail",
-      "judgeOpenBotPrs reads only open PRs headed by the bot branch; an error object, a closed or foreign-headed entry, a bad number or non-JSON is MEASURE_FAIL",
-    );
-    const curlArgv = (() => {
-      try {
-        return openBotPrsCurlArgv("fixture-owner/fixture-repo");
-      } catch {
-        return null;
-      }
-    })();
-    ok(
-      curlArgv !== null && curlArgv[0] === "-q" &&
-        curlArgv.at(-1) === `https://api.github.com/repos/fixture-owner/fixture-repo/pulls?head=fixture-owner%3A${encodeURIComponent(BOT_BRANCH)}&state=open&per_page=100` &&
-        !curlArgv.some((a) => /authorization|token|bearer|--netrc|^-n$|^-u$|--user/i.test(a)) && throws(() => openBotPrsCurlArgv("not a slug")),
-      "the open-PR lookup is anonymous: curl's -q comes first (no .curlrc), no argument carries a credential, and a malformed slug refuses",
-    );
-    const missingScenario = botRemote({ branch: false });
-    g(["remote", "set-url", "origin", join(dir, "no-such-remote.git")], { cwd: missingScenario.checkout });
-    const missingRun = botRun(missingScenario);
-    ok(
-      missingRun.threw !== null && /MEASURE_FAIL/.test(missingRun.threw.message) && /git ls-remote exit [0-9]+/.test(missingRun.threw.message) &&
-        missingRun.outputs.length === 0,
-      "an ls-remote that fails (a remote path that does not exist) is MEASURE_FAIL and never emits a lease",
-    );
-    const badRemote = botRun(allBot, ["--upload", "-pack=x"].join(""));
-    ok(
-      badRemote.threw !== null && /--remote/.test(badRemote.threw.message) && badRemote.outputs.length === 0,
-      "a --remote value that is not a plain remote name (here an option) refuses before git is spawned",
-    );
-    const moved = botRun(allBot, "origin", { lsRemote: () => ({ status: 0, stdout: `${"e".repeat(40)}\trefs/heads/${BOT_BRANCH}\n` }) });
-    ok(
-      moved.threw !== null && /MEASURE_FAIL/.test(moved.threw.message) && /moved/.test(moved.threw.message) && moved.outputs.length === 0,
-      "a bot branch whose fetched tip differs from the ls-remote tip is MEASURE_FAIL: the lease must be the sha whose commits were judged",
+      racedRun.threw === null && racedRun.res?.pushed === true && racedRun.res.attempts === 2 && racedPush.calls === 2 &&
+        racedPush.raceTips[0] !== racedBase && g(["rev-parse", `${racedTip}^`], { cwd: raced.bare }).trim() === racedPush.raceTips[0] &&
+        isAncestor(raced.bare, racedPush.raceTips[0], racedTip) &&
+        racedTipVersion === nextVersion(racedVersion).text &&
+        JSON.parse(g(["show", `${racedTip}:package.json`], { cwd: raced.bare })).version === racedTipVersion &&
+        g(["diff", "--name-only", `${racedTip}^`, racedTip], { cwd: raced.bare }).split("\n").filter(Boolean).sort().join(",") === STAGED_PATHS.join(",") &&
+        /^::notice::baseline-redump: the push was refused because main moved/m.test(racedRun.text),
+      "a push refused because main moved is retried by re-composing onto the fresh main: attempt 2 pushes a six-path commit whose parent is the race tip, VERSION one past the race's and equal to package.json's, and nothing was forced",
     );
 
-    // The D-10 no-op notice (Open Question 3): a clone detached at head2, where the
-    // committed dump is a no-op, with one remote per state of the bot branch.
-    const noopClone = join(dir, "noop-clone");
-    g(["clone", "-q", repo, noopClone], { cwd: dir });
-    g(["checkout", "-q", head2], { cwd: noopClone });
-    g(["remote", "add", "botpr", present7.bare], { cwd: noopClone });
-    g(["remote", "add", "botnopr", allBot.bare], { cwd: noopClone });
-    g(["remote", "add", "missing", join(dir, "no-such-remote.git")], { cwd: noopClone });
-    const noopNotice = (remote) => {
-      outputs.length = 0;
-      const r = capture(() =>
-        gateDumpT({
-          repoRoot: noopClone, dump: committedDump, merge: head2, runId: "1", cliVersion: "2.98.2", out: join(dir, `noop-${remote}`), emit,
-          gitleaks: cleanGl(), remote,
-        }),
+    const stillMain = pushOrigin();
+    const stillBefore = bareTip(stillMain.bare);
+    const stillPush = refusingPush();
+    const still = pushRun(stillMain, { push: stillPush });
+    ok(
+      still.threw !== null && /did not move/.test(still.threw.message) && /not a race/.test(still.threw.message) &&
+        stillPush.calls === 1 && bareTip(stillMain.bare) === stillBefore,
+      "a refused push with origin/main unmoved fails at once naming 'not a race' (auth, a ruleset or a network fault): one push call, the remote untouched",
+    );
+
+    const exhausted = pushOrigin();
+    const exhaustedPush = racingPush(exhausted.bare, ["merge", "merge", "merge"]);
+    const exhaustedRun = pushRun(exhausted, { push: exhaustedPush });
+    ok(
+      exhaustedRun.threw !== null && exhaustedRun.threw.message.includes("refused 3 time(s)") && exhaustedRun.threw.message.includes("main moved each time") &&
+        exhaustedPush.calls === 3 && exhaustedPush.raceTips.length === 3 && bareTip(exhausted.bare) === exhaustedPush.raceTips[2],
+      "three refused pushes with main moving each time fail red naming 'main moved each time': exactly three push calls, and the remote tip is the third race commit",
+    );
+
+    const samePair = pushOrigin();
+    const samePairPush = racingPush(samePair.bare, ["same-pair"]);
+    const samePairRun = pushRun(samePair, { push: samePairPush });
+    ok(
+      samePairRun.threw === null && samePairRun.res?.pushed === false && samePairRun.res.attempts === 2 &&
+        samePairRun.outputs.join(",") === "committed=false,pushed=false" && samePairPush.calls === 1,
+      "a race that lands the artifact's own pair on main makes the re-compose a no-op: pushed=false, committed=false emitted once, one push call",
+    );
+
+    const newerMarker = pushOrigin();
+    const newerMarkerPush = racingPush(newerMarker.bare, ["newer-marker"]);
+    const newerMarkerRun = pushRun(newerMarker, { push: newerMarkerPush });
+    ok(
+      newerMarkerRun.threw !== null && newerMarkerRun.threw.message.startsWith("the new marker omits 1 migration(s)") &&
+        newerMarkerPush.calls === 1 && bareTip(newerMarker.bare) === newerMarkerPush.raceTips[0],
+      "a race that lands a newer marker is refused by the re-compose ('the new marker omits 1 migration(s)'): one push call, the remote is the race tip",
+    );
+
+    const migMerge = pushOrigin();
+    const migMergePush = racingPush(migMerge.bare, ["merge"]);
+    const migMergeRun = pushRun(migMerge, { push: migMergePush, runner: recordingRunner({ findingsOnDriftCall: 2 }) });
+    ok(
+      migMergeRun.threw !== null &&
+        migMergeRun.threw.message.includes("main holds a migration that has not applied to PROD yet; the queued apply run will produce the right dump") &&
+        migMergePush.calls === 1,
+      "a re-compose whose content-drift gate reports findings (a migration merged since) is refused naming the likely cause, after one push call",
+    );
+
+    const noFetch = pushOrigin();
+    const noFetchBase = g(["rev-parse", "HEAD"], { cwd: noFetch.clone }).trim();
+    g(["remote", "set-url", "origin", join(dir, "no-such-push-origin.git")], { cwd: noFetch.clone });
+    const noFetchPush = refusingPush();
+    const noFetchRun = pushRun(noFetch, { push: noFetchPush });
+    ok(
+      noFetchRun.threw !== null && /^MEASURE_FAIL: git fetch of main/.test(noFetchRun.threw.message) && noFetchPush.calls === 1 &&
+        g(["rev-parse", "HEAD^"], { cwd: noFetch.clone }).trim() === noFetchBase,
+      "a refused push whose main cannot be fetched is MEASURE_FAIL: whether main moved was not measured, and HEAD was not reset",
+    );
+
+    ok(
+      refuses(() => fetchMainTip({ repoRoot: join(dir, "no-such-repo-root"), remote: "--upload-pack=x" }), /plain git remote name/),
+      "fetchMainTip refuses a remote that is an option string before git is spawned",
+    );
+
+    const prevGh = process.env.GH_TOKEN;
+    const prevGithub = process.env.GITHUB_TOKEN;
+    process.env.GH_TOKEN = "self-test-boundary-gh-sentinel";
+    process.env.GITHUB_TOKEN = "self-test-boundary-github-sentinel";
+    try {
+      const taken = takePushToken(process.env);
+      const boundary = pushOrigin();
+      const boundaryPush = racingPush(boundary.bare, ["merge"]);
+      const boundaryRunner = recordingRunner();
+      const boundaryRun = pushRun(boundary, { push: boundaryPush, runner: boundaryRunner, token: taken });
+      ok(
+        boundaryRun.threw === null && boundaryRun.res?.attempts === 2 && boundaryRunner.calls >= 8 &&
+          boundaryRunner.leaks.every((leaked) => leaked === false) &&
+          process.env.GH_TOKEN === undefined && process.env.GITHUB_TOKEN === undefined &&
+          boundaryPush.tokens.length === 2 && boundaryPush.tokens.every((t) => t === "self-test-boundary-gh-sentinel"),
+        "across a retried run no gate child sees GH_TOKEN or GITHUB_TOKEN in process.env, and the push seam receives the token on both calls (T-258-01)",
       );
-      return { ...r, outputs: [...outputs] };
-    };
-    const noticeLead = "::notice::baseline-redump: dump and marker are byte-identical to the committed pair — no PR; ";
-    const nPresent = noopNotice("botpr");
-    ok(
-      nPresent.threw === null && nPresent.outputs.join(",") === "changed=false" &&
-        nPresent.text.split("\n").includes(`${noticeLead}bot branch at ${short(present7.tip)}; pull request(s) #7 point at it (not closed automatically)`),
-      "the no-op notice names the bot branch's tip and pull request #7, and says it is not closed automatically (D-13)",
-    );
-    const nNoPr = noopNotice("botnopr");
-    ok(
-      nNoPr.threw === null && nNoPr.outputs.join(",") === "changed=false" &&
-        nNoPr.text.split("\n").includes(`${noticeLead}bot branch at ${short(allBot.tip)}; no pull request points at it`),
-      "the no-op notice says so when the bot branch exists and no pull request points at its tip",
-    );
-    const nMissing = noopNotice("missing");
-    ok(
-      nMissing.threw === null && nMissing.outputs.join(",") === "changed=false" &&
-        /^::warning::baseline-redump: bot-PR status not measured \(git ls-remote exit [0-9]+\)$/m.test(nMissing.text) &&
-        nMissing.text.split("\n").some((l) => l.startsWith(noticeLead)),
-      "a failed bot-PR lookup is a ::warning:: naming the ls-remote exit code, and the legitimate no-op still prints changed=false and does not throw",
-    );
+    } finally {
+      if (prevGh === undefined) delete process.env.GH_TOKEN;
+      else process.env.GH_TOKEN = prevGh;
+      if (prevGithub === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prevGithub;
+    }
 
-    console.log("=== SELF-TEST 4d/4: --open-or-edit-pr creates or edits the one PR and can never merge (D-11, D-13, D-14)");
-    const prTitle = "BASELINE: fixture re-dump";
-    const titleFile = join(dir, "pr-title.txt");
-    const bodyFile = join(dir, "pr-body.md");
-    writeFileSync(titleFile, `${prTitle}\n`);
-    writeFileSync(bodyFile, "fixture body\n");
-    const fixtureRepo = "fixture-owner/fixture-repo";
-    const argvOf = (args) => {
-      try {
-        const r = buildPrArgv(args);
-        return Array.isArray(r) ? r : null;
-      } catch {
-        return null;
-      }
-    };
-    const createArgv = argvOf({ existing: null, title: prTitle, bodyFile, repo: fixtureRepo });
-    const editArgv = argvOf({ existing: 41, title: prTitle, bodyFile, repo: fixtureRepo });
-    const pairIn = (a, flag, value) => a.indexOf(flag) !== -1 && a[a.indexOf(flag) + 1] === value;
+    const skipOrigin = pushOrigin();
+    const skipPush = refusingPush();
+    const skipRun = pushRun(skipOrigin, { push: skipPush, date: tokenDate });
     ok(
-      createArgv !== null && createArgv.slice(0, 2).join(" ") === "pr create" && pairIn(createArgv, "--base", "main") &&
-        pairIn(createArgv, "--head", BOT_BRANCH) && pairIn(createArgv, "--repo", fixtureRepo) &&
-        createArgv.includes(`--title=${prTitle}`) && createArgv.includes(`--body-file=${bodyFile}`),
-      "buildPrArgv with no open PR is 'pr create --base main --head automation/baseline-redump', the title and the body file bound to their flags",
-    );
-    ok(
-      editArgv !== null && editArgv.slice(0, 3).join(" ") === "pr edit 41" && pairIn(editArgv, "--repo", fixtureRepo) &&
-        editArgv.includes(`--title=${prTitle}`) && editArgv.includes(`--body-file=${bodyFile}`) &&
-        ["41", -1, 1.5, 0].every((bad) => argvOf({ existing: bad, title: prTitle, bodyFile, repo: fixtureRepo }) === null),
-      "buildPrArgv with one open PR is 'pr edit <n>', and it refuses a PR number that is not a positive integer",
-    );
-    // D-13, assembled from fragments so this file spells no merge command.
-    const forbidden = [["mer", "ge"].join(""), ["--au", "to"].join(""), ["rev", "iew"].join(""), ["--app", "rove"].join("")];
-    ok(
-      createArgv !== null && editArgv !== null &&
-        [createArgv, editArgv].every((a) => a.every((el) => !forbidden.some((t) => String(el) === t || String(el).startsWith(`${t}=`)))),
-      "neither argv carries the merge subcommand, the auto flag, a review or an approval (D-13)",
-    );
-    const fakeGh = ({ list = "[]", listStatus = 0, mutateStatus = 0, url = `https://github.com/${fixtureRepo}/pull/41` } = {}) => {
-      const f = (argv) => {
-        f.calls.push(argv.join(" "));
-        if (argv[1] === "list") return { status: listStatus, stdout: list };
-        return { status: mutateStatus, stdout: `${url}\n` };
-      };
-      f.calls = [];
-      return f;
-    };
-    const prRun = (gh, over = {}) => {
-      outputs.length = 0;
-      const r = capture(() => openOrEditPr({ titleFile, bodyFile, repo: fixtureRepo, token: "fixture-token", gh, emit, ...over }));
-      return { ...r, outputs: [...outputs] };
-    };
-    const gh0 = fakeGh();
-    const run0 = prRun(gh0);
-    ok(
-      run0.threw === null && gh0.calls.length === 2 && gh0.calls[0].startsWith("pr list ") && gh0.calls[0].includes(`--head ${BOT_BRANCH}`) &&
-        gh0.calls[0].includes("--state open") && gh0.calls[1].startsWith("pr create ") && run0.outputs.join(",") === "pr_number=41" &&
-        run0.text.includes(`https://github.com/${fixtureRepo}/pull/41`),
-      "no open PR on the bot branch: one list, one create, pr_number from the URL gh printed",
-    );
-    const gh1 = fakeGh({ list: '[{"number":12}]', url: `https://github.com/${fixtureRepo}/pull/12` });
-    const run1 = prRun(gh1);
-    ok(
-      run1.threw === null && gh1.calls.length === 2 && gh1.calls[1].startsWith("pr edit 12 ") && run1.outputs.join(",") === "pr_number=12",
-      "exactly one open PR: it is edited in place (D-11), and pr_number is that PR",
-    );
-    const gh2 = fakeGh({ list: '[{"number":13},{"number":12}]' });
-    const run2 = prRun(gh2);
-    ok(
-      run2.threw !== null && /#12, #13/.test(run2.threw.message) && gh2.calls.length === 1 && run2.outputs.length === 0,
-      "two open PRs on the bot branch refuse, naming both in ascending order, and nothing is created or edited",
-    );
-    const ghTok = fakeGh();
-    const tokenTitle = join(dir, "pr-title-token.txt");
-    writeFileSync(tokenTitle, ["BASELINE ", "[", "skip", " ", "ci", "]"].join("") + "\n");
-    const tokenBody = join(dir, "pr-body-token.md");
-    writeFileSync(tokenBody, ["body\n", "skip", "-checks", ": true\n"].join(""));
-    const runTokT = prRun(ghTok, { titleFile: tokenTitle });
-    const runTokB = prRun(ghTok, { bodyFile: tokenBody });
-    ok(
-      runTokT.threw !== null && /skip-token class 1 of 6/.test(runTokT.threw.message) && runTokB.threw !== null &&
-        /skip-token class 6 of 6/.test(runTokB.threw.message) && ghTok.calls.length === 0,
-      "judgeSkipTokens re-runs over the title and body: a hit in either refuses by class index before gh is called at all (D-14)",
-    );
-    const ghListFail = fakeGh({ listStatus: 1 });
-    const runListFail = prRun(ghListFail);
-    ok(
-      runListFail.threw !== null && /MEASURE_FAIL/.test(runListFail.threw.message) && ghListFail.calls.length === 1 && runListFail.outputs.length === 0,
-      "a failing 'gh pr list' is MEASURE_FAIL: nothing is created or edited on an unmeasured count",
-    );
-    const ghBadJson = fakeGh({ list: "not json" });
-    const runBadJson = prRun(ghBadJson);
-    ok(
-      runBadJson.threw !== null && /MEASURE_FAIL/.test(runBadJson.threw.message) && ghBadJson.calls.length === 1,
-      "a 'gh pr list' answer that is not an array of PR numbers is MEASURE_FAIL",
-    );
-    const ghMutFail = fakeGh({ mutateStatus: 1 });
-    const runMutFail = prRun(ghMutFail);
-    ok(
-      runMutFail.threw !== null && /MEASURE_FAIL/.test(runMutFail.threw.message) && ghMutFail.calls.length === 2 && runMutFail.outputs.length === 0,
-      "a failing 'gh pr create' is MEASURE_FAIL, exit 1, and no pr_number is emitted",
-    );
-    const ghMissing = fakeGh();
-    const runNoTitle = prRun(ghMissing, { titleFile: join(dir, "absent-title.txt") });
-    const runNoBody = prRun(ghMissing, { bodyFile: join(dir, "absent-body.md") });
-    ok(
-      runNoTitle.threw !== null && /--title-file/.test(runNoTitle.threw.message) && runNoBody.threw !== null &&
-        /--body-file/.test(runNoBody.threw.message) && ghMissing.calls.length === 0,
-      "a missing title or body file refuses with ::error:: before any gh call",
-    );
-    const ghEnv = fakeGh();
-    const runNoToken = prRun(ghEnv, { token: "" });
-    const runBadRepo = prRun(ghEnv, { repo: "not a slug" });
-    ok(
-      runNoToken.threw !== null && /GH_TOKEN/.test(runNoToken.threw.message) && runBadRepo.threw !== null &&
-        /GITHUB_REPOSITORY/.test(runBadRepo.threw.message) && ghEnv.calls.length === 0,
-      "no GH_TOKEN, or a GITHUB_REPOSITORY that is not <owner>/<name>, refuses before any gh call (a local keyring login is never used)",
+      skipRun.threw !== null && /skip-token class 1 of 6/.test(skipRun.threw.message) && !skipRun.text.includes(tokenDate.slice(11)) &&
+        skipPush.calls === 0,
+      "a skip token in the composed text refuses before the commit with zero push calls, naming the class index and never the token (D-14, T-258-04)",
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -3665,41 +3295,24 @@ function main(argv) {
       });
       return 0;
     }
-    if (argv[0] === "--check-bot-branch") {
-      const f = parseFlags(argv.slice(1), ["--remote"]);
-      checkBotBranch({ repoRoot: cwdRepoRoot(), remote: f["--remote"], emit: emitToGithubOutput, repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO });
-      return 0;
-    }
-    if (argv[0] === "--open-or-edit-pr") {
-      const f = parseFlags(argv.slice(1), ["--title-file", "--body-file"]);
-      openOrEditPr({
-        titleFile: resolve(f["--title-file"]),
-        bodyFile: resolve(f["--body-file"]),
-        repo: process.env.GITHUB_REPOSITORY,
-        token: process.env.GH_TOKEN,
-        gh: realGh,
-        emit: emitToGithubOutput,
-      });
-      return 0;
-    }
-    if (argv[0] === "--compose") {
-      const f = parseFlags(argv.slice(1), ["--in", "--out"]);
-      compose({
+    if (argv[0] === "--compose-and-push") {
+      // ⛔ FIRST statement: nothing below may spawn a child while the token is in process.env.
+      const token = takePushToken(process.env);
+      const f = parseFlags(argv.slice(1), ["--in"]);
+      composeAndPush({
         repoRoot: cwdRepoRoot(),
         inDir: resolve(f["--in"]),
-        out: resolve(f["--out"]),
         runner: realRunner,
         emit: emitToGithubOutput,
         date: new Date().toISOString().slice(0, 10),
-        repo: process.env.GITHUB_REPOSITORY || DEFAULT_REPO,
+        token,
       });
       return 0;
     }
     // ⛔ A typo'd flag must not silently fall through to a green run.
     console.error(
       `::error::unknown argument(s): ${argv.join(" ") || "(none)"} — this script takes --self-test [--with-gitleaks], ` +
-        `--gate-dump --dump --merge --run-id --cli-version --out, --compose --in --out, --check-bot-branch --remote, ` +
-        `or --open-or-edit-pr --title-file --body-file`,
+        `--gate-dump --dump --merge --run-id --cli-version --out, or --compose-and-push --in`,
     );
     return 1;
   } catch (e) {
