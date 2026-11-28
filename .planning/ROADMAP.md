@@ -921,8 +921,8 @@ Plans:
 - [x] 252-06-PLAN.md — wave 2 measurement tooling: the read-only smoothed MTM probe (the founder-gated run and any promotion follow the ship)
 - [x] 252-07-PLAN.md — name which smoothed-only refusal fired (G252-PROBE-M3, gap closure)
 - [x] 252-08-PLAN.md — accept the measured exercise shape (change 0, position 0) as an option close (G252-PROBE-M3, gap closure)
-- [ ] 252-09-PLAN.md — the composite stitch stores the smoothed mark-to-market result as an option-active composite's headline when criteria P1 to P4 hold, else keeps the wave-1 withhold (G252-MTM-PROMOTION, gap closure)
-- [ ] 252-10-PLAN.md — the factsheet opens a promoted composite on the smoothed basis with "Cash settlement" still withheld; a census proves every surface agrees; cache key v30 (G252-MTM-PROMOTION, gap closure)
+- [x] 252-09-PLAN.md — the composite stitch stores the smoothed mark-to-market result as an option-active composite's headline when criteria P1 to P4 hold, else keeps the wave-1 withhold (G252-MTM-PROMOTION, gap closure)
+- [x] 252-10-PLAN.md — the factsheet opens a promoted composite on the smoothed basis with "Cash settlement" still withheld; a census proves every surface agrees; cache key v30, shipped as v31 (G252-MTM-PROMOTION, gap closure)
 
 **Cross-cutting constraints:** <!-- gsd:generated -->
 - PROOF-01: each gate goes RED on a neutered copy with its arm named, is restored by cp from a byte backup with cmp exit 0, and goes GREEN; outputs verbatim in the SUMMARY
