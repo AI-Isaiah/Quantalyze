@@ -31,6 +31,7 @@ For deploy semantics and the CI/prod invariants, see the repo
 | [prod-prober-cadence-go-live.md](./prod-prober-cadence-go-live.md) | Registering the PROD-side prod-prober cadence observer (`pg_cron`, Phase 164.1.1 PROBERCADENCE) |
 | [cron-sync-go-live.md](./cron-sync-go-live.md) | Registering the daily trade-sync tick (`cron-sync-trades`, `pg_cron` + `pg_net`, Phase 167.1.2.2.2 TRADESYNC): pre-tick proof, D-08 carry-forward with its oracle, D-10 seed, rehearsal verdict, registration, manifest, rollback |
 | [okxhistory-go-live.md](./okxhistory-go-live.md) | Triggering the OKX quarterly-archive rebuild (`okx_archive_rebuild` compute job, Phase 167.1.2.2.2.1 OKXHISTORY): marker-guarded enqueue forms for preflight, calibrate and apply, D-02 disconnected-key refusal, one-cent reconciliation STOP (D-10), before/after/survival read-backs, founder-only rollback; the Q3 overlap expires about 2026-12-30 |
+| [okxarchivefills-backfill.md](./okxarchivefills-backfill.md) | Backfilling OKX fills older than `fills-history`'s 3-month reach from the bills archive (`okx_archive_rebuild` modes `fills_calibrate` / `fills_apply`, Phase 259 OKXARCHIVEFILLS): marker-guarded calibrate, written go/no-go rule, backfill through `sync_trades` or a direct apply, per-ordinal before/after reads, idempotency proof, the 4-quarter cap (`259-ARCHIVE-QUARTER-CAP`), founder-only rollback; the Q3 overlap expires about 2026-12-29 |
 
 ## Security & compliance
 
