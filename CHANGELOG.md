@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.133.115.2] - 2026-11-28 — records: Phase 243 DBBACKSTOP closed (verification passed)
+
+This is a records PR. It has no source, test, workflow or migration change.
+
+### Changed
+- Phase 243 DBBACKSTOP (v1.23) is closed. Its directory lands on `main`: CONTEXT (with the founder decisions of 2026-11-26 "Two-part backstop" and its `current_user` mechanism correction, the allow-list polarity of 2026-11-27, and the founder decision of 2026-11-27 "Accept the gap (Recommended)" for the unrun TEST authenticated/service_role timeout arms), DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, `243-01-MEASUREMENT.md`, ten PLANs and SUMMARYs, the review files (`243-REVIEW.md` for PR-A, `243-REVIEW-PRB-R1.md` and `-R2.md` for PR-B, `243-REVIEW-PRC-R1.md` with its fix round and round 2 for PR-C) and VERIFICATION.
+- `243-VERIFICATION.md` is `passed` (4/4 success criteria). It carries `verified_at_sha` and `drift_subjects`, and neither `covered_digest` nor `covered_files`. The verifier's `human_needed` item (the PR-C post-merge read-back) is filled with evidence: Supabase Migrate run `46136704462` applied `20261127220100` on TEST and PROD and pushed the re-dump (`1faea7ab`); PROD read-back shows the fence trigger (`tgtype 7`, enabled, INVOKER, pinned `search_path`, no anon/authenticated EXECUTE), and a rolled-back `SET LOCAL ROLE service_role` insert was refused with the fence's 42501; TEST shows both migrations and the fence.
+- ROADMAP ticks Phase 243 (10/10) in the v1.23 overview and Progress table, and its section now carries the ten plan rows and the narrowed DBACC-02 wording. `REQUIREMENTS.md` marks DBACC-01, DBACC-02 and DBACC-03 Complete.
+- `phase complete 243` was run and its output reverted: it moved STATE's Current Position to Phase 228 and flipped unrelated `state.json` statuses, and it did not touch the v1.23 ROADMAP rows. The close is hand-edited; only STATE's last-activity lines name 243.
+
+### Notes
+- The code shipped as v0.133.105.0 (PR-A, #1396), v0.133.110.0 (PR-B, #1405) and v0.133.114.0 (PR-C, #1415), with baseline re-dumps #1398, #1410 and `1faea7ab`.
+- Recorded, not fixed: plans 09 and 10 were re-timed twice before merge to sort after a moving PROD ledger tip (planned `20261127120200`/`120300`, shipped `20261127220000`/`220100`); PR-B's first two CI runs got zero jobs because its `ci.yml` crossed GitHub's workflow file size limit (since answered by Phase 260 CIHEADROOM); the PR-B PROD apply first failed in `setup-cli` (npm postinstall) and passed on re-run.
+- Not run for this phase: `/gsd-secure-phase` (no SECURITY.md) and the Nyquist audit (`243-VALIDATION.md` stays draft). `phase complete` warns on both and does not block.
+- Open, recorded in the phase files: on the local-stack image 17.6.1.113 `GRANT <role> TO CURRENT_USER` crashes the backend (signal 11), PROD unmeasured, beside `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`.
+
 ## [0.133.115.1] - 2026-11-28 — records: Phase 260 CIHEADROOM closed (verification passed)
 
 ### Changed
