@@ -7,7 +7,7 @@
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
 - 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256, 257 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256, 257, 260 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -100,7 +100,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"), and 257 SEEDHOLD the same day (founder: "Fix both in a follow-up (Recommended)"). Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"), and 257 SEEDHOLD the same day (founder: "Fix both in a follow-up (Recommended)"). 260 CIHEADROOM, a CI-only phase, was booked into it the same day from Phase 243's measurement that `ci.yml` had reached GitHub's workflow file size limit. Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -1002,6 +1002,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 - [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
 - [x] **Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval** - Booked 2026-11-27 by founder ruling ("Push to main directly") as a CI-only phase: `supabase-migrate.yml`'s re-dump stops opening a bot PR that waits on a human approval and pushes its one commit to `main`; overrides 164.9.5 AUTOREDUMP's D-13 and D-23 (completed 2026-11-28)
+- [x] **Phase 260: CIHEADROOM — ci.yml sits well under GitHub's workflow file size limit, and a gate outside ci.yml fails a PR when any workflow file nears it** - Booked 2026-11-27 (CI-only) from 243 DBBACKSTOP's measurement: main's `ci.yml` is 511,509 bytes, and PR #1405 at 512,355 bytes got a CI run that failed at startup with zero jobs on two pushes, while 511,664 bytes started normally (completed 2026-11-28)
 - [ ] **Phase 261: UNITSWITCHEDGES — the edge shapes OKXUNITSWITCH routed: a re-pointed key, a first mark on a mixed day, a pre-mark deposit, keys with no early mark, and bills ageing out** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Book a follow-up phase (Recommended)") from 256 OKXUNITSWITCH review round 3 survivors R3-02, R3-04, R3-05, R3-07 and SF3-01
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
@@ -1393,6 +1394,24 @@ Plans:
 - [x] 258-02-PLAN.md — delete the bot-branch and PR machinery by symbol, the redump-dump no-op notice, and the text the bot writes names redump-push (D-11, D-12, D-24 retired)
 - [x] 258-03-PLAN.md — dated lineage notes in the workflow, BASELINE.md and two comments, then the phase gate on the merged tree (SC-5, SC-6)
 
+### Phase 260: CIHEADROOM — ci.yml sits well under GitHub's workflow file size limit, and a gate outside ci.yml fails a PR when any workflow file nears it
+
+**Goal:** `.github/workflows/ci.yml` sits well under GitHub's workflow file size limit with real headroom, and a gate that runs outside `ci.yml` fails a PR loudly when any workflow file nears that limit.
+- **Why.** Measured by the Phase 243 agent on 2026-11-27: main's `ci.yml` is 511,509 bytes. PR #1405 at 512,355 bytes got a CI run that failed at startup with zero jobs ("workflow file issue") on two pushes; at 511,664 bytes CI started normally. The limit is therefore consistent with 512,000 bytes. A PR that grows `ci.yml` by more than about 300 bytes silently gets no CI run, and the board then shows only the non-CI checks (the CLAUDE.md "count the checks" trap).
+- **Where the bytes are (measured at `da98acd39`).** 236,643 bytes of YAML comments, 128,570 bytes of shell comments inside `run:` blocks, 102,304 bytes of shell code, 41,660 bytes of other YAML. Two `run:` bodies hold 129 KB: `sql-tests`' "Run SQL self-tests against the local-stack lane" (about 88.7 KB) and `sql-mutation`'s "Assert the run PRINTED its coverage and cleared both floors" (about 40.4 KB, copied byte-equal into `sql-mutation-nightly.yml`). Neither uses a `${{ }}` expression in its body.
+- **Coordination.** Phase 243 PR #1405 edits the `sql-tests` step's `SENTINEL_FLOOR`/`ARMS_FLOOR`, and Phase 258 edits `supabase-migrate.yml`. This phase rebases over them.
+**Requirements**: none mapped (CI-only; outside the in-flight phase cap)
+**Depends on:** nothing.
+**Success Criteria** (what must be TRUE):
+1. `ci.yml` is well under 512,000 bytes, with headroom measured in tens of kilobytes, reached with the fewest moving parts: its long YAML-level rationale comments move verbatim to `docs/ci-yml-notes.md`, one section per job, with a one-line pointer left where each stood, so no executed YAML changes. ⛔ DEVIATION 2026-11-27 (main-session direction, recorded here and in `260-CONTEXT.md`): this criterion first read "long inline `run:` bodies moved into checked-in scripts the step calls"; moving comments was chosen instead after measuring that removing every YAML-level comment fails no test that reads `ci.yml`, while the script move breaks about 70 tests in 6 files.
+2. A gate in its own workflow, not in `ci.yml`, fails a PR loudly when any `.github/workflows/*.yml` file passes a ceiling set a margin below 512,000 bytes, and it still runs when `ci.yml` itself is the oversized file. The gate proves it can fail on a red fixture.
+3. Every existing test that reads `ci.yml` text keeps passing, or follows the moved code to its new file, and still fails when the behaviour it pins changes.
+4. The `frontend` aggregator's `needs:` list and result loop, and every job name that branch protection or another workflow references, stay identical.
+**Plans:** 1 plan
+
+Plans:
+- [x] 260-01-PLAN.md — the size gate in its own workflow (`scripts/check-workflow-size.mjs`, `workflow-size.yml`, ceiling 460,800, proven RED on the unshrunk `ci.yml`), then the 24 long YAML-level comment blocks moved verbatim to `docs/ci-yml-notes.md` behind pointer comments (`ci.yml` to about 406.6 KB, move proven lossless), and the two prose readers repointed
+
 ### Phase 261: UNITSWITCHEDGES — the edge shapes OKXUNITSWITCH routed: a re-pointed key, a first mark on a mixed day, a pre-mark deposit, keys with no early mark, and bills ageing out
 
 **Goal:** The five unit-switch survivors of Phase 256 OKXUNITSWITCH review round 3 (`256-REVIEW.md` round 3) are fixed. None affects the founder's switched OKX account at Phase 256's ship:
@@ -1434,6 +1453,7 @@ Plans:
 | 256. OKXUNITSWITCH | 10/10 | Shipped (PR-1 v0.133.108.0, #1402 at f7c80fb7, migration applied to TEST and PROD, re-dump #1406; PR-2 v0.133.112.0, #1411 at 647c595d); verification human_needed (SC-5 post-deploy PROD read after the next nightly derive, visual UAT of the chart break); SECURED, 0 open | - |
 | 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
 | 258. REDUMPDIRECT | 3/3 | Complete (shipped v0.133.111.0, #1408 at 66a4016e; verification passed 6/6, SECURED; the live direct push is proven by the first migration merge after it) | 2026-11-28 |
+| 260. CIHEADROOM | 1/1 | Complete (shipped v0.133.113.0, #1414 at d0398d28; verification passed 4/4, SECURED 0 open; ci.yml 511,664 -> 406,613 bytes; deviation: comment move instead of script move) | 2026-11-28 |
 | 261. UNITSWITCHEDGES | 0/? | Planned for v1.23 | - |
 
 ---
