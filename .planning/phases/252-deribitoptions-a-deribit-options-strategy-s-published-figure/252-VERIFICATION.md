@@ -34,6 +34,20 @@ drift_subjects:
   - analytics-service/scripts/deribit_options_smoothed_probe.py
   - analytics-service/tests/test_deribit_options_smoothed_probe.py
 gaps:
+  - id: G252-MTM-PROMOTION
+    truth: "Wave 2 promotion: once the read-only probe passes (it did, 2026-11-27 18:36Z, verdict pass, 3/3 members), the headline of the evidence composite switches to market-price valuation (the smoothed mark-to-market basis), per the 2026-11-25 founder ruling 'Then measure market-price valuation and switch the headline to it only if it actually works for these keys.' A composite whose smoothed basis does not compute keeps the named withhold."
+    status: failed
+    measured: "PROD 2026-11-28 after v0.133.115.0 (merge 28ede757b): both composites re-stitched through enqueue_compute_job; neither promoted; by-basis keys [cash_settlement] only. The cash pass used about 690 s of the 1200 s stitch budget and both jobs ended about 358 s later, which matches the bounded smoothed third-crawl timeout (0.7 of the remainder). Founder decision 2026-11-28 'Fix inside 252 first': build the smoothed ledger from the cash pass's own crawl (Phase 185 retain_raw_rows precedent), no third crawl."
+    reason: "The probe pass is recorded, but no code path yet makes the smoothed basis the composite's headline. On PROD the composite smoothed third pass is dark behind SMOOTHED_MTM_ENABLED and has never stored a smoothed_mtm row; the composite stamps mtm_gated_reason unsmoothed_options_book and every surface withholds the headline."
+    artifacts:
+      - analytics-service/services/job_worker.py (run_stitch_composite_job, smoothed third pass 6b)
+      - analytics-service/services/stitch_composite.py (mark_to_market_available, smoothed_mtm_available, MTM_REASON_OPTIONS)
+      - src/lib/factsheet/headline-basis.ts (isOptionsCashWalletBook, headlineVerdict)
+    missing:
+      - "The composite stitch persists the smoothed mark-to-market series and scalars as the composite's headline when every options member's smoothed build computes, and the row says so in a stored marker the read path can check; otherwise the cash headline stays withheld under the existing named reason."
+      - "Every surface that honours the wave-1 withhold reads the promoted headline for a promoted row and keeps withholding an unpromoted one."
+      - "The composite smoothed pass builds its per-member smoothed ledgers from the raw transaction rows the cash pass already crawled (as key mode does with retain_raw_rows), so the stitch makes no third full crawl and the smoothed basis fits the stitch budget for the evidence composites."
+      - "After deploy, the two flagged composites are re-stitched through the product's own job (never a backfill UPDATE), and the moved figures are listed in the CHANGELOG (SC-5)."
   - id: G252-PROBE-M3
     truth: "Wave 2: the smoothed mark-to-market reconstruction computes for every Deribit member of the evidence composite, so the read-only probe reads verdict pass (founder decision 2026-11-26: fix inside 252, keep 252 open until the probe passes)."
     status: closed
@@ -197,3 +211,14 @@ No gaps in the scope of this run. Wave 1 is implemented, wired across every surf
 
 _Verified: 2026-11-25_
 _Verifier: Claude (gsd-verifier)_
+
+### Post-deploy PROD reading 2026-11-28 (gap plans 09-10 shipped as v0.133.115.0, #1412, merge 28ede757b): NOT promoted
+
+Marker query first, named PRODUCTION; read-only except the two re-stitch enqueues through `enqueue_compute_job` (the product path `keys/sync` uses), 11:50Z. Main CI on 28ede757b green; the API `/health` reported 28ede757b at 11:42Z; the jobs ran on worker hosts that came up after the deploy. Worker redeploys from later merges (#1417, #1418) restarted both jobs once.
+
+| composite | final job | claimed -> done | cash pass members done | result |
+|---|---|---|---|---|
+| B | attempt 2 | 12:37:25Z -> 12:54:56Z | 12:48:57Z (about 11.5 min) | cash headline, `unsmoothed_options_book`, by-basis keys `[cash_settlement]` only |
+| A | attempt 3 (last) | 12:55:26Z -> 13:12:56Z | 13:06:58Z (about 11.5 min) | same |
+
+No figure moved (the top-level scalars are byte-identical to the 2026-11-08 values) and the headline stays withheld, which is the designed fail-safe state. No `smoothed_mtm` key was stored, so the cause is `smoothed_basis_not_computed`. Timing: the stitch budget is 1200 s; the cash pass used about 690 s, leaving about 510 s, and the smoothed pass gets 0.7 of that (about 357 s). Both jobs ended about 358 s after their cash pass finished, which matches the bounded smoothed-pass timeout degrade. The worker log line naming the cause has been requested via the coordinator; this reading rests on timing until it arrives. G252-MTM-PROMOTION stays open.
