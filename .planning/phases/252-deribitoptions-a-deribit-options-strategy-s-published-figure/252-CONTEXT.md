@@ -68,6 +68,9 @@ Out of scope: Deribit allocator books in key mode (Phase 233 DERIBITTRUTH owns b
 - Known limit recorded after review (WR-02, 2026-11-27): the promotion is time-limited by venue mark retention. The retention cutoff counts back from today, so as a held option's daily marks age out, a later refresh fails P2 or P3 and the headline returns to the named withhold on its own. When that happens per member is unmeasured. A stitch that withdraws a previously promoted headline logs at WARNING and reports to Sentry with the cause. Any remedy (e.g. storing marks) needs its own founder ruling; this phase does not narrow the span.
 - WR-01 (review fix): on a composite job's last attempt, a transient from the smoothed pass degrades to the cash headline plus the named withhold instead of failing the job; earlier attempts still retry. This supersedes the planner's acceptance of T-252-27 for the last attempt only.
 
+### Founder decision 2026-11-28 (the composite smoothed pass stays always-on)
+- FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim choice "Keep always-on (Recommended)": options composites use smoothed mark-to-market regardless of `SMOOTHED_MTM_ENABLED`. This confirms the gap-planning decision of 2026-11-27 that the composite smoothed pass no longer reads the flag; the single-key pass and the RT-4 refusal still read it.
+
 ### Claude's Discretion
 - The public wording of the withheld reason follows the existing withheld-headline sentences and DESIGN.md, with no flag names or job vocabulary. It is user-facing copy, so the founder sees it at the visual check.
 

@@ -908,6 +908,7 @@ Plans:
 - ⭐ **FOUNDER DECISION 2026-11-27 (AskUserQuestion via the coordinator), verbatim "Accept measured shape only (Recommended)"; partial reversal of D-09, recorded in `252-CONTEXT.md`:** a Deribit `exercise` row is accepted only as change 0 with position present and 0, closing the option to 0 that day like `expiry`. Every other exercise shape keeps refusing. Gap plan 252-08 carries the fix.
 - ⭐ **DECIDED AT GAP PLANNING 2026-11-27 (orchestrator, under the 2026-11-25 ruling, after the PASS probe; recorded in `252-CONTEXT.md`):** gap plans 252-09 and 252-10 promote a composite options book to the smoothed mark-to-market headline when criteria P1 to P4 hold, else today's withhold stays. The composite smoothed pass stops reading `SMOOTHED_MTM_ENABLED` (single-key keeps it); a promoted row stores `headline_basis = "smoothed_mtm"` and drops `mtm_gated_reason`. Cheap to revert; the founder may overturn it.
 - ⚠️ **Known limit (review WR-02, 2026-11-27):** a promoted smoothed headline is time-limited by venue mark retention; as marks age out a later refresh returns it to the named withhold on its own (WARNING log plus Sentry report). When that happens is unmeasured; a remedy needs a founder ruling.
+- ⭐ **FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim "Keep always-on (Recommended)" (recorded in `252-CONTEXT.md`):** options composites use smoothed mark-to-market regardless of `SMOOTHED_MTM_ENABLED`; this confirms the 2026-11-27 gap-planning decision.
 **Plans:** 8/10 plans executed
 
 Plans:
