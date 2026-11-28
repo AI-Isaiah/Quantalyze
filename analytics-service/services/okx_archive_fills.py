@@ -486,6 +486,11 @@ def plan_fill_quarters(
 # The status read (GET only) and the quarter step
 # ---------------------------------------------------------------------------
 
+#: OKX's error for a status GET on a quarter it holds no request for (code 51604), as it appears in
+#: the ccxt exception text.
+_OKX_NO_REQUEST_CODE: Final[str] = '"code":"51604"'
+
+
 @dataclass(frozen=True)
 class _StatusReading:
     #: ``finished`` | ``ongoing`` | ``failed``, or None when OKX has NO entry for the quarter.
@@ -505,13 +510,21 @@ async def _read_fills_status(exchange: ccxt.Exchange, year: int, label: str) -> 
     ``data`` that is not a list, a first entry that is not a mapping or a state outside the closed
     vocabulary is ``archive_request_failed``."""
     tag = _quarter_tag(year, label)
-    raw = await _okx_bills_fetch_with_backoff(
-        exchange,
-        _STATUS_ENDPOINT_METHOD,
-        {"year": str(year), "quarter": label},
-        label="bills-history-archive",
-        page=0,
-    )
+    try:
+        raw = await _okx_bills_fetch_with_backoff(
+            exchange,
+            _STATUS_ENDPOINT_METHOD,
+            {"year": str(year), "quarter": label},
+            label="bills-history-archive",
+            page=0,
+        )
+    except ccxt.ExchangeError as exc:
+        # Measured on PROD 2026-11-28: OKX answers a quarter with no request as error 51604
+        # ("Initiate a download request before obtaining the hyperlink"), never as an empty
+        # ``data`` list. That is "no entry"; every other venue error keeps propagating.
+        if _OKX_NO_REQUEST_CODE in str(exc):
+            return _StatusReading(state=None)
+        raise
     if not isinstance(raw, Mapping):
         raise _Stop("archive_request_failed", f"quarter={tag}")
     data = raw.get("data")

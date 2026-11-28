@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.133.117.0] - 2026-11-28 — Phase 259 OKXARCHIVEFILLS fix: OKX error 51604 on the archive status GET means "no request", so the fills read applies
+
+### Fixed
+- **The first PROD calibrate of the OKX archive fills read (v0.133.116.0) failed without ever applying.** OKX answers the `GET /api/v5/account/bills-history-archive` status read for a quarter it holds no request for with error 51604 ("Initiate a download request before obtaining the hyperlink"). It never returns an empty `data` list, which is what the plan and the fakes assumed. The read treated that answer as a venue failure. The `fills_calibrate` job ended `failed_final` after its 3 attempts, spent no apply and wrote nothing. `_read_fills_status` (`analytics-service/services/okx_archive_fills.py`) now reads 51604 as "no entry". The job then applies once per quarter, through the same write-ahead count, and defers. Every other venue error still propagates. The OKXHISTORY daily-returns rebuild never met this answer because it applies before it reads.
+
+### Tests
+- `TestOkxNoRequestAnswer` in `test_okx_archive_fills_job.py` covers both cases. A raised 51604 is no entry, followed by one apply per quarter and a defer; this arm was RED on v0.133.116.0's code. A different venue error applies nothing.
+
+### Notes
+- Found by step 4 of `docs/runbooks/okxarchivefills-backfill.md` on PROD. Plan 259-09 Task 2 still owns the PROD calibrate and backfill. `259-VERIFICATION.md` stays `human_needed` until the records PR.
+- A `failed_final` with the dispatcher's text does not start the chain's cooldown, so this failure blocks nothing.
+
 ## [0.133.116.1] - 2026-11-28 — records: Phase 256 OKXUNITSWITCH closed (verification passed after the SC-5 PROD read)
 
 ### Changed
