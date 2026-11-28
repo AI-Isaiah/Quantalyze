@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.133.119.1] - 2026-11-28 — records: v1.22 TRUTH close prep (SECURITY for 223, 225 and 229, 259 booked, eight archived verifications re-marked so audit-open runs, v1.23 owners for INT-01 and 233's freshness gap)
+
+This is a records PR. It has no source, test, workflow or migration change. It applies the records corrections from the v1.22 pre-audit of 2026-11-28 and the founder's three decisions of the same day, so that v1.22 can close as soon as Phase 252 DERIBITOPTIONS closes. Phase 252's own files are not touched.
+
+### Changed
+- **Phase 223 FLOWKINDS security record.** `/gsd-secure-phase 223` ran. An independent gsd-security-auditor re-verified all 14 register rows at `98178ff2b` (SECURED, 0 open). The phase's existing `SECURITY.md` is renamed to `223-SECURITY.md`, because the workflow and the milestone audit look for `*-SECURITY.md` and had reported the phase as having none. A dated audit row and note are appended.
+- **Phase 229 MT5DERIVE2 security record.** `/gsd-secure-phase 229` wrote `229-SECURITY.md` from the six plan threat models: 16 rows (15 threat ids plus the supply-chain accept), all closed, 0 open, with four accepted risks traced to their plan or founder ruling. One non-blocking note: `scripts/mt5_soak.py` still defaults its log dir to a tracked directory when `MT5_SOAK_LOG_DIR` is unset, so T-229-14's control is procedural.
+- **Phase 225 ONEACCOUNTONCE.** The verified `225-SECURITY.md` (threats_open 0, verified at `8567885d5`) and the validated `225-VALIDATION.md` (nyquist_compliant true, 2026-11-27) are committed. Both existed only as session copies. The test the validation added is already on main (#1389).
+- **Founder decision 2026-11-28, "Debt, fix early v1.23 (Recommended)", for INT-01.** `TODOS.md` `[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` (the "contact support" sentence that `first_hop_enqueue_sweep` writes) is owned by Phase 224 DEADLEFTOVERS in v1.23, to be fixed early. Recorded in the entry and in the `### Phase 224` section.
+- **Founder decision 2026-11-28, "Own it in v1.23 (Recommended)".** `TODOS.md` `[233-STRATEGY-FRESHNESS-UNWATCHED]` is owned by Phase 246 ALERTREADERS. Recorded in the entry and in the `### Phase 246` section.
+- **`REQUIREMENTS.md`.** FACT-03 and FACT-05 are ticked and their traceability rows read `Complete`: 238's verification passed with all five human items resolved on 2026-11-26. PROOF-01 stays open until 252 closes.
+- **`STATE.md` and `state.json`.** `current_phase` is 252 DERIBITOPTIONS, the last open v1.22 phase. `stopped_at`, Current Position and Current focus no longer say 233, "225 and 228 stay human_needed" or "81/81 requirements; next: plan Phase 226". `state.json` marks 225, 235 and 241 `complete`.
+
+### Fixed
+- **The archived `153-VERIFICATION.md` (v1.17) no longer stops `gsd-tools query audit-open` (founder decision 2026-11-28, "Fix the old record first").** Its status `failed` is outside the set the pre-check accepts. It was re-examined against the shipped code: WIZFORM-02, the one requirement the span failed, was closed by the inserted Phase 153.7 (#683, v0.62.0.0, `153.7-VERIFICATION.md` 9/9, gaps none), and both coverage-law invariants pass at `98178ff2b` (2 files, 94 tests). The status is now `human_needed`, not `passed`, because the gateway-fault card has still not been seen rendered; that observation is Phase 157 FOUNDER-CONFIRM's FCONF-03, in v1.23. The original 5/6 span verdict is kept unchanged as lineage, and a dated `status_was` and re-verification note say why.
+- **Phase 259 OKXARCHIVEFILLS is booked into `ROADMAP.md`.** It shipped as v0.133.116.0 (#1421) and v0.133.117.0 (#1423) but had no section, overview bullet, Progress row or phase directory on main. They are copied from the phase branch as committed, with plans 01-08 ticked. Its verification is `human_needed` until plan 09's post-deploy PROD run. The v1.23 milestone list now also names 258, 259 and 261.
+- **`ROADMAP.md` Progress rows for 235 HOLDINGSTRUTH and 241 DEMOCREDS** read a bare `Complete` left by the `phase complete` handler. Their ship version, PR and verification are restored.
+
+- **Seven more archived verifications are re-marked (founder ruling 2026-11-28, "Re-mark truthfully (Recommended)").** After the 153 re-mark, `audit-open` still stopped on statuses outside its set. Each was mapped to the accepted status it truly means, with a dated `status_relabelled` note; verdicts and bodies are unchanged.
+  - `resolved` -> `passed`: v0.14 phases 01 and 02, v0.15 phases 08 and 10. Their human items were resolved by the 2026-04-27 UAT audit (each report's `resolution_pointer`). For 01 and 02 that evidence is de-facto downstream reuse, as their rationale says.
+  - `resolved` -> `human_needed`: v0.16 phase 11. Only 2 of its 4 human items were closed. The other 2 (the production /security indexability smoke and the PostHog ingest observation) went to post-merge probes with no recorded result.
+  - `verified` -> `passed`: v0.15 phase 06 (10/10, every human check ticked).
+  - `passed_with_concerns` -> `human_needed`: v1.17 phase 153.6. Its one unobserved must-have, the PROD apply of `20260811210000_api_keys_attested_venue` with the census pin holding, is now answered by a read-only PROD ledger read on 2026-11-28 (marker query first). The status is not `passed` because W-153.6-2, W-153.6-3 and the unscheduled OQ-2 deferral have no recorded closure.
+
+### Notes
+- **`gsd-tools query audit-open` no longer refuses.** It now exits 0 and lists the open items across all history for the close-out to decide: 2 debug sessions, 34 phases with incomplete UAT, 65 verification gaps and 5 phases with open CONTEXT questions, 297 items in all.
+- 252 DERIBITOPTIONS is still the one open v1.22 phase. Its Progress row and `[252-SINGLEKEY-OPTIONS-CASH]` are left to its own close.
+
 ## [0.133.119.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plan 11: an options composite's smoothed pass reuses the cash pass's crawl, so the market-price headline fits the stitch budget
 
 ### Root cause
