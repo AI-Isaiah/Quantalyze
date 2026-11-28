@@ -33,7 +33,7 @@ import threading
 import types
 from collections.abc import Iterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -526,6 +526,50 @@ async def test_the_tick_bounds_the_probe_with_its_own_wait_for(
     )
 
 
+async def test_a_validation_probe_that_always_overruns_its_tick_bound_pages_at_the_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mt5_outage_pages: list[Any],
+) -> None:
+    """Phase 245 ALERTPAGE (ALRT-04 / WR05). A probe whose `wait_for` bites on EVERY
+    tick never reaches the tracker by itself, so before this phase it left one
+    WARNING per tick that no rule sees and never paged. The monitor's probe-bound
+    arm now logs at ERROR and feeds a `tick_deadline` reading, so such a terminal
+    pages at the existing threshold and not before."""
+
+    async def _hangs(**_kwargs: Any) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(mt5_session_monitor, "probe_validation_terminal", _hangs)
+    monkeypatch.setattr(mt5_session_monitor, "PROBE_TICK_BOUND_S", 0.05)
+    caplog.set_level(logging.WARNING)
+
+    await _ticks(_THRESHOLD - 1)
+    assert _validation_pages(mt5_outage_pages) == [], (
+        "paged before the threshold -- a probe that overruns once must not page"
+    )
+
+    await _ticks(1)
+    pages = _validation_pages(mt5_outage_pages)
+    assert len(pages) == 1, f"paged {len(pages)} times at the threshold, expected 1"
+    assert pages[0].event == "outage"
+    assert pages[0].cause == "tick_deadline"
+
+    errors = [
+        r
+        for r in caplog.records
+        if "validation terminal probe did not complete" in r.getMessage()
+        and r.levelno == logging.ERROR
+    ]
+    assert len(errors) == _THRESHOLD, (
+        f"{len(errors)} ERROR records for {_THRESHOLD} overruns; a WARNING arm "
+        "reaches no Sentry rule"
+    )
+    assert [p for p in mt5_outage_pages if p.source == _JOBS_SOURCE] == [], (
+        "the validation terminal's outage must not be filed under the jobs role"
+    )
+
+
 def test_the_probe_runs_after_the_jobs_heal_in_the_tick_source() -> None:
     """Order is part of the design: the cadence argument (the call cannot pre-empt
     the heal's own abandon arm) only holds if the probe comes AFTER the heal."""
@@ -870,8 +914,7 @@ async def test_a_reader_cancelled_while_waiting_on_the_recovered_notice_marks_th
 def test_the_tick_bounds_cover_the_recovery_work_they_wrap() -> None:
     """Review R3-SFH-01 / WR-R3-03. The scrub reader's recovery is inline work: the
     newest-row read, the open-record read, the wait for the notice's outcome and the
-    close. The probe's tracker call is one open-record read or write. A bound smaller
-    than that sum cancels the very work it wraps, mid-notice."""
+    close. A bound smaller than that sum cancels the very work it wraps, mid-notice."""
     from services import ops_alert, ops_alert_open
 
     open_s = ops_alert_open._OPEN_PAGE_TIMEOUT_S
@@ -881,10 +924,61 @@ def test_the_tick_bounds_cover_the_recovery_work_they_wrap() -> None:
         + ops_alert._DELIVERY_WAIT_S
         + open_s
     )
-    assert mt5_validation_liveness.PROBE_TICK_BOUND_S >= (
-        mt5_validation_liveness._MT5_RELOGIN_LEASE_WAIT_DEFAULT_S
-        + mt5_validation_liveness._PROBE_THREAD_BOUND_S
-        + open_s
+
+
+async def test_the_probe_bound_covers_every_open_page_call_a_credited_post_restart_recovery_makes(
+    monkeypatch: pytest.MonkeyPatch,
+    ops_alert_open_store: Any,
+    mt5_outage_pages: list[Any],
+) -> None:
+    """Phase 245 ALRT-03 / WR-D16-01. Since D-16 a Sentry-credited recovered notice is
+    decided at once, so the tracker closes the durable record INLINE instead of in a
+    held task. A recovery after a restart therefore awaits TWO open-page calls on the
+    probe's path (the read in ``_durable_recovery_request`` and the close in
+    ``_finish_recovered``), plus the lease release RPC ``mt5_terminal_lease`` awaits in
+    its ``finally``. ``PROBE_TICK_BOUND_S`` is the tick's ``wait_for`` around the
+    probe: a bound shorter than the sum of those calls cancels the probe mid-close and
+    leaves the record open.
+
+    The call count is MEASURED here, not asserted from the source, and the sum is
+    rebuilt from the named bounds, so a term dropped from the bound or a third inline
+    call added to the path both turn this RED."""
+    from services import mt5_xlease, ops_alert_open
+    from services.mt5_relogin import _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S
+
+    ops_alert_open_store.pages[_VALIDATION_SOURCE] = ops_alert_open.OpenPage(
+        source=_VALIDATION_SOURCE,
+        cause="dark",
+        since=datetime(2026, 10, 14, 6, 0, 0, tzinfo=timezone.utc),
+    )
+    _install_probe_client(monkeypatch, _AUTHORIZED)
+
+    await mt5_validation_liveness.probe_validation_terminal(poll_interval_s=_CADENCE_S)
+
+    recovered = [p for p in _validation_pages(mt5_outage_pages) if p.event == "recovered"]
+    assert len(recovered) == 1, [p.event for p in mt5_outage_pages]
+    calls = (
+        ops_alert_open_store.read_calls
+        + ops_alert_open_store.close_calls
+        + ops_alert_open_store.record_calls
+    )
+    budgeted = mt5_validation_liveness._PROBE_TRACKER_OPEN_PAGE_CALLS
+    assert calls <= budgeted, (
+        f"the probe made {calls} open-page calls; PROBE_TICK_BOUND_S budgets {budgeted}"
+    )
+    terms = {
+        "_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S": _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S,
+        "_MT5_XLEASE_MIN_ATTEMPT_S": mt5_xlease._MT5_XLEASE_MIN_ATTEMPT_S,
+        "_PROBE_THREAD_BOUND_S": mt5_validation_liveness._PROBE_THREAD_BOUND_S,
+        "_MT5_XLEASE_RPC_TIMEOUT_S": mt5_xlease._MT5_XLEASE_RPC_TIMEOUT_S,
+        f"{budgeted} * _OPEN_PAGE_TIMEOUT_S": budgeted
+        * ops_alert_open._OPEN_PAGE_TIMEOUT_S,
+    }
+    needed = sum(terms.values())
+    assert mt5_validation_liveness.PROBE_TICK_BOUND_S >= needed, (
+        f"PROBE_TICK_BOUND_S={mt5_validation_liveness.PROBE_TICK_BOUND_S} is below "
+        f"the sum of the bounds on the probe's path ({needed}): "
+        + ", ".join(f"{name}={value}" for name, value in terms.items())
     )
 
 

@@ -153,10 +153,16 @@ def test_accepted_body_returns_200_and_logs_the_measurement(client, caplog):
         "expected exactly one structured route log line for one accepted alert; got "
         + repr([r.message for r in caplog.records])
     )
-    assert len(_helper_records(caplog)) == 1, (
-        "ops_alert.page logs its own ERROR line on every call, so one alert is "
-        "two ERROR lines (route + helper)"
+    # This test runs the REAL Sentry SDK with no DSN, so the capture returns no event
+    # id. Phase 245 (ALRT-02, F3) makes that its own ERROR line: the floor line
+    # ``ops_alert.page`` logs on every call, plus the no-event-id line.
+    helper = _helper_records(caplog)
+    assert len(helper) == 2, (
+        "ops_alert.page logs its own ERROR line on every call, and with no DSN a "
+        "second ERROR line saying the capture has no event id: "
+        + repr([r.getMessage() for r in helper])
     )
+    assert sum("no event id" in r.getMessage() for r in helper) == 1
     assert "625" in records[0].message
     assert "10:25:00" in records[0].message
     assert "2026-09-18T12:00:00" in records[0].message, (

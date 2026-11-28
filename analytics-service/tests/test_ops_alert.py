@@ -1021,3 +1021,283 @@ async def test_await_delivery_gives_up_after_its_bound_without_cancelling_the_pa
     assert not pending.cancelled() and not pending.done()
     pending.set_result(True)
     assert await ops_alert.await_delivery(pending) is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 245 ALERTPAGE (ALRT-02): a page is credited to Sentry only when the live
+# rule can notify, and a capture that cannot notify says so at ERROR
+# ---------------------------------------------------------------------------
+
+
+def _inside_interval_errors(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """ERROR lines naming the interval, EXCLUDING the settle line.
+
+    ``_settle_window``'s ``no channel delivered`` line names the same reason in its
+    parenthetical, so a count of the page's own line has to exclude it.
+    """
+    return [
+        r.getMessage()
+        for r in _error_records(caplog)
+        if "inside the Sentry rule's action interval" in r.getMessage()
+        and "no channel delivered" not in r.getMessage()
+    ]
+
+
+async def test_a_relapse_inside_the_rule_interval_is_not_credited_and_a_failed_email_retries(
+    chan, caplog
+):
+    """WR-R4-01. The live Sentry rule notifies at most once per
+    ``SENTRY_RULE_ACTION_INTERVAL_S`` per issue. A relapse inside it is captured (the
+    event is evidence on the issue) but the rule will not notify, so crediting it
+    would leave the founder's newest message saying RECOVERED while the terminal is
+    down. With the email failing, the window is released and the next reading
+    retries until the interval has passed.
+    """
+    chan.http.status = 502
+    interval = ops_alert.SENTRY_RULE_ACTION_INTERVAL_S
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.ops_alert"):
+        assert await _delivered(cause="ipc_fault", event="outage") is True
+        chan.clock.advance(600)
+        assert (
+            await _delivered(cause="recovered_from_ipc_fault", event="recovered")
+            is True
+        )
+        chan.clock.advance(600)
+        credited = await _delivered(cause="ipc_fault", event="outage")
+        assert credited is False, "credited, expected not credited"
+        messages = [r.getMessage() for r in _error_records(caplog)]
+        inside = _inside_interval_errors(caplog)
+        assert len(inside) == 1, inside
+        for needle in ("source=mt5_jobs_terminal", "event=outage", "cause=ipc_fault"):
+            assert needle in inside[0], inside[0]
+        assert sum("no channel delivered the page" in m for m in messages) == 1
+
+        # The window was released: the next reading captures again, still uncredited.
+        calls_before = chan.spy.capture_message.call_count
+        chan.clock.advance(600)
+        assert await _delivered(cause="ipc_fault", event="outage") is False
+        assert chan.spy.capture_message.call_count == calls_before + 1
+
+        # Past the interval since the last CREDITED capture (t0) it is credited.
+        chan.clock.advance(interval + ops_alert._SENTRY_CREDIT_MARGIN_S + 1 - 1800)
+        assert await _delivered(cause="ipc_fault", event="outage") is True
+
+        # ... and the window is then spent: a minute later it is suppressed.
+        calls = chan.spy.capture_message.call_count
+        chan.clock.advance(60)
+        await _delivered(cause="ipc_fault", event="outage")
+        assert chan.spy.capture_message.call_count == calls
+
+
+async def test_a_capture_with_no_event_id_is_logged_at_ERROR_even_when_the_email_delivers(
+    chan, caplog
+):
+    """F3. No event id (no ``SENTRY_DSN``, or ``before_send`` dropped it) means Sentry
+    cannot notify. The email delivered, so the page is delivered, but the missing
+    half must not be silent.
+    """
+    chan.spy.capture_message.return_value = None
+    chan.http.status = 200
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.ops_alert"):
+        assert await _delivered(cause="ipc_fault", event="outage") is True
+        no_id = [
+            r.getMessage()
+            for r in _error_records(caplog)
+            if "no event id" in r.getMessage()
+        ]
+        assert len(no_id) == 1, no_id
+        for needle in ("source=mt5_jobs_terminal", "event=outage", "cause=ipc_fault"):
+            assert needle in no_id[0], no_id[0]
+        assert "no channel delivered" not in no_id[0]
+
+        calls = chan.spy.capture_message.call_count
+        await _delivered(cause="ipc_fault", event="outage")
+        assert chan.spy.capture_message.call_count == calls, "the window was spent"
+
+
+async def test_only_a_credited_capture_moves_the_rule_interval(chan):
+    """Sentry measures the throttle from the last time the rule's actions RAN, so
+    only a credited capture may stamp. An uncredited relapse must not push the next
+    credit out another hour."""
+    chan.http.status = 502
+    interval = ops_alert.SENTRY_RULE_ACTION_INTERVAL_S
+
+    assert await _delivered(cause="ipc_fault", event="outage") is True  # t0
+    chan.clock.advance(60)
+    assert (
+        await _delivered(cause="recovered_from_ipc_fault", event="recovered") is True
+    )
+    chan.clock.advance(1140)  # t0 + 1200
+    assert await _delivered(cause="ipc_fault", event="outage") is False
+    chan.clock.advance(  # t0 + interval + margin + 1
+        interval + ops_alert._SENTRY_CREDIT_MARGIN_S + 1 - 1200
+    )
+    assert await _delivered(cause="ipc_fault", event="outage") is True
+
+
+async def test_a_repage_an_epsilon_after_the_interval_is_not_credited_until_the_margin_passes(
+    chan,
+):
+    """SFH-M1. ``OPS_ALERT_WINDOW_S`` equals the rule interval and both are stamped at
+    the same ``now``, so a sustained outage re-pages at ``stamp + interval + epsilon``.
+    Sentry measures its throttle from its own, later, action time, so that re-page can
+    be throttled yet counted as delivered. It must stay uncredited (the founder email
+    decides, and a failed email retries) until the margin has also passed."""
+    chan.http.status = 502
+    interval = ops_alert.SENTRY_RULE_ACTION_INTERVAL_S
+    margin = ops_alert._SENTRY_CREDIT_MARGIN_S
+    assert margin > 0, "the margin is what this test exists to pin"
+
+    assert await _delivered(cause="ipc_fault", event="outage") is True  # t0
+    chan.clock.advance(interval + 5)  # the window lapsed, the margin has not
+    assert await _delivered(cause="ipc_fault", event="outage") is False
+    chan.clock.advance(margin - 5 - 1)  # t0 + interval + margin - 1
+    assert await _delivered(cause="ipc_fault", event="outage") is False
+    chan.clock.advance(1)  # t0 + interval + margin
+    assert await _delivered(cause="ipc_fault", event="outage") is True
+
+
+async def test_the_rule_interval_is_per_fingerprint(chan):
+    """One Sentry issue per (source, cause, event): a different cause is a different
+    issue with its own throttle, so it is credited inside the first one's interval."""
+    chan.http.status = 502
+
+    assert await _delivered(cause="ipc_fault", event="outage") is True
+    chan.clock.advance(60)
+    assert (
+        await _delivered(cause="recovered_from_ipc_fault", event="recovered") is True
+    )
+    chan.clock.advance(540)
+    assert await _delivered(cause="dark", event="outage") is True
+
+
+async def test_a_recovered_notice_inside_the_rule_interval_is_not_credited(
+    chan, caplog
+):
+    """The live rule has ONE throttle over both action groups, so the credit applies
+    to a recovered notice the same way as to an outage."""
+    chan.http.status = 502
+
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.ops_alert"):
+        assert await _delivered(cause="ipc_fault", event="outage") is True
+        chan.clock.advance(60)
+        assert (
+            await _delivered(cause="recovered_from_ipc_fault", event="recovered")
+            is True
+        )
+        chan.clock.advance(60)
+        await _delivered(cause="ipc_fault", event="outage")
+        chan.clock.advance(60)
+        assert (
+            await _delivered(cause="recovered_from_ipc_fault", event="recovered")
+            is False
+        )
+        recovered_lines = [
+            m for m in _inside_interval_errors(caplog) if "event=recovered" in m
+        ]
+        assert len(recovered_lines) == 1, recovered_lines
+
+
+# ---------------------------------------------------------------------------
+# Phase 245 round-1 review WR-01: the "not credited" ERROR lines are logged OUTSIDE
+# the capture's Sentry scope, so they never join the throttled ops-alert issue
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_sentry(monkeypatch: pytest.MonkeyPatch):
+    """The REAL ``sentry_sdk`` (default ``LoggingIntegration`` included) with a
+    ``before_send`` that records every event, over a fake clock and a failing founder
+    email. Every other test here swaps ``sentry_sdk`` for a ``MagicMock``, which has
+    no scope inheritance and so cannot see which scope a ``logger.error`` lands in.
+    """
+    import sentry_sdk
+    from sentry_sdk.transport import Transport
+
+    events: list[dict[str, Any]] = []
+    drop = {"captures": False}
+
+    class _NullTransport(Transport):
+        def capture_envelope(self, envelope: Any) -> None:
+            return None
+
+    def _before_send(event: Any, hint: Any) -> Any:
+        if drop["captures"] and (event.get("message") or "").startswith("ops alert ["):
+            return None
+        events.append(event)
+        return event
+
+    async def _failing_email(payload: dict[str, Any]) -> bool:
+        return False
+
+    clock = FakeClock()
+    monkeypatch.setattr(ops_alert, "time", clock)
+    monkeypatch.setattr(ops_alert, "_post_founder_email", _failing_email)
+    ops_alert._reset_ops_alert_for_tests()
+    sentry_sdk.init(
+        dsn="https://public@o0.ingest.sentry.io/0",
+        transport=_NullTransport,
+        before_send=_before_send,
+    )
+    try:
+        yield types.SimpleNamespace(events=events, drop=drop, clock=clock)
+    finally:
+        sentry_sdk.get_global_scope().set_client(None)
+        ops_alert._reset_ops_alert_for_tests()
+
+
+def _event_text(event: dict[str, Any]) -> str:
+    return event.get("message") or event.get("logentry", {}).get("message", "")
+
+
+def _assert_outside_the_alert_issue(
+    events: list[dict[str, Any]], needle: str
+) -> None:
+    diagnostics = [
+        e
+        for e in events
+        if needle in _event_text(e) and "no channel delivered" not in _event_text(e)
+    ]
+    assert diagnostics, f"no Sentry event for the {needle!r} line: the test is vacuous"
+    for event in diagnostics:
+        assert not any(
+            "ops_alert" in part for part in (event.get("fingerprint") or [])
+        ), f"the diagnostic joined the alert issue: {event.get('fingerprint')}"
+        assert "ops_alert_event" not in (event.get("tags") or {}), event.get("tags")
+
+
+async def test_the_in_interval_error_line_does_not_inherit_the_alerts_fingerprint_or_tag(
+    real_sentry,
+):
+    """WR-01. The live rule filters on ``ops_alert_event`` and the issue is keyed by
+    the fingerprint. A diagnostic logged inside ``new_scope`` carried both, so it was
+    filed into the throttled issue it reports on and could itself fire the rule."""
+    assert await _delivered(cause="ipc_fault", event="outage") is True
+    real_sentry.clock.advance(60)
+    assert (
+        await _delivered(cause="recovered_from_ipc_fault", event="recovered") is True
+    )
+    real_sentry.clock.advance(60)
+    assert await _delivered(cause="ipc_fault", event="outage") is False
+
+    captures = [
+        e for e in real_sentry.events if _event_text(e).startswith("ops alert [outage]")
+    ]
+    assert len(captures) == 2 and all(
+        c["fingerprint"][0] == "ops_alert" for c in captures
+    ), "the capture itself must keep its fingerprint, or the scope is not real"
+    _assert_outside_the_alert_issue(
+        real_sentry.events, "inside the Sentry rule's action interval"
+    )
+
+
+async def test_the_no_event_id_error_line_does_not_inherit_the_alerts_fingerprint_or_tag(
+    real_sentry,
+):
+    real_sentry.drop["captures"] = True
+
+    assert await _delivered(cause="ipc_fault", event="outage") is False
+
+    _assert_outside_the_alert_issue(real_sentry.events, "has no event id")

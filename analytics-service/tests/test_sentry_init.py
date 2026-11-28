@@ -170,6 +170,53 @@ class TestInitSentry:
             "variable in this service is worth a credential (WR-05)"
         )
 
+    # Phase 245 (ALRT-02, F3). With no DSN there is no Sentry client, so an ops-alert
+    # capture returns no event id and the founder email is the ONLY paging channel.
+    # In production that must be said once at startup, at ERROR, to the logs.
+    def _stub_init(self, monkeypatch):
+        called: list[dict] = []
+        monkeypatch.setattr(
+            "sentry_init.sentry_sdk.init", lambda **kwargs: called.append(kwargs)
+        )
+        return called
+
+    def test_an_unset_dsn_in_production_logs_one_ERROR(self, monkeypatch, caplog):
+        monkeypatch.delenv("SENTRY_DSN", raising=False)
+        monkeypatch.delenv("VERCEL_ENV", raising=False)
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+        called = self._stub_init(monkeypatch)
+
+        with caplog.at_level("ERROR"):
+            sentry_init.init_sentry()
+
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert len(errors) == 1, [r.getMessage() for r in errors]
+        assert "SENTRY_DSN is unset in production" in errors[0].getMessage()
+        assert called == []
+
+    def test_an_unset_dsn_outside_production_logs_no_ERROR(self, monkeypatch, caplog):
+        monkeypatch.delenv("SENTRY_DSN", raising=False)
+        monkeypatch.delenv("VERCEL_ENV", raising=False)
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "staging")
+        self._stub_init(monkeypatch)
+
+        with caplog.at_level("ERROR"):
+            sentry_init.init_sentry()
+
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+
+    def test_a_set_dsn_in_production_logs_no_ERROR(self, monkeypatch, caplog):
+        monkeypatch.setenv("SENTRY_DSN", "https://example@127.0.0.1/1")
+        monkeypatch.delenv("VERCEL_ENV", raising=False)
+        monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+        called = self._stub_init(monkeypatch)
+
+        with caplog.at_level("ERROR"):
+            sentry_init.init_sentry()
+
+        assert [r for r in caplog.records if r.levelname == "ERROR"] == []
+        assert len(called) == 1
+
 
 class TestPhase164_6_2_CredentialFrameVars:
     """⛔ WR-05 — the THIRD disclosure vector of the MT5 boot heal, alongside the

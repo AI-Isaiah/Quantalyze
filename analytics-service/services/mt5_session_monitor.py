@@ -84,8 +84,14 @@ from services.mt5_session_episodes import (
     KIND_DISABLED,
     KIND_KILL_SWITCH_UNPARSEABLE,
     KIND_TICK_DEADLINE,
+    classify_reading,
     record_mt5_session_reading,
 )
+
+# ⭐ Phase 245 ALERTPAGE (ALRT-04 / WR05): the validation role's outage tracker, fed
+# from the probe-bound arm below. No import cycle: `mt5_outage_alert` imports only
+# `ops_alert`, `ops_alert_open` and `mt5_session_episodes`.
+from services.mt5_outage_alert import ROLE_VALIDATION, note_outage_reading
 
 # ⭐ Phase 164.6.8 plan 06 (D-09): the validation terminal's liveness probe, run
 # AFTER the jobs heal each tick. See that module's docstring for the instrument
@@ -362,10 +368,34 @@ async def run_mt5_session_monitor_tick() -> None:
                 timeout=PROBE_TICK_BOUND_S,
             )
         except asyncio.TimeoutError:
-            logger.warning(
+            # ⭐ Phase 245 ALERTPAGE (ALRT-04, WR05). This arm logs at ERROR (a
+            # WARNING reaches no Sentry rule) and FEEDS the validation role's
+            # tracker a `tick_deadline` reading. Without the feed, a terminal
+            # whose probe overruns this bound on every tick never reaches the
+            # blind-run threshold, because the probe's own readings are what feed
+            # it and a cancelled probe feeds none: one WARNING per tick, forever,
+            # and no page. The tracker never raises and its own awaits are bounded
+            # (`page` returns at once; `record_open_page` within
+            # `ops_alert_open._OPEN_PAGE_TIMEOUT_S`), so there is no second
+            # `wait_for` here.
+            #
+            # ⚠️ Stated, not deduplicated (RESEARCH Pitfall 6): a probe cancelled
+            # AFTER it already fed its own reading adds one more not-measured
+            # reading. The harm is bounded: a run of count 1 that the next
+            # healthy reading pops.
+            logger.error(
                 "mt5 session monitor: the validation terminal probe did not "
-                "complete inside its %.1fs bound - the tick continues",
+                "complete inside its %.1fs bound - the tick continues, and "
+                "is counted as a tick_deadline reading",
                 PROBE_TICK_BOUND_S,
+            )
+            reading = classify_reading(KIND_TICK_DEADLINE, None)
+            await note_outage_reading(
+                ROLE_VALIDATION,
+                reading.state,
+                reading.kind,
+                reading.code,
+                poll_interval_s=interval,
             )
         # ⭐ Phase 164.6.8 plan 06 (D-09 (b)) -- the reader of non-scrubbed
         # `mt5_terminal_scrub` rows, after the probe and under its own bound.
@@ -390,14 +420,14 @@ async def run_mt5_session_monitor_tick() -> None:
         # `except BaseException` around an `await` would swallow it and hang
         # `lifespan`'s 10-second gather.
         try:
-            logger.warning(
+            logger.error(
                 "mt5 session monitor: the tick did not complete — continuing; "
                 "the terminal keeps whatever session it already has and the "
                 "next tick will try again (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 — see the comment; this is the control
-            logger.warning(
+            logger.error(
                 "mt5 session monitor: the tick did not complete, and the failure "
                 "could not be described — continuing"
             )

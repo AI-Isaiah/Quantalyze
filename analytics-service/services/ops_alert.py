@@ -13,7 +13,8 @@ call does three things, in this order:
    before delivery (concurrent pages cannot both send) and RELEASED when neither
    channel succeeded (the email failed and Sentry produced no event id), so the
    next reading retries instead of waiting out the hour. A page counts as
-   delivered when Sentry returns an event id, for an outage and a recovered notice
+   delivered when Sentry returns an event id outside the rule's action interval
+   (``SENTRY_RULE_ACTION_INTERVAL_S``), for an outage and a recovered notice
    alike (D-16, under D-15: Sentry is the only live paging channel for now), or when
    the email answers 2xx. A caller that must act on the outcome (the RECOVERED
    notice is one-shot: the caller closes its durable record only once a channel has
@@ -35,6 +36,20 @@ notification (recorded by the founder, plan 01 Task 3). The email half needs
 ``SERVICE_KEY``, ``ADMIN_EMAIL`` and Resend on the Next.js side. Whether the
 alarm watches its own delivery (``PROBER-ALERT-DELIVERY-UNVERIFIED-01``) is out
 of scope (D-03); nothing here claims to close it.
+
+⚠️ KNOWN LIMIT (Phase 245 round-1 review WR-02, decided): a same-cause relapse that
+opens AND ends inside the Sentry rule's action interval is never paged as an outage when
+the founder email is also down. The live rule throttles its capture, so it is not
+credited; the email is the only other channel; and only an OPEN run re-pages, so a run
+that a healthy reading ends is not retried. Its RECOVERED notice is retried on every
+healthy reading and is credited once ``SENTRY_RULE_ACTION_INTERVAL_S`` plus
+``_SENTRY_CREDIT_MARGIN_S`` have passed since the previous credited capture of that
+fingerprint, worded as a notice that may be the first of the incident to arrive, not as
+a re-send (``mt5_outage_alert._REASON_OUTAGE_UNDELIVERED``). Pinned through the real
+channel by the same-cause relapse test in ``tests/test_mt5_outage_alert.py``. ACCEPTED
+LIMIT (review IN-04, restored by round 2): the credit map is process-local, so a
+same-fingerprint relapse across a restart, inside the rule interval of the previous
+process's credited capture, is credited while Sentry may still throttle it.
 
 ⛔ The source set, the event set and the cause charset are defined ONCE per
 language: here, and in ``src/lib/ops-alert-contract.ts``. A parity test fails
@@ -95,6 +110,32 @@ _UNRECOGNISED: Final = "unrecognised"
 #: ``routers/cron.py`` imports this rather than spelling a second literal.
 OPS_ALERT_WINDOW_S: Final = 3600.0
 
+#: How long the live Sentry rule stays quiet after its actions last RAN for one issue.
+#: It models the rule "Ops alert: outage (164.6.8)", read read-only through the Sentry
+#: MCP on 2026-11-28: frequency 60 minutes, per rule and per issue, with ONE throttle
+#: covering both action groups (``ops_alert_event`` outage and recovered). There is
+#: one Sentry issue per ``(source, cause, event)`` fingerprint, which is why the credit
+#: map ``_sentry_credited_at`` is keyed that way. Sentry measures the throttle from the
+#: last time the actions ran, so only a CREDITED capture stamps it. The value must
+#: follow the rule: change it when the rule's frequency changes. ACCEPTED LIMIT (review
+#: IN-04, restored by round 2): the credit map is process-local, so a restart forgets
+#: it while Sentry's throttle keeps running, and a same-fingerprint page within the
+#: interval of the PREVIOUS process's credited capture is credited here although
+#: Sentry may throttle it. A fresh-process stand-in (round 1 SFH-M4) was tried and
+#: reverted: it made a deploy-ended incident send RECOVERED twice and kept a record
+#: open under back-to-back deploys (CR-R2-01). It is a different concept from
+#: ``OPS_ALERT_WINDOW_S`` (our own re-page bound) and is never derived from it.
+SENTRY_RULE_ACTION_INTERVAL_S: Final = 3600.0
+
+#: Added to ``SENTRY_RULE_ACTION_INTERVAL_S`` before a capture is credited (review
+#: SFH-M1). The stamp is taken on the client BEFORE the capture, and Sentry measures
+#: its throttle from the server-side time its actions ran, which is later by the
+#: ingest and rule-processing latency. ``OPS_ALERT_WINDOW_S`` equals the interval, so
+#: without a margin every hourly re-page lands at ``stamp + interval + epsilon``, is
+#: credited, and can still be throttled. 120 s covers that latency with room and is
+#: far under the 600 s poll cadence, so the margin costs at most one extra retry.
+_SENTRY_CREDIT_MARGIN_S: Final = 120.0
+
 _OPS_ALERT_DETAIL_MAX: Final = 2000
 _OPS_ALERT_TAG_MAX: Final = 200
 #: The TOTAL deadline of one email POST (``asyncio.wait_for`` around the whole
@@ -119,6 +160,11 @@ _CAUSE_RE = re.compile(OPS_ALERT_CAUSE_RE)
 
 # Process-local, lock-free: every writer runs on the event loop thread.
 _last_alert_at: dict[tuple[str, str, str], float] = {}
+#: When each ``(source, cause, event)`` fingerprint last had a capture CREDITED, so a
+#: capture inside ``SENTRY_RULE_ACTION_INTERVAL_S`` of it is known not to notify.
+#: Only a credited capture writes here (the rule's throttle runs from its last
+#: action), and a restart forgets it.
+_sentry_credited_at: dict[tuple[str, str, str], float] = {}
 #: The delivery outcome of the page that holds each window key, so a SUPPRESSED
 #: repeat can report the holder's outcome instead of a guess (review WR-R2-01).
 _delivery_by_key: dict[tuple[str, str, str], "asyncio.Future[bool]"] = {}
@@ -129,6 +175,7 @@ _OPS_ALERT_TASKS: set[asyncio.Task[bool]] = set()
 def _reset_ops_alert_for_tests() -> None:
     """Test-only: forget the window and the task set."""
     _last_alert_at.clear()
+    _sentry_credited_at.clear()
     _delivery_by_key.clear()
     _OPS_ALERT_TASKS.clear()
 
@@ -280,7 +327,10 @@ async def _post_founder_email(payload: dict[str, str | None]) -> bool:
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "ops_alert: the founder email POST failed, and the failure could "
+                "not be described"
+            )
     return False
 
 
@@ -362,8 +412,8 @@ def _settle_window(
     ERROR: that is the level the Sentry LoggingIntegration reports.
 
     The outcome is ``sentry_counts or email_ok``, the one rule for "a channel has
-    it". ``sentry_counts`` is a Sentry event id for either event since D-16 (under
-    D-15). Lineage: review WR-R3-01 had credited a recovered event to the email
+    it". ``sentry_counts`` is a Sentry event id outside the rule's action interval,
+    for either event since D-16 (under D-15). Lineage: review WR-R3-01 had credited a recovered event to the email
     alone.
     An outcome that cannot be determined is "not delivered": a caller then keeps
     its record and the notice is sent again, never lost (review WR-R2-01).
@@ -381,7 +431,8 @@ def _settle_window(
         _release_window(key, stamp)
         logger.error(
             "ops_alert: no channel delivered the page (the founder email failed "
-            "and Sentry returned no event id); the window is "
+            "and Sentry did not credit the page: no event id, or a capture "
+            "inside the Sentry rule's action interval); the window is "
             "not spent and the next reading retries (source=%s event=%s "
             "cause=%s)",
             key[0],
@@ -395,7 +446,10 @@ def _settle_window(
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "ops_alert: the delivery check failed, and the failure could not "
+                "be described"
+            )
     finally:
         if not delivered.done():
             delivered.set_result(outcome)
@@ -441,8 +495,9 @@ async def page(
     """Page a human about ``source``. Never raises. See the module docstring.
 
     Returns the page's delivery OUTCOME, a future that resolves True when a channel
-    has the page (a Sentry event id for an outage or a recovered notice alike, D-16
-    under D-15, or a 2xx from the founder email) and False when none does. Lineage:
+    has the page (a Sentry event id outside the rule's action interval for an outage
+    or a recovered notice alike, D-16 under D-15, or a 2xx from the founder email)
+    and False when none does. Lineage:
     review WR-R3-01 had credited a recovered notice to the email alone. The live
     Sentry rule "Ops alert: outage (164.6.8)" notifies on ``ops_alert_event=outage``
     and, since 2026-10-15 (founder), on ``recovered`` too. A page suppressed by the
@@ -486,6 +541,17 @@ async def page(
         _delivery_by_key[key] = delivered
 
         sentry_ok = False
+        credited_at = _sentry_credited_at.get(key)
+        inside_rule_interval = (
+            credited_at is not None
+            and now - credited_at
+            < SENTRY_RULE_ACTION_INTERVAL_S + _SENTRY_CREDIT_MARGIN_S
+        )
+        # Decided inside the capture's scope, LOGGED after it exits (review WR-01): a
+        # ``logger.error`` inside ``new_scope`` becomes a Sentry event on that scope, so
+        # it would inherit the alert's fingerprint and ``ops_alert_event`` tag and join
+        # the very issue whose throttle this line reports.
+        not_credited_reason: str | None = None
         try:
             # A scoped capture: an unscoped ``set_tag`` would label every later
             # event this process sends (review WR-03 on the scrub alert).
@@ -505,8 +571,38 @@ async def page(
                     level="error" if event_n == "outage" else "warning",
                 )
                 # ``None`` is the SDK's own answer for "nothing was sent": no
-                # DSN, or ``before_send`` dropped the event.
-                sentry_ok = event_id is not None
+                # DSN, or ``before_send`` dropped the event. The capture still
+                # happens inside the rule's interval, because the event attaches
+                # to the issue as evidence; it just cannot notify.
+                if event_id is None:
+                    not_credited_reason = "no_event_id"
+                elif inside_rule_interval:
+                    not_credited_reason = "inside_rule_interval"
+                else:
+                    sentry_ok = True
+                    _sentry_credited_at[key] = now
+            if not_credited_reason == "no_event_id":
+                logger.error(
+                    "ops_alert: the Sentry capture has no event id (no "
+                    "SENTRY_DSN, or before_send dropped the event), so Sentry "
+                    "cannot notify and the founder email alone decides delivery "
+                    "(source=%s event=%s cause=%s)",
+                    source_n,
+                    event_n,
+                    cause_n,
+                )
+            elif not_credited_reason == "inside_rule_interval":
+                logger.error(
+                    "ops_alert: the capture is inside the Sentry rule's action "
+                    "interval (plus the credit margin) since this fingerprint's "
+                    "last credited capture, so the rule may not notify; the "
+                    "founder email alone decides delivery, and a failed email "
+                    "releases the window so the next reading retries until the "
+                    "interval has passed (source=%s event=%s cause=%s)",
+                    source_n,
+                    event_n,
+                    cause_n,
+                )
         except Exception as exc:  # noqa: BLE001 - never mask the path reported on
             logger.error(
                 "ops_alert: the Sentry capture failed (exc_class=%s)",
@@ -527,6 +623,10 @@ async def page(
         # ops_alert_event=recovered, so a credited recovered capture notifies the
         # founder the way an outage does. A FAILED capture (no event id, or a raise) is not
         # credited: sentry_ok stays False and WR-R3-01's retry still holds for it.
+        # 2026-11-28 (Phase 245): an event id credits the page only outside the
+        # rule's action interval for its fingerprint, because that rule throttles
+        # to one notification per issue per interval and a capture it will not act
+        # on reached nobody.
         sentry_counts = sentry_ok
         if sentry_counts:
             # Decided: a channel already has this page, whatever the email does.
@@ -565,7 +665,9 @@ async def page(
                 "ops_alert: page failed (exc_class=%s)", type(exc).__name__
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "ops_alert: page failed, and the failure could not be described"
+            )
         # Whatever failed, the caller still gets an outcome: not delivered, unless
         # the failure came after a channel had already taken the page.
         if not delivered.done():

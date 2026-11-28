@@ -261,13 +261,13 @@ async def record_open_page(
         )
     except Exception as exc:  # noqa: BLE001 - see the module docstring; the control
         try:
-            logger.warning(
+            logger.error(
                 "ops alert open-page record: the open page could not be "
                 "recorded (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "ops alert open-page record: the open page could not be "
                 "recorded, and the failure could not be described"
             )
@@ -329,7 +329,7 @@ async def close_open_page(source: str) -> bool:
             _STALE_SOURCES.discard(source)
             return True
         _STALE_SOURCES.add(source)
-        logger.warning(
+        logger.error(
             "ops alert open-page record: the open page could not be closed (an "
             "UPDATE matched no open row)"
         )
@@ -337,13 +337,13 @@ async def close_open_page(source: str) -> bool:
     except Exception as exc:  # noqa: BLE001 - see the module docstring; the control
         _STALE_SOURCES.add(source)
         try:
-            logger.warning(
+            logger.error(
                 "ops alert open-page record: the open page could not be closed "
                 "(exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "ops alert open-page record: the open page could not be closed, "
                 "and the failure could not be described"
             )

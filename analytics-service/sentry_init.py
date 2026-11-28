@@ -1,7 +1,13 @@
 """Phase 16 / OBSERV-04 + OBSERV-05 — sentry-sdk[fastapi] init + PII redactor.
 
 Asserted invariants:
-  1. init_sentry() is a no-op when SENTRY_DSN env is unset (existing fail-open pattern).
+  1. init_sentry() is a no-op when SENTRY_DSN env is unset (existing fail-open pattern),
+     except that an unset DSN in production logs ONE ERROR (Phase 245 ALRT-02, F3):
+     with no DSN there is no Sentry client, so every ops-alert capture returns no
+     event id and the founder email is the only paging channel. The line reaches
+     Railway logs only (no client, so no Sentry event), and it assumes the PROD
+     Railway environment is named `production` (RESEARCH A1, read live by plan 04's
+     drill).
   2. before_send is wrapped in try/except — a redaction bug NEVER drops Sentry events
      silently (Pitfall 6).
   3. _PII_KEYS mirrors src/lib/admin/pii-scrub.ts FULL surface (FIX 7):
@@ -23,6 +29,7 @@ Asserted invariants:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any, Mapping
@@ -45,6 +52,8 @@ from services.redact import (
     scrub_url_userinfo as _redact_scrub_url_userinfo,
     DENYLIST_EXACT as _CANONICAL_DENYLIST,
 )
+
+logger = logging.getLogger("quantalyze.analytics.sentry_init")
 
 
 # ---------------------------------------------------------------------------
@@ -382,11 +391,21 @@ def _resolve_environment() -> str:
 def init_sentry() -> None:
     """Initialize sentry-sdk with FastAPI/Starlette integrations + PII redactor.
 
-    No-op when SENTRY_DSN unset. Idempotent in practice — sentry_sdk.init can be
+    No-op when SENTRY_DSN unset, except that an unset DSN in production logs one
+    ERROR (Phase 245, F3): no ops-alert page can reach Sentry without a client, so
+    the founder email is the only paging channel. That line reaches Railway logs
+    only, and it assumes the PROD Railway environment is named `production`
+    (RESEARCH A1). Idempotent in practice — sentry_sdk.init can be
     called multiple times but Plan 3 calls this exactly once at process startup.
     """
     dsn = os.getenv("SENTRY_DSN")
     if not dsn:
+        if _resolve_environment() == "production":
+            logger.error(
+                "sentry_init: SENTRY_DSN is unset in production, so no ops-alert "
+                "page can reach Sentry and the founder email is the only paging "
+                "channel"
+            )
         return
     sentry_sdk.init(
         dsn=dsn,
