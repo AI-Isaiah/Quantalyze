@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.133.111.1] - 2026-11-28 — records: Phase 258 REDUMPDIRECT closed (verification passed)
+
+### Changed
+- Phase 258 records land on `main`: CONTEXT with the founder ruling "Push to main directly", the deviation record overriding 164.9.5 D-13 and D-23, and what verifies the bot commit; DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, three PLANs and SUMMARYs, REVIEW (one MEDIUM, booked as `[258-PUSH-LANDED-MISREPORT]`), SECURITY (SECURED, 0 open threats) and VERIFICATION (passed 6/6).
+- ROADMAP: Phase 258 booked in v1.23 HARDEN, ticked complete with its three plans and Progress row; STATE records the booking and the close.
+
+### Notes
+- Records only, no code. The code shipped as v0.133.111.0 (#1408). No `TODOS.md` entry is closed.
+- The live direct push to `main` is still unproven: the first migration merge after #1408 runs it. If that `redump-push` run fails, Phase 258 reopens.
+
 ## [0.133.111.0] - 2026-11-28 — Phase 258 REDUMPDIRECT: after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval
 
 Founder ruling 2026-11-27, verbatim answer to "Bot token / Claude allow rule / Push to main directly": "Push to main directly". Until now the re-dump opened a bot PR with the job token, so GitHub held its CI for a human to approve, and a human then merged it. This overrides Phase 164.9.5 decisions D-13 (a human reviews and merges every re-dump) and D-23 (the bot PR's runs wait for approval). D-11, D-12 and D-24 retire with the bot branch. The override and its reason are recorded in `258-CONTEXT.md` and the ROADMAP.

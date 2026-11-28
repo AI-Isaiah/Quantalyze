@@ -7,8 +7,8 @@ current_phase_name: DERIBITTRUTH
 status: executing
 stopped_at: Records PR: 236 FIGUREMATH closed (verification passed, FIG-05 fleet re-derive PASSED 2026-11-27); 225 and 228 stay human_needed
 last_updated: "2026-11-27T09:29:29.441Z"
-last_activity: 2026-11-27
-last_activity_desc: "Records PR: 254 OPENINGDEPOSIT (v1.23) closed (verification passed; code #1407 at ccacb376); 242 SECRETSHYGIENE (v1.23) closed (verification passed; code #1394 at 1863fe80, re-dump #1401 at 9f0fb9e6); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed, SC-1 met as narrowed); 236 closed, verification passed (FIG-05 strategy and allocator gates PASSED 2026-11-27); phases run in parallel"
+last_activity: 2026-11-28
+last_activity_desc: "Records PR: 258 REDUMPDIRECT (v1.23, CI-only) closed (verification passed; code #1408 at 66a4016e; the baseline re-dump now pushes straight to main); 254 OPENINGDEPOSIT (v1.23) closed (verification passed; code #1407 at ccacb376); 242 SECRETSHYGIENE (v1.23) closed (verification passed; code #1394 at 1863fe80, re-dump #1401 at 9f0fb9e6); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed, SC-1 met as narrowed); 236 closed, verification passed (FIG-05 strategy and allocator gates PASSED 2026-11-27); phases run in parallel"
 state_head: 45d7b4e5c701f5f924979b571021000b9550d7bb
 progress:
   total_phases: 23
@@ -183,7 +183,7 @@ zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, ant
 Phase: 233 (DERIBITTRUTH) — COMPLETE (shipped v0.133.83.0, #1360); 236 (FIGUREMATH) closed 2026-11-27 (FIG-05 passed); v1.22 phases run in parallel
 Plan: 7 of 7
 Status: Phases complete; 225 (ONEACCOUNTONCE) closed 2026-11-27 with verification passed (plan 18 control passed 2026-11-26, plan 21 post-deploy poll read passed 2026-11-27) and 228 (unchanged-password case seen on PROD; rest open) stays human_needed; 230 (MT5NIGHTLY) still has human verification pending (see Deferred Verification)
-Last activity: 2026-11-27 — records PR: 254 OPENINGDEPOSIT (v1.23) closed (verification passed, shipped v0.133.109.0, #1407); 242 SECRETSHYGIENE (v1.23) closed (verification passed, SECR-03 and SECR-04 complete); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
+Last activity: 2026-11-28 — records PR: 258 REDUMPDIRECT (v1.23, CI-only) closed (verification passed, shipped v0.133.111.0, #1408); 2026-11-27 — records PR: 254 OPENINGDEPOSIT (v1.23) closed (verification passed, shipped v0.133.109.0, #1407); 242 SECRETSHYGIENE (v1.23) closed (verification passed, SECR-03 and SECR-04 complete); 255 NULLANCHOR closed (verification passed), 257 SEEDHOLD booked; 244 ACCESSGUARDS closed (verification passed); 236 closed (verification passed), 225 closed earlier the same day
 Progress: [████████░░] 83%
 
 This section holds exactly one of each field above, because the gsd-tools STATE handlers edit the first match of each label. The position log that stood here until 2026-10-15, with its RETAINED blocks and close-out history, is in [`STATE-LINEAGE.md`](STATE-LINEAGE.md) under "2026-10-15". `scripts/check-planning-hygiene.ts` fails on a second `Phase:` line here.
@@ -745,6 +745,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 255 added (2026-11-26, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 was; founder ruling 2026-11-26 "Keep it on, fix records"): NULLANCHOR, the v1.23 owner of `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today on OKX, Bybit and Deribit because `USE_RAW_TRADE_INGESTION` is on in PROD
 - Phase 256 added (2026-11-27, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 and 255 were; founder ruling 2026-11-27 "USD before 11-15, BTC after"): OKXUNITSWITCH, an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover. Reverses part of 232-03's VREAD-06.
 - Phase 257 added (2026-11-27, /gsd-phase add, placed in v1.23 HARDEN by hand as 254 to 256 were; founder ruling 2026-11-27 "Fix both in a follow-up (Recommended)", raised by the Phase 255 close): SEEDHOLD, the v1.23 owner of `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`. While the bound RPC is down the cron cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records a read-through mark (last complete 7-day window) so the next run continues from there.
+- Phase 258 added (2026-11-27, /gsd-phase add, placed in v1.23 HARDEN by hand as 254-256 were; 257 is held by the open records PR #1399; founder ruling 2026-11-27 "Push to main directly"): REDUMPDIRECT, after a PROD migration apply the baseline re-dump commits straight to main with no PR and no approval. CI-only. Overrides 164.9.5 D-13 and D-23.
 
 ### Decisions
 
