@@ -51,6 +51,7 @@ import { readBenchmarkPrices } from "./benchmark-source";
 import { convertNativeReturnsToUsd } from "./native-to-usd";
 import { buildUsdViewFacts } from "./usd-view";
 import { parseReturnsUnit } from "./returns-unit";
+import { parseUnitSegments, parseUnitSwitch } from "./unit-segments";
 import {
   CompositeSeriesReadError,
   readCompositeFactsheet,
@@ -320,7 +321,7 @@ async function resolveFactsheetInputs(
        returns_denominator_config, source,
        api_keys!strategies_api_key_id_fkey ( exchange ),
        strategy_analytics ( daily_returns, returns_series, computed_at, data_quality_flags, ${BY_BASIS_ALIASES}, computation_status,
-         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance,
+         cumulative_return, volatility, max_drawdown, cagr, sharpe, sortino, calmar, trades_fetched_at, series_provenance, unit_segments,
          six_month_return, figure_defs_version:metrics_json->figure_defs_version, three_month:metrics_json->three_month,
          var_1d_95:metrics_json->var_1d_95, cvar:metrics_json->cvar, record_observations:metrics_json->record_observations,
          cagr_start:metrics_json->cagr_start, cagr_end:metrics_json->cagr_end )`,
@@ -488,7 +489,7 @@ async function resolveFactsheetInputs(
   // read, no basis gate, and a build the public cache must not store.
   const basisInFlight = analyticsUpdating || effectiveFlags.source === "snapshot";
   const dqf = effectiveFlags.flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown; marks_since?: unknown; marks_trailing_since?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown; twr_chain_broken?: unknown; headline_since?: unknown; negative_nav_guard?: unknown; dust_nav_guard?: unknown; pnl_dominated_guard?: unknown; flow_timing_day_level?: unknown; flow_timing_day_level_large?: unknown; marks_since?: unknown; marks_trailing_since?: unknown; unit_switch?: unknown }
     | null
     | undefined;
   let dailyReturns = resolveDailyReturnSeries(
@@ -755,7 +756,7 @@ async function resolveFactsheetInputs(
  * `${id}::${computedAt}` string that `buildFactsheetPayloadCached` (in
  * `src/app/factsheet/[id]/v2/page.tsx`) split, discarding everything after the
  * id, so the key was id-ONLY and a fresh `computed_at` did not bust it
- * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v29", id,
+ * (DEF-148-A). The keyParts are now ["factsheet-v2-payload-v30", id,
  * computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus]
  * (the middle two are 167.1.2.2.2 plan 10's trade-fact members, the last is
  * 166.3.1 D-05's), a `null` computedAt included and an absent status keyed on
@@ -1094,7 +1095,7 @@ async function buildFromResolved(
   const marksSince = parseMarksStart(dqf?.[MARKS_SINCE_FLAG]);
   // The day marks stopped updating (SFH-2 N1): the same parser, the same spread.
   const marksTrailingSince = parseMarksStart(dqf?.[MARKS_TRAILING_SINCE_FLAG]);
-  const nativePayload =
+  const nativeBase =
     marksSince || marksTrailingSince
       ? {
           ...built,
@@ -1102,6 +1103,16 @@ async function buildFromResolved(
           ...(marksTrailingSince ? { marksTrailingSince } : {}),
         }
       : built;
+  // Phase 256 OKXUNITSWITCH (SC-3): the unit switch the derive recorded, parsed at this boundary
+  // by the one parser, and its two native segments read against it. Single-key only (a
+  // composite is USD members, never a switched key). By spread, only when present, so a USD
+  // payload and a malformed flag stay byte-identical. It never sets `returnsUnit`: a switched
+  // strategy's headline is whole-record USD, so it has no unit chip, toggle or USD view.
+  const unitSwitch = isComposite ? null : parseUnitSwitch(dqf?.unit_switch);
+  const unitSegments = unitSwitch ? parseUnitSegments(a?.unit_segments, unitSwitch) : null;
+  const nativePayload = unitSwitch
+    ? { ...nativeBase, unitSwitch, ...(unitSegments ? { unitSegments } : {}) }
+    : nativeBase;
 
   // Phase 164.6.6.2.1 (D-01, D-03, D-15) — a native strategy ships its USD view
   // beside the native payload. By spread, so a USD payload (and a composite) has

@@ -137,6 +137,21 @@ class TestOkxNonUsdBillRefusedByName:
         assert flags == {}
         assert [r["price"] for r in out] == [9.0]
 
+    async def test_founder_shaped_bills_still_refuse_with_the_default_keyword(self) -> None:
+        # Phase 256 SC-4, the never-switch half: USDT P&L plus BTC fee bills, read WITHOUT the
+        # ``unit_switch`` keyword (every caller but the derive), refuse by name exactly as before.
+        # Passing a resolver is what lets such a read through (tests/test_okx_unit_switch_fetch.py).
+        rows = [
+            _bill(1, D3_MS, "USDT", "10", "-1"),
+            _bill(2, D2_MS, "BTC", "0", "-0.0006"),
+            _bill(3, D1_MS, "BTC", "0", "-0.0009"),
+        ]
+
+        out, flags = await _read(rows)
+
+        assert out == []
+        assert flags.get(FLAG) is True
+
     async def test_a_zero_amount_bill_in_another_currency_is_counted_not_refused(self) -> None:
         # pnl 0.5 + fee -0.5 is exactly zero: it contributes 0 at any rate, so it cannot mix.
         rows = [

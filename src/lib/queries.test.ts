@@ -365,7 +365,17 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
       // AMENDED 2026-11-25, Phase 252 (D-02): TWO more reason scalars, a closed-vocabulary string
       // each, the live flags' and the snapshot's. Text scalars, never the blob or the snapshot object.
       .replace("data_quality_flags->>mtm_gated_reason", "")
-      .replace("data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason", "");
+      .replace("data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason", "")
+      // AMENDED 2026-11-27, Phase 256 plan 08 (D-05, T-256-23): SIX more flags scalars, the three
+      // closed fields of the one `unit_switch` object (a unit code and two ISO days), live and in
+      // the snapshot. Each is a `->>` text scalar reached through `->unit_switch`; the object itself
+      // is never selected, so `data_quality_flags->unit_switch` with no `->>` still fails this pin.
+      .replace("data_quality_flags->unit_switch->>coin", "")
+      .replace("data_quality_flags->unit_switch->>last_usd_day", "")
+      .replace("data_quality_flags->unit_switch->>first_coin_return_day", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->unit_switch->>coin", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->unit_switch->>last_usd_day", "")
+      .replace("data_quality_flags->last_success_snapshot->flags->unit_switch->>first_coin_return_day", "");
     expect(withoutAllowed).not.toContain("data_quality_flags");
     // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
     // projected column (which would ship the entire blob to an anon reader).
@@ -479,6 +489,13 @@ describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
         "data_quality_flags->last_success_snapshot->flags->>cumulative_method",
         "data_quality_flags->last_success_snapshot->flags->>mtm_gated_reason",
         "data_quality_flags->last_success_snapshot->flags->>native_unit",
+        // Phase 256 plan 08: the six unit-switch scalars (three closed fields, live and snapshot).
+        "data_quality_flags->last_success_snapshot->flags->unit_switch->>coin",
+        "data_quality_flags->last_success_snapshot->flags->unit_switch->>first_coin_return_day",
+        "data_quality_flags->last_success_snapshot->flags->unit_switch->>last_usd_day",
+        "data_quality_flags->unit_switch->>coin",
+        "data_quality_flags->unit_switch->>first_coin_return_day",
+        "data_quality_flags->unit_switch->>last_usd_day",
         "metrics_json->record_observations",
         "metrics_json->three_month",
         "returns_series->-1->>date",

@@ -11,6 +11,7 @@ import type { GuardReason } from "./headline-basis";
 import type { FigureRecord, RollingVerdict } from "@/lib/figure-gate";
 import type { PercentileMap } from "@/lib/percentile-core";
 import type { ReconstructedRange } from "./trade-fetch-provenance";
+import type { UnitSegmentsView, UnitSwitchView } from "./unit-segments";
 
 /** One day of strategy or benchmark returns. `value` is a decimal return (not %). */
 export type DailyReturn = { date: string; value: number };
@@ -1048,6 +1049,25 @@ export type FactsheetCommon = {
    * USD payload stays byte-identical.
    */
   usdViewUnavailable?: "price_read_failed" | "no_priced_day";
+  /**
+   * Phase 256 OKXUNITSWITCH (SC-3) — the unit switch of an OKX account that moved from a
+   * USDT-margined book into a coin-margined one: USD to `lastFromDay`, the coin from
+   * `firstToDay` (the next UTC day). Parsed once in `buildFromResolved` from
+   * `data_quality_flags.unit_switch` through `parseUnitSwitch`; every surface composes its
+   * sentence from THIS field. ABSENT MEANS A USD STRATEGY: a conditional spread, so a
+   * payload with no switch (or a malformed one) has no key at all and is byte-identical to
+   * today's. A switched payload never sets {@link returnsUnit}: its headline series is
+   * whole-record USD, so it has no unit chip, no unit toggle and no {@link usdView}.
+   */
+  unitSwitch?: UnitSwitchView;
+  /**
+   * Phase 256 OKXUNITSWITCH (SC-3) — the two native segments of a switched strategy, each in
+   * its own unit, parsed from `strategy_analytics.unit_segments` through `parseUnitSegments`
+   * against {@link unitSwitch}. Present only when `unitSwitch` is present and the sidecar is
+   * well-formed; also carries `unpricedDays`, the coin-segment days the USD figures leave out
+   * for want of a stored close. Absent means "no native segments to draw", never an empty one.
+   */
+  unitSegments?: UnitSegmentsView;
   /**
    * Phase 170.2 (SC-4, D-09) — `strategies.source`, present ONLY when it is
    * `"csv"` (a conditional spread: any other source leaves the key out, so a

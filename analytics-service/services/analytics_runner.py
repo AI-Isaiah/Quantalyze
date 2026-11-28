@@ -239,6 +239,13 @@ class DataQualityFlags(TypedDict, total=False):
     # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
     # computation_status or set computation_warned. ---
     native_unit: str
+    # --- Phase 256 OKXUNITSWITCH: an OKX account that moved from USDT into a coin. The headline
+    # series is ALL USD (USD through the last USD day, the coin segment converted at the stored
+    # daily closes), so this is not a native_unit and changes no KPI maths; it names the switch so
+    # the factsheet can say so. Stamped by the strategy derive's pre-stamp, carried present-only
+    # here. A denomination note, NEVER a warning: in neither NAV_TWR_GUARD_KEYS nor
+    # ALLOCATED_CAPITAL_GUARD_KEYS. ---
+    unit_switch: dict[str, str]
     # --- Phase 167.2.1.1.1 NAVMTM (D-12): the first UTC day this strategy's series uses a
     # stored marked-to-market NAV instead of a realized-basis value (YYYY-MM-DD). Stamped by
     # the broker derive's pre-stamp and carried present-only by run_csv_strategy_analytics,
@@ -1435,6 +1442,34 @@ _NAVMTM_DAY_KEYS = ("marks_since", "marks_covered_from", "marks_trailing_since")
 _NAVMTM_DAY_LIST_KEYS = ("mark_gap_days", "tiny_base_days")
 
 
+_UNIT_SWITCH_KEYS = ("coin", "last_usd_day", "first_coin_return_day")
+_UNIT_SWITCH_COIN_RE = re.compile(r"[A-Z]{2,10}")
+
+
+def _validated_unit_switch(raw: object) -> dict[str, str] | None:
+    """Phase 256 OKXUNITSWITCH: the ``unit_switch`` marker the strategy derive prestamps, or ``None``
+    when it is absent or malformed. It is an INPUT here (a worker-written JSONB read back) and
+    becomes a PUBLIC flag, so it is carried only as exactly the three keys the derive writes, each a
+    string: a coin code (``[A-Z]{2,10}``) and two real calendar days written ``YYYY-MM-DD``. Extra
+    keys are dropped; anything else is not carried (the factsheet then reads a plain USD strategy
+    rather than a half-described switch)."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, str] = {}
+    for key in _UNIT_SWITCH_KEYS:
+        value = raw.get(key)
+        if not isinstance(value, str):
+            return None
+        out[key] = value
+    if _UNIT_SWITCH_COIN_RE.fullmatch(out["coin"]) is None:
+        return None
+    if not (
+        _is_iso_calendar_day(out["last_usd_day"]) and _is_iso_calendar_day(out["first_coin_return_day"])
+    ):
+        return None
+    return out
+
+
 class _NavmtmFlags(NamedTuple):
     """The validated NAVMTM prestamp values; ``None`` is absent or dropped."""
 
@@ -2324,6 +2359,16 @@ async def run_csv_strategy_analytics(
             # "complete" and computation_warned False.
             if _native_unit is not None:
                 data_quality_flags["native_unit"] = _native_unit
+
+            # Phase 256 OKXUNITSWITCH: carry the switch marker PRESENT-ONLY and OUTSIDE both
+            # `_warned` loops, exactly like native_unit, so the wholesale rebuild does not wipe what
+            # the strategy derive stamped. It is a denomination note, not a defect: a clean switched
+            # account stays exact-string "complete". It does NOT touch `_native_unit`: the headline
+            # series is all USD, so the benchmark pairing above and the KPI gate run as for any USD
+            # row (the stored series already converts the coin segment at the daily closes).
+            _unit_switch = _validated_unit_switch(existing_flags.get("unit_switch"))
+            if _unit_switch is not None:
+                data_quality_flags["unit_switch"] = _unit_switch
 
             # Phase 167.2.1.1.1 NAVMTM (D-12, D-05, D-15): carry the marks-start date, the
             # covered-from boundary and the two day lists PRESENT-ONLY, validated above, and

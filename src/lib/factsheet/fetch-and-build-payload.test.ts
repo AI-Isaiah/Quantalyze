@@ -881,6 +881,94 @@ describe("164.6.6.2 plan 05 — native_unit on the analytics row becomes payload
 });
 
 // ---------------------------------------------------------------------------
+// Phase 256 OKXUNITSWITCH plan 05 (SC-3) — the stored unit switch becomes
+// `payload.unitSwitch`, its sidecar `payload.unitSegments`, and a switched row
+// NEVER becomes a native-unit strategy (`returnsUnit`, `usdView` stay unset).
+// Absent or malformed reads as a USD payload: no key at all.
+// ---------------------------------------------------------------------------
+describe("256 plan 05 — unit_switch on the analytics row becomes payload.unitSwitch", () => {
+  const SWITCH_FLAG = { coin: "BTC", last_usd_day: "2024-01-20", first_coin_return_day: "2024-01-21" };
+  const SIDECAR = {
+    version: 1,
+    segments: [
+      { unit: "USD", from_day: "2024-01-02", to_day: "2024-01-20", returns: [{ date: "2024-01-19", value: 0.01 }, { date: "2024-01-20", value: -0.01 }] },
+      { unit: "BTC", base_day: "2024-01-20", from_day: "2024-01-21", to_day: "2024-01-22", returns: [{ date: "2024-01-21", value: 0.02 }, { date: "2024-01-22", value: 0.01 }] },
+    ],
+    unpriced_days: ["2024-01-22"],
+  };
+
+  it("a switched row carries unitSwitch and unitSegments and leaves returnsUnit and usdView unset", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { unit_switch: SWITCH_FLAG }, unit_segments: SIDECAR }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.unitSwitch).toEqual({ fromUnit: "USD", toUnit: "BTC", lastFromDay: "2024-01-20", firstToDay: "2024-01-21" });
+    expect(payload?.unitSegments?.baseDay).toBe("2024-01-20");
+    expect(payload?.unitSegments?.unpricedDays).toEqual(["2024-01-22"]);
+    expect(payload?.unitSegments?.toReturns).toHaveLength(2);
+    // The headline stays whole-record USD: no native-unit machinery is switched on.
+    expect(payload?.returnsUnit).toBeUndefined();
+    expect("returnsUnit" in (payload as object)).toBe(false);
+    expect("usdView" in (payload as object)).toBe(false);
+    expect("usdViewUnavailable" in (payload as object)).toBe(false);
+  });
+
+  it("a flag with no sidecar carries unitSwitch alone (the sentence still renders, the chart stays single)", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { unit_switch: SWITCH_FLAG }, unit_segments: null }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.unitSwitch?.toUnit).toBe("BTC");
+    expect("unitSegments" in (payload as object)).toBe(false);
+  });
+
+  it("a sidecar that disagrees with the flag is dropped, the flag is kept", async () => {
+    const wrong = { ...SIDECAR, segments: [SIDECAR.segments[0], { ...SIDECAR.segments[1], base_day: "2024-01-19" }] };
+    seed(single({ daily_returns: points(30), data_quality_flags: { unit_switch: SWITCH_FLAG }, unit_segments: wrong }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.unitSwitch).toBeDefined();
+    expect("unitSegments" in (payload as object)).toBe(false);
+  });
+
+  it.each([
+    ["no flag at all", null],
+    ["a flags blob without unit_switch", { insufficient_window: false }],
+    ["a lower-case coin", { unit_switch: { ...SWITCH_FLAG, coin: "btc" } }],
+    ["USD as the coin", { unit_switch: { ...SWITCH_FLAG, coin: "USD" } }],
+    ["a non-ISO day", { unit_switch: { ...SWITCH_FLAG, last_usd_day: "20 Jan" } }],
+    ["a first coin day two days after the last USD day", { unit_switch: { ...SWITCH_FLAG, first_coin_return_day: "2024-01-22" } }],
+    ["a non-object marker", { unit_switch: "BTC" }],
+  ])("%s: the payload has neither key, even with a sidecar stored", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags, unit_segments: SIDECAR }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect("unitSwitch" in (payload as object)).toBe(false);
+    expect("unitSegments" in (payload as object)).toBe(false);
+  });
+
+  it("a composite never carries a unit switch", async () => {
+    // The "composite, valid headline, 30 csv rows" shape of the matrix above: it builds, so the
+    // absence assertions below always run (a null payload would make them vacuous).
+    seed(
+      composite({
+        metrics_json_by_basis: { cash_settlement: FULL_CASH },
+        data_quality_flags: { composite: true, unit_switch: SWITCH_FLAG },
+        unit_segments: SIDECAR,
+      }),
+      csvRows(30),
+    );
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect("unitSwitch" in (payload as object)).toBe(false);
+    expect("unitSegments" in (payload as object)).toBe(false);
+  });
+
+  it("the sidecar column is in the analytics select, and the flag is read through the one parser", () => {
+    const src = readFileSync(join(__dirname, "fetch-and-build-payload.ts"), "utf8");
+    expect(src).toMatch(/series_provenance, unit_segments,/);
+    expect(src).toContain("parseUnitSwitch(dqf?.unit_switch)");
+    expect(src).not.toMatch(/returnsUnit:\s*unitSwitch/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 164.6.6.2 (D-25) — `data_quality_flags.small_base_measured` on the analytics
 // row becomes `payload.dataQuality.smallBaseMeasured` through the ONE shared owner
 // (`singleKeyDataQuality`), present only when the persisted flag is literally true.

@@ -4,7 +4,14 @@ import { memo, useContext, useDeferredValue, useMemo, useRef, useState, useCallb
 import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { usePayload, useXRange, useActiveComparator, useRegimes } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useRangeGesture } from "./basis-context";
-import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
+import { resolveSeries, resolveUnitSwitchChart, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
+import { unitTag } from "@/lib/factsheet/returns-unit";
+import {
+  composeUnitSwitchSentence,
+  unitSwitchBaseOnlyFigcaption,
+  unitSwitchFigcaption,
+  unitSwitchMastheadLine,
+} from "@/lib/factsheet/unit-segments";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { estLabelWidth, niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
@@ -169,10 +176,24 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   }, [endGesture]);
   useEffect(() => releaseRange, [releaseRange]);
 
+  // Phase 256 (UI-SPEC A, plan 07): a switched strategy's two native segments. The native
+  // segments are drawn ONLY while the cash series is the one on screen: a mark-to-market or
+  // smoothed bundle drawn is a series the unit-switch derive never wrote (it writes no
+  // metrics_json_by_basis, so today this guard is for a future basis), and the same
+  // three-state rule the start-of-marks note applies. Null renders today's single series.
+  const unitSwitchChart = useMemo(() => {
+    if (!config.unitSwitch) return null;
+    const nonCashDrawn =
+      (basis === "mark_to_market" && payload.seriesByBasis?.mark_to_market != null) ||
+      (basis === "smoothed_mtm" && payload.seriesByBasis?.smoothed_mtm != null);
+    if (nonCashDrawn) return null;
+    return resolveUnitSwitchChart(config, view, cmp, xRange);
+  }, [config, view, cmp, xRange, basis, payload.seriesByBasis]);
+
   // Rebase-on-zoom requires xStart so resolveSeries can divide by series[xStart].
   const series = useMemo<ResolvedSeries[]>(
-    () => resolveSeries(config, view, cmp, xRange[0]),
-    [config, view, cmp, xRange],
+    () => unitSwitchChart?.series ?? resolveSeries(config, view, cmp, xRange[0]),
+    [unitSwitchChart, config, view, cmp, xRange],
   );
 
   // Regime segmentation from the comparator's rolling Sharpe sign. Bull when
@@ -345,10 +366,15 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   // only on the cumulative track (config.segmentMarkers) and only when the
   // optional payload fields are present. Both fields absent → returns null, so
   // single-key / non-composite emits a byte-identical SVG (GUARD-02).
+  // Phase 256 (UI-SPEC A states, reverse case): while the native segments are drawn, a headline
+  // gap run that starts after the last USD day is NOT a seam here. The native coin line has that
+  // day, so a "no data" seam inside it would contradict the line; the masthead unpriced note is
+  // the one carrier. A run inside the USD segment draws as today.
+  const switchLastDay = unitSwitchChart ? (view.unitSwitch?.lastFromDay ?? null) : null;
   const segmentMarkers = useMemo(() => {
     if (!config.segmentMarkers) return null;
     const boundaries = view.segmentBoundaries ?? [];
-    const gaps = view.missingSegments ?? [];
+    const gaps = (view.missingSegments ?? []).filter((g) => switchLastDay === null || g.start <= switchLastDay);
     if (boundaries.length === 0 && gaps.length === 0) return null;
 
     const dates = view.dates;
@@ -449,6 +475,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     config.key,
     view.segmentBoundaries,
     view.missingSegments,
+    switchLastDay,
     view.dates,
     xStart,
     xEnd,
@@ -457,6 +484,31 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
     plotH,
     X,
   ]);
+
+  // Phase 256 (UI-SPEC A items 3 to 5): the switch marker and the unit codes. The marker is one
+  // solid secondary line at x(S) (the last USD day), drawn only when both segments are in the
+  // window; a window wholly on one side gets no marker and a single code at the plot's top-left.
+  // The coin code sits right of the marker, and flips left of it, one row down, when it would
+  // cross the plot's right edge (the marks-start placement arithmetic, so nothing clips).
+  const unitSwitchMark = useMemo(() => {
+    const sw = view.unitSwitch;
+    if (!unitSwitchChart || !sw) return null;
+    const { layout } = unitSwitchChart;
+    if (layout.marker) {
+      const x = Math.max(padLeft, Math.min(padLeft + plotW, X(layout.idxS)));
+      const fitsRight = placeMarksStartLabel(x, sw.toUnit, 10, padLeft, padLeft + plotW)?.textAnchor === "start";
+      return {
+        kind: "marker" as const,
+        x,
+        fromX: x - 4,
+        toX: fitsRight ? x + 4 : x - 4,
+        toAnchor: fitsRight ? ("start" as const) : ("end" as const),
+        toY: PAD.top + (fitsRight ? 37 : 50),
+      };
+    }
+    if (layout.singleUnit) return { kind: "single" as const, unit: layout.singleUnit };
+    return null;
+  }, [unitSwitchChart, view.unitSwitch, padLeft, plotW, X]);
 
   // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08 / D-12 / L2: the start-of-marks note
   // (167.2.1.1.1-UI-SPEC.md "Visibility rule" and "Placement and geometry").
@@ -945,12 +997,22 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
               <span className="font-mono tabular-nums text-text-primary">
                 {i === 0 && deferredCrossIdx === withheldHoverIdx
                   ? "—"
-                  : formatValue(s.values[deferredCrossIdx], config.valueFormat)}
+                  : s.unit != null
+                    ? nativeGrowthText(s, deferredCrossIdx)
+                    : formatValue(s.values[deferredCrossIdx], config.valueFormat)}
               </span>
             )}
           </button>
         ))}
       </div>
+
+      {/* Phase 256 (UI-SPEC A, Accessibility): said once, before the plot, for a screen reader. When the
+          coin segment holds only its base there are not two lines, and the visible figcaption says so. */}
+      {unitSwitchChart && view.unitSwitch && !unitSwitchChart.layout.baseOnly && (
+        <p data-testid="unit-switch-sr" className="sr-only">
+          {composeUnitSwitchSentence(view.unitSwitch)}. The chart draws two separate lines; the {view.unitSwitch.toUnit} line starts again at 1.00×.
+        </p>
+      )}
 
       {/* ResponsiveChartFrame supplies the shared responsive recipe verbatim:
           viewBox="0 0 880 280", preserveAspectRatio="xMidYMid meet", the leading
@@ -1014,6 +1076,62 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             second annotation row (the FS-01 labels own the first) and a <title> that
             carries S1 into an exported SVG. Behind the series, pan/zoom-synced and
             export-safe like segmentMarkers. Null outside the range / on other charts. */}
+        {/* Phase 256 (UI-SPEC A4, A5): the switch marker, behind the series and export-safe. One solid
+            secondary line at x(S), the switch sentence as its <title> so an exported SVG carries it, and the
+            two short unit codes on the third annotation row (the FS-01 labels own the first, the
+            marks-start label the second). Never the sentence itself: the coin part is a few percent of
+            the plot width, so a sentence would clip. */}
+        {unitSwitchMark?.kind === "marker" && view.unitSwitch && (
+          <g pointerEvents="none" data-testid="unit-switch-marker">
+            <title>{unitSwitchMastheadLine(view.unitSwitch)}</title>
+            <line
+              x1={unitSwitchMark.x}
+              x2={unitSwitchMark.x}
+              y1={PAD.top}
+              y2={PAD.top + plotH}
+              stroke="var(--color-text-secondary)"
+              strokeWidth={1}
+            />
+            <text
+              x={unitSwitchMark.fromX}
+              y={PAD.top + 37}
+              textAnchor="end"
+              fontSize={10}
+              fontFamily="var(--font-mono)"
+              letterSpacing={`${MARKS_LABEL_TRACKING_EM}em`}
+              fill="var(--color-text-secondary)"
+            >
+              {view.unitSwitch.fromUnit}
+            </text>
+            <text
+              x={unitSwitchMark.toX}
+              y={unitSwitchMark.toY}
+              textAnchor={unitSwitchMark.toAnchor}
+              fontSize={10}
+              fontFamily="var(--font-mono)"
+              letterSpacing={`${MARKS_LABEL_TRACKING_EM}em`}
+              fill="var(--color-text-secondary)"
+            >
+              {view.unitSwitch.toUnit}
+            </text>
+          </g>
+        )}
+        {unitSwitchMark?.kind === "single" && (
+          <g pointerEvents="none" data-testid="unit-switch-single-code">
+            <text
+              x={padLeft + 4}
+              y={PAD.top + 37}
+              textAnchor="start"
+              fontSize={10}
+              fontFamily="var(--font-mono)"
+              letterSpacing={`${MARKS_LABEL_TRACKING_EM}em`}
+              fill="var(--color-text-secondary)"
+            >
+              {unitSwitchMark.unit}
+            </text>
+          </g>
+        )}
+
         {marksStart && (
           <g pointerEvents="none" data-testid="marks-start-marker">
             <title>{marksStartSentenceOne(marksStart.date)}</title>
@@ -1282,7 +1400,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
             {/* Per-series value dots at the crosshair index — visual anchor. */}
             {series.map((s, idx) => {
               if (muted.has(idx)) return null;
-              const v = s.values[crossIdx];
+              const v = hoverValue(s, crossIdx);
               if (v == null || !Number.isFinite(v)) return null;
               return (
                 <circle
@@ -1324,6 +1442,15 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           className="text-micro font-mono uppercase tracking-wider text-text-secondary"
         >
           {marksTrailingNote(marksTrailingDate)}
+        </figcaption>
+      )}
+      {/* Phase 256 (UI-SPEC A, Copywriting): the printing statement of the break. Real HTML, so it
+          prints; the SVG <title> is only an addition for hover and exported SVGs. */}
+      {unitSwitchChart && view.unitSwitch && (
+        <figcaption data-testid="unit-switch-note" className="text-caption text-text-secondary">
+          {unitSwitchChart.layout.baseOnly
+            ? unitSwitchBaseOnlyFigcaption(view.unitSwitch)
+            : unitSwitchFigcaption(view.unitSwitch, { comparatorActive: unitSwitchChart.layout.comparatorActive })}
         </figcaption>
       )}
     </figure>
@@ -1502,6 +1629,18 @@ function CrosshairTooltipInner({
   /** Phase 237 FACT-01: the series row whose value prints a dash (the strategy at the last index of a withheld rolling chart), or null. */
   withheldRow: number | null;
 }) {
+  // Phase 256 (UI-SPEC A8): a switched strategy's native segments read in the header, not as
+  // rows: `{date} · {growth}× in {unit}`, so each reading names its unit. The first drawn segment
+  // that is hoverable at this index wins; at x(S) that is the USD point, because the coin base
+  // vertex is not hoverable (`hoverFrom`). Every other series is a row, as before.
+  let nativeReadout: string | null = null;
+  for (let idx = 0; idx < series.length && nativeReadout === null; idx++) {
+    const s = series[idx];
+    if (s.unit == null || muted.has(idx)) continue;
+    const text = nativeGrowthText(s, crossIdx);
+    if (text !== "—") nativeReadout = `${text} ${unitTag(s.unit)}`;
+  }
+  const headerText = nativeReadout === null ? formatDay(date) : `${formatDay(date)} · ${nativeReadout}`;
   const visible = series
     .map((s, idx) => {
       const withheld = idx === withheldRow;
@@ -1510,10 +1649,11 @@ function CrosshairTooltipInner({
         color: s.color,
         idx,
         withheld,
+        native: s.unit != null,
         text: withheld ? "—" : formatValue(s.values[crossIdx], valueFormat),
       };
     })
-    .filter(s => !muted.has(s.idx));
+    .filter(s => !muted.has(s.idx) && !s.native);
   const rowH = 12;
   const headerH = 14;
   const padX = 8;
@@ -1522,7 +1662,7 @@ function CrosshairTooltipInner({
   const maxRowChars = visible.reduce((m, s) => {
     const lbl = `${s.name}  ${s.text}`;
     return Math.max(m, lbl.length);
-  }, 10);
+  }, Math.max(10, headerText.length));
   // Card width must fit inside the plot — on narrow viewports the estimated
   // width can exceed plot width entirely, so cap it before positioning.
   const estimatedW = Math.max(110, maxRowChars * 6 + padX * 2 + 14);
@@ -1556,7 +1696,7 @@ function CrosshairTooltipInner({
         fontWeight={600}
         fill="var(--color-text-primary)"
       >
-        {formatDay(date)}
+        {headerText}
       </text>
       {visible.map((s, i) => {
         const cy = ty + padY + headerH + i * rowH + 8;
@@ -1589,6 +1729,18 @@ function CrosshairTooltipInner({
       })}
     </g>
   );
+}
+
+/** The value a hover reads for `s` at `idx`: null before `hoverFrom` (a drawn-only base vertex) or when absent. */
+function hoverValue(s: ResolvedSeries, idx: number): number | null | undefined {
+  if (s.hoverFrom != null && idx < s.hoverFrom) return null;
+  return s.values[idx];
+}
+
+/** A native unit-switch segment's growth multiple at `idx`, `1.03×`, or a dash when it has no hoverable point. */
+function nativeGrowthText(s: ResolvedSeries, idx: number): string {
+  // Through the one display formatter, so the chart's printed figures stay single-sourced.
+  return formatFixedSigned(hoverValue(s, idx), { dp: 2, suffix: "×" });
 }
 
 function truncate(s: string, n: number): string {
