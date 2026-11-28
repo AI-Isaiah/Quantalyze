@@ -6157,3 +6157,118 @@ async def test_g252_crawl_once_unused_retained_rows_are_released(
     assert options_spy.await_count == 0
     kept = [r for r in reports if r.raw_rows is not None]
     assert len(reports) >= 2 and kept == [], "every retained row set must be released"
+
+
+# --- Plan 252-11 review WR-01: the reused crawl and the smoothed option-mark cap must sit on
+# one side of the 08:00 UTC settlement.
+_G252_SEEDED_FLAGS = {"csv_source": True, "composite": True, "mtm_gated_reason": MTM_REASON_OPTIONS}
+
+
+async def _g252_run_across_settlement(
+    monkeypatch: pytest.MonkeyPatch, *, settlement_falls_between: bool,
+    job_extra: dict[str, Any] | None = None,
+) -> tuple[_FakeSupabase, Any, list[str]]:
+    """A two-member options composite whose settled option-mark day is a controlled clock.
+    With ``settlement_falls_between`` the day advances once, inside the cash pass's first
+    member crawl (after that member's account-state read, before the smoothed pass reuses
+    it). Returns the fake, the job result (None when the job escaped with a
+    DeribitTransientReadError) and the bases the options builder was asked for."""
+    day = {"v": "2026-11-26"}
+    options_bases: list[str] = []
+
+    async def _native(exchange: Any, *, account_state: Any, pnl_basis: str,
+                      exclude_spot_extraction: bool, nav_twin: bool = False,
+                      retain_raw_rows: bool = False) -> Any:
+        if settlement_falls_between:
+            day["v"] = "2026-11-27"
+        rep = CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=True,
+        )
+        rep.raw_rows = _g252_kept_rows()
+        return (_stub_ledger(), rep)
+
+    async def _options(*_a: Any, pnl_basis: str, **_k: Any) -> Any:
+        options_bases.append(pnl_basis)
+        return (_stub_ledger(), _G252_OPT_REPORT)
+
+    fake = _FakeSupabase(
+        members=_g252_members(), strategy_row=dict(_G252_STRATEGY_ROW),
+        existing_flags=dict(_G252_SEEDED_FLAGS),
+    )
+    try:
+        _fake, result, _ = await _g252_run(
+            monkeypatch,
+            job_extra=job_extra,
+            extra_patches=[
+                patch("services.job_worker.get_supabase", new=MagicMock(return_value=fake)),
+                patch(_NATIVE_BUILD, new=AsyncMock(side_effect=_native)),
+                patch(_OPTIONS_BUILD, new=AsyncMock(side_effect=_options)),
+                patch("services.deribit_ingest._last_settled_option_mark_day",
+                      new=MagicMock(side_effect=lambda: day["v"])),
+            ],
+        )
+    except DeribitTransientReadError:
+        return fake, None, options_bases
+    return fake, result, options_bases
+
+
+@pytest.mark.asyncio
+async def test_g252_settlement_between_cash_read_and_smoothed_reuse_retries_the_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01 (252-11 review): the smoothed assembly caps its option marks at the settled day
+    read from the wall clock, so a member crawl reused across an 08:00 UTC settlement would
+    reconcile its anchor against a book marked one settlement later and raise a PERMANENT
+    ledger error. The reuse refuses it as a transient instead: on an earlier attempt the job
+    escapes (the worker retries, and both reads land on one side of the boundary), the options
+    builder is never reached and nothing is written. If this goes red a stitch straddling the
+    settlement degrades a promoted composite with no retry."""
+    fake, result, options_bases = await _g252_run_across_settlement(
+        monkeypatch, settlement_falls_between=True,
+        job_extra={"attempts": 1, "max_attempts": 3},
+    )
+    assert result is None, "the straddle must escape as a transient on an earlier attempt"
+    assert options_bases == [], "the options builder must not run on a straddled crawl"
+    assert not [u for u in fake.upserts if u[0] in ("strategy_analytics", "csv_daily_returns")]
+    assert not [d for d in fake.deletes if d[0] == "csv_daily_returns"]
+    assert fake.existing_flags == _G252_SEEDED_FLAGS
+
+
+@pytest.mark.asyncio
+async def test_g252_settlement_between_cash_read_and_smoothed_reuse_degrades_on_the_last_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01: the degrade is last-attempt only, and it is the existing additive-basis
+    degrade: the cash composite ships DONE with the named withhold and no headline_basis.
+    If this goes red a straddle on the final attempt fails a healthy cash composite."""
+    fake, result, options_bases = await _g252_run_across_settlement(
+        monkeypatch, settlement_falls_between=True,
+        job_extra={"attempts": 3, "max_attempts": 3},
+    )
+    assert result is not None and result.outcome == DispatchOutcome.DONE
+    assert options_bases == []
+    headline = _headline_row(fake)
+    assert headline is not None
+    dq = headline["data_quality_flags"]
+    assert "headline_basis" not in dq
+    assert dq["mtm_gated_reason"] == MTM_REASON_OPTIONS
+    assert "smoothed_mtm" not in headline["metrics_json_by_basis"]
+
+
+@pytest.mark.asyncio
+async def test_g252_unchanged_settled_day_between_cash_read_and_reuse_still_promotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-01 mirror: with the settled day unchanged between the cash read and the reuse the
+    smoothed build runs for both members and the composite promotes. If this goes red the
+    guard refuses every stitch, not only a straddle."""
+    fake, result, options_bases = await _g252_run_across_settlement(
+        monkeypatch, settlement_falls_between=False,
+        job_extra={"attempts": 1, "max_attempts": 3},
+    )
+    assert result is not None and result.outcome == DispatchOutcome.DONE
+    assert options_bases == ["smoothed_mtm", "smoothed_mtm"]
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["data_quality_flags"]["headline_basis"] == "smoothed_mtm"

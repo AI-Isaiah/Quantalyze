@@ -13642,6 +13642,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         ScopeAuthError,
         assert_ledger_complete,
         build_deribit_native_ledger,
+        _last_settled_option_mark_day,
         build_deribit_options_basis_ledger,
         fetch_deribit_native_account_state,
     )
@@ -14210,10 +14211,15 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # ``retain_raw_rows`` precedent, Phase 185) instead of crawling the transaction log a
     # second time. Holds raw rows (instruments, sizes, amounts): never logged or persisted,
     # and released by ``_release_cash_crawl`` on every path that stops using them.
-    member_cash_crawl: dict[int, tuple[CompletenessReport, DeribitNativeAccountState]] = {}
+    # Each entry also carries the settled option-mark day read with the account state: the
+    # smoothed assembly caps its marks at the wall clock's settled day, so a reuse across an
+    # 08:00 UTC settlement would reconcile a state and a book from different sides of it.
+    member_cash_crawl: dict[
+        int, tuple[CompletenessReport, DeribitNativeAccountState, str]
+    ] = {}
 
     def _release_cash_crawl() -> None:
-        for _kept_report, _kept_state in member_cash_crawl.values():
+        for _kept_report, _kept_state, _kept_day in member_cash_crawl.values():
             _kept_report.raw_rows = None
         member_cash_crawl.clear()
 
@@ -14623,7 +14629,17 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                     "run_stitch_composite_job: no retained cash-pass crawl for member "
                     f"seq {member_seq}"
                 )
-            _cash_report, account_state = _kept
+            _cash_report, account_state, _settled_at_read = _kept
+            if _last_settled_option_mark_day() != _settled_at_read:
+                # The smoothed assembly caps its option marks at the settled day read from
+                # the wall clock, while this state was read in the cash pass: a settlement
+                # fell between the two, so state and marks sit on different sides of it.
+                # Transient: the retry reads both on one side (the last attempt degrades).
+                _cash_report.raw_rows = None
+                raise DeribitTransientReadError(
+                    "run_stitch_composite_job: the 08:00 UTC option settlement passed "
+                    "between the member's cash-pass read and its smoothed assembly"
+                )
             try:
                 ledger, completeness = await asyncio.wait_for(
                     build_deribit_options_basis_ledger(
@@ -14644,6 +14660,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             )
             if retain_cash_crawl:
                 _twin_kwargs["retain_raw_rows"] = True
+                _settled_at_read = _last_settled_option_mark_day()
             ledger, completeness = await asyncio.wait_for(
                 build_deribit_native_ledger(
                     ctx.exchange,
@@ -14656,7 +14673,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             )
             assert_ledger_complete(completeness)
             if retain_cash_crawl and member_seq is not None:
-                member_cash_crawl[member_seq] = (completeness, account_state)
+                member_cash_crawl[member_seq] = (completeness, account_state, _settled_at_read)
         # WEDGE-01: combine_native_ledger is SYNCHRONOUS CPU-bound pandas
         # (broker_dailies.py:174). On the shared loop it blocks the healthz
         # heartbeat → false-stale → restart. Offload to a worker thread (the
