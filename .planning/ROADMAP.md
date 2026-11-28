@@ -1001,6 +1001,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [x] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD (completed 2026-11-27)
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 - [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
+- [ ] **Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval** - Booked 2026-11-27 by founder ruling ("Push to main directly") as a CI-only phase: `supabase-migrate.yml`'s re-dump stops opening a bot PR that waits on a human approval and pushes its one commit to `main`; overrides 164.9.5 AUTOREDUMP's D-13 and D-23
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1356,6 +1357,28 @@ Plans:
 Plans:
 - [ ] TBD — plans not listed yet
 
+### Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval
+
+**Goal:** After a PROD migration apply, the gated baseline re-dump reaches `main` with no pull request and no human click. Today `.github/workflows/supabase-migrate.yml` job `redump-pr` opens a bot PR on `automation/baseline-redump` with the job token, so GitHub holds that PR's CI in an approval-required state until a human approves the runs and then merges it. After this phase, once the gated `redump-dump` job succeeds, the workflow composes the same commit it composes today (baseline.sql, baseline-carried-migrations.txt, BASELINE.md, the VERSION and package.json patch bump and its CHANGELOG entry) onto the current `main` and pushes it straight to `main`.
+- **Founder ruling 2026-11-27, verbatim answer to the choice "Bot token / Claude allow rule / Push to main directly": "Push to main directly".** The founder also said: "So stupid that I have to approve the baseline redump. I want it to be approved or just that no approval is needed."
+- **⛔ DEVIATION RECORD (global deviation policy).** This overrides 164.9.5 AUTOREDUMP decision **D-13** (a human reviews and merges every re-dump; nothing in the workflow merges it) and **D-23** (the bot PR's runs wait in an approval-required state and a human approves them). Reason: the founder's ruling above. The same override and its reason are recorded in `258-CONTEXT.md`.
+- **CI-only.** No migration, no app code, no analytics code. It counts outside the in-flight phase cap.
+**Requirements**: none (CI-only; no REQUIREMENTS.md id)
+**Depends on:** nothing. Re-bases on the current `supabase-migrate.yml` and `scripts/baseline-redump.mjs` from 164.9.5 AUTOREDUMP.
+**Success Criteria** (what must be TRUE):
+1. After a succeeded `redump-dump` whose dump changed, the workflow pushes exactly one bot commit to `refs/heads/main` with a plain (never forced) push, carrying exactly the six paths the bot PR carries today. No PR is opened or edited, and nothing waits on a human.
+2. A push refused because `main` moved is retried by re-composing onto the fresh `main`, never by force. After a bounded number of tries the job fails red, naming the cause. Any other push failure fails at once.
+3. `VERSION` and `package.json` stay byte-equal 4-digit strings in the pushed commit.
+4. The wiring tests that pin today's `redump-pr` job (`src/__tests__/baseline-redump-wiring.test.ts`, `src/__tests__/critical-regressions.test.ts`, `src/__tests__/supabase-migrate-test-first.test.ts`) pin the single push refspec to `main` instead, and each new pin goes RED under a neutered copy and GREEN once restored from a byte backup (PROOF-01).
+5. `258-CONTEXT.md` states what a GITHUB_TOKEN push to `main` means: it starts no workflow, so the bot commit carries no CI run, and the Railway API service, which waits for CI, deploys a commit with no checks. The choice made about that is stated and deliberate.
+6. No skip-CI token appears in any commit message, PR body or prose. No AI attribution lines. Nothing under `.planning/` is on the ship branch.
+**Plans:** 3 plans
+
+Plans:
+- [x] 258-01-PLAN.md — tracer: the `--compose-and-push` mode, `PUSH_ARGV` and the `redump-push` job with the wiring pins retargeted; then the bounded re-compose retry (SC-1 to SC-4)
+- [x] 258-02-PLAN.md — delete the bot-branch and PR machinery by symbol, the redump-dump no-op notice, and the text the bot writes names redump-push (D-11, D-12, D-24 retired)
+- [x] 258-03-PLAN.md — dated lineage notes in the workflow, BASELINE.md and two comments, then the phase gate on the merged tree (SC-5, SC-6)
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1376,6 +1399,7 @@ Plans:
 | 255. NULLANCHOR | 3/3 | Complete (shipped v0.133.104.0, #1395; verification passed, SC-3 met at ship; SECURITY 0 open; founder rulings 2026-11-27: "Re-read now (Recommended)" for the OKX backfill, "Fix both in a follow-up (Recommended)" for 257 SEEDHOLD) | 2026-11-27 |
 | 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
 | 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
+| 258. REDUMPDIRECT | 0/? | Planned for v1.23 | - |
 
 ---
 
