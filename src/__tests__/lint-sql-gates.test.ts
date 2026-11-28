@@ -1186,7 +1186,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): 124 -> 126, `node scripts/lint-sql-gates.mjs` printed `scanned 126 file(s); 0 finding(s)` with the two DBACC-02 gates (test_insert_api_key_rpc.sql, test_api_keys_user_id_immutable.sql) in the corpus.
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): 126 -> 127, the unit_segments gate file (test_strategy_analytics_unit_segments.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 127 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)`.
     // RE-BASED onto Phase 256 OKXUNITSWITCH (origin/main) 2026-11-27, combined counts are the code values beside this line: ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09): 126 -> 127, `node scripts/lint-sql-gates.mjs` printed `scanned 127 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s)` with the DBACC-01 gate (test_strategy_analytics_anon_grants.sql) in the corpus.
-    expect(res.out).toMatch(/scanned 128 file/);
+    // ⭐ CURRENCY 2026-11-28 (Phase 257 SEEDHOLD, plan 02): 128 -> 129, the fenced seed-hold merge RPC gate file (test_compute_job_seed_hold.sql). MEASURED: `node scripts/lint-sql-gates.mjs` printed `lint-sql-gates: scanned 129 file(s); 0 finding(s), 0 measure-fail(s), 0 allowlist error(s).`
+    expect(res.out).toMatch(/scanned 129 file/);
     expect(res.status, res.out).toBe(0);
   });
 

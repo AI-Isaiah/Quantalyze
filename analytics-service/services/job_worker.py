@@ -123,6 +123,7 @@ from services.exchange import (
     BINANCE_FILLS_REACH_DAYS,
     BINANCE_SYNC_FILLS_READ_DEADLINE_S,
     BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS,
+    BYBIT_SYNC_FILLS_READ_DEADLINE_S,
     BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
@@ -167,9 +168,12 @@ from services.binance_sync_flags import (
     read_binance_sync_flags,
 )
 from services.trade_resume import (
+    SEED_HOLD_KEY,
     load_strategy_fill_high_water,
     load_strategy_fills_reread_bound,
     load_strategy_high_waters,
+    load_strategy_seed_hold,
+    parse_seed_hold,
 )
 from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
@@ -428,6 +432,15 @@ _RAW_TRADE_INGESTION_ENABLED: Final[bool] = (
 WORKER_FENCE_V2: Final[bool] = (
     os.environ.get("WORKER_FENCE_V2", "true").lower() != "false"
 )
+
+#: Phase 257 SEEDHOLD: the RPC that merges the seed-hold mark into the RUNNING job's own
+#: `compute_jobs.metadata` (migration 20261128120000). Service-role only, fenced on `claim_token`
+#: and `status = 'running'`, ONE merge statement (never a direct table write of the
+#: compute_jobs row: the REFUSALRACE lost-update class). Cross-language contract: the name, the metadata key
+#: (`SEED_HOLD_KEY`) and the three parameters (`p_job_id`, `p_claim_token`, `p_floor_ms`) are
+#: pinned against the generated snapshot `supabase/schema/functions/set_compute_job_seed_hold.sql`
+#: by `tests/test_seedhold_bound.py`.
+SEED_HOLD_RPC: Final[str] = "set_compute_job_seed_hold"
 
 # C2 (P70 review): a Deribit account holding more than this USD equity but
 # producing ZERO return-bearing ledger rows is treated as a silently-empty ledger
@@ -2294,6 +2307,17 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     _binance_read = False
     # Round-2: the provisional bound write failed or answered orphan, so the fills read is skipped.
     _fills_read_skipped = False
+    # Phase 257 SEEDHOLD: a stored seed-hold mark is MALFORMED (a read ERROR fails the attempt as
+    # transient instead, review WR-R2-01). The run's seed, and so its bound row and its seed-hold
+    # write, then drops to the reach anchor, never stays at the seed.
+    _hold_read_failed = False
+    # Phase 257 SEEDHOLD (`[255-BYBIT-DEADLINE-NO-PROGRESS]`): a Bybit read that stopped on its
+    # deadline hands back the windows it completed. `_bybit_read_through_ms` is the end of the last
+    # one (None: none completed). `_fills_persist_failed` is the persist arm's own marker, because
+    # `phase2_failed` is set by a failed read AND a failed persist.
+    _bybit_deadline_stop = False
+    _bybit_read_through_ms: int | None = None
+    _fills_persist_failed = False
     # Round-3 (IN-14): the provisional write answered orphan. The strategy-flags write is skipped
     # too (it is unfenced), as is the daily store (held through `phase1_read_refused`).
     _bound_orphaned = False
@@ -2520,6 +2544,69 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             # walk's own start).
                             fills_anchor_iso = _iso_of_ms(_reread_bound_ms)
 
+                    # Phase 257 SEEDHOLD (`[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`): the fourth
+                    # term. Founder ruling 2026-11-28, verbatim choice "Job's private record
+                    # (Recommended)": a run whose provisional bound write raised left its seed as
+                    # `seed_hold_ms` in its own `compute_jobs.metadata`. A daily row another writer
+                    # stored since moves the daily seed past that span, and no bound row names it.
+                    # Two sources, because a mark lives on a job row: the latest `done` sync_trades
+                    # job of the strategy (research V3: `done` only), and the claimed row's own
+                    # metadata (this very row re-claimed after it wrote its mark and then failed;
+                    # a planner addition to research V3). A `None` seed walks from the reach, which
+                    # covers every hold.
+                    if fills_since_ms is not None:
+                        _hold_ms, _hold_err, _hold_malformed = await db_execute(
+                            lambda: load_strategy_seed_hold(ctx.supabase, strategy_id)
+                        )
+                        if _hold_err is not None and not _hold_malformed:
+                            # Review WR-R2-01: a read ERROR hides an earlier mark, and a `done`
+                            # row without it would bury that mark for good. Flooring the seed at
+                            # the reach instead would turn one blip into a full-reach re-read that
+                            # never converges where the reach cannot be read to the end. Fail the
+                            # attempt before the provisional bound write and the Phase-1 daily
+                            # store: nothing has been written, the row ends `failed_retry` (never
+                            # `done`), and the retry re-reads the mark. The `finally` closes the
+                            # exchange. Names the strategy only; the reader logged the exception.
+                            logger.error(
+                                "sync_trades: the seed-hold read failed for strategy %s; failing "
+                                "this attempt as transient so no `done` row hides an earlier mark",
+                                strategy_id,
+                            )
+                            return DispatchResult(
+                                outcome=DispatchOutcome.FAILED,
+                                error_kind="transient",
+                                error_message="sync_trades: the seed-hold read failed",
+                            )
+                        _hold_read_failed = _hold_err is not None
+                        _own_meta = job.get("metadata")
+                        _own_hold_ms: int | None = None
+                        if isinstance(_own_meta, dict) and SEED_HOLD_KEY in _own_meta:
+                            _own_hold_ms = parse_seed_hold(_own_meta[SEED_HOLD_KEY])
+                            if _own_hold_ms is None:
+                                _hold_read_failed = True
+                                logger.error(
+                                    "sync_trades: the claimed job's own %s for strategy %s is "
+                                    "malformed (%s); ignoring it",
+                                    SEED_HOLD_KEY, strategy_id,
+                                    type(_own_meta[SEED_HOLD_KEY]).__name__,
+                                )
+                        _hold_terms = [
+                            t for t in (_hold_ms, _own_hold_ms) if t is not None
+                        ]
+                        if _hold_read_failed and _reach_anchor_ms is not None:
+                            # Review WR-01: an earlier mark may be hidden (a malformed mark;
+                            # a read error returned above), and a clean epilogue would then
+                            # clear the bound and bury it for good. Put the floor on the SEED,
+                            # so the provisional bound row records it whether or not the RPC
+                            # works.
+                            _hold_terms.append(_reach_anchor_ms)
+                        if _hold_terms and min(_hold_terms) < fills_since_ms:
+                            fills_since_ms = min(_hold_terms)
+                            if _fills_cursor_ms is None:
+                                # The NULL-column anchor follows the lowered seed, as the bound
+                                # term's does.
+                                fills_anchor_iso = _iso_of_ms(fills_since_ms)
+
                 # Phase 253 BINANCECURSOR round-2 (CR-02, CR-03, SFH-R2-M1): the PROVISIONAL
                 # re-read bound, written HERE: after the seed is known and BEFORE anything this
                 # run can move. Phase 251 stores the daily rows next, then the balance read and
@@ -2593,6 +2680,44 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         phase2_error_message = (
                             f"re-read bound write failed ({type(exc).__name__})"
                         )
+                        # Phase 257 SEEDHOLD: the bound is unrecorded, so leave the seed on the
+                        # job's own row. Fail-safe (research V3): when a stored mark is
+                        # malformed, an earlier mark may be hidden, so the seed itself was lowered to
+                        # the reach anchor above (review WR-01; an over-fetch, never a skipped span).
+                        # Best-effort: a raise (22023 on a bad floor, 23514 on the metadata
+                        # size cap, a blip) is the double-fault residual; a False answer is an
+                        # orphan claim token. Neither changes the job outcome. The claim token
+                        # goes unconditionally: the SQL fence needs a non-NULL one, so gating it
+                        # on WORKER_FENCE_V2 would switch the mark off with the kill switch.
+
+                        def _write_seed_hold() -> bool:
+                            res = ctx.supabase.rpc(
+                                SEED_HOLD_RPC,
+                                {
+                                    "p_job_id": job["id"],
+                                    "p_claim_token": job.get("claim_token"),
+                                    "p_floor_ms": _provisional_unread_ms,
+                                },
+                            ).execute()
+                            return bool(res.data)
+
+                        try:
+                            _hold_owned = await db_execute(_write_seed_hold)
+                        except Exception as hold_exc:  # noqa: BLE001
+                            logger.error(
+                                "sync_trades: could not write the seed-hold mark for strategy "
+                                "%s (%s) after the re-read bound write failed; the unread span "
+                                "is re-read only if this run's epilogue bound write lands",
+                                strategy_id, type(hold_exc).__name__,
+                            )
+                        else:
+                            if not _hold_owned:
+                                logger.warning(
+                                    "worker_orphan_write_blocked: set_compute_job_seed_hold "
+                                    "dropped the seed-hold write for strategy %s (job %s) — "
+                                    "watchdog reclaim race; the re-claiming worker owns it now",
+                                    strategy_id, job.get("id"),
+                                )
                     else:
                         if not _bound_owned:
                             # Orphan (round-2 SFH-R2-M2, IN-11): the watchdog reclaimed this job,
@@ -2704,12 +2829,14 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 # undeadlined daily read, so a fixed 840 s could still overrun the 900 s handler
                 # before the epilogue. Give it the budget REMAINING since the handler began
                 # (floored at 1 s so the first request still runs and the refusal stays named).
-                # Binance keeps the fixed 840 s its founder ruling and tests pin.
+                # Binance keeps the fixed 840 s its founder ruling and tests pin. Phase 257: Bybit
+                # subtracts from its own lower budget so the persist after a deadline stop fits the
+                # handler (see BYBIT_SYNC_FILLS_READ_DEADLINE_S).
                 _fills_read_deadline_s = BINANCE_SYNC_FILLS_READ_DEADLINE_S
                 if ctx.key_row.get("exchange") == "bybit":
                     _fills_read_deadline_s = max(
                         1.0,
-                        BINANCE_SYNC_FILLS_READ_DEADLINE_S - (_monotonic() - _handler_start),
+                        BYBIT_SYNC_FILLS_READ_DEADLINE_S - (_monotonic() - _handler_start),
                     )
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms,
@@ -2767,6 +2894,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 phase2_failed = True
                 phase2_error_message = str(e)[:200]
+                if isinstance(e, BybitTradeWindowIncomplete) and e.reason == "deadline":
+                    # Phase 257: the persist block below stores the completed windows' fills and
+                    # the epilogue bound becomes their end. The run stays flagged (`phase2_failed`).
+                    _bybit_deadline_stop = True
+                    raw_fills = list(e.completed_fills)
+                    _bybit_read_through_ms = e.read_through_ms
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
@@ -2821,6 +2954,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             "binance_deadline_symbols",
         )
     )
+    if _bybit_read_through_ms is not None:
+        # Phase 257: a Bybit deadline stop's mark, exact to the millisecond like the Binance bound
+        # above, so the stamp filter keeps only persisted fills at or before the mark.
+        _read_through = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+            milliseconds=_bybit_read_through_ms
+        )
     if _fills_stopped and _read_through is None:
         # A stop record whose bound is unusable (T-250-05): hold, exactly like
         # any other incomplete read. Names the strategy and the bound's type
@@ -2859,7 +2998,14 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             (`binance_read_through_ms`), or the walk start minus 1 ms for a failed symbol, a
             raised or unpersisted read or a stop without a usable bound. OKX, Bybit and Deribit
             (Phase 255 NULLANCHOR): the walk start minus 1 ms for a raised or unpersisted read or
-            any truthy `sync_truncated_*` flag (a truncated read lost a span). None means the read
+            any truthy `sync_truncated_*` flag (a truncated read lost a span). Bybit deadline stop
+            (Phase 257 SEEDHOLD): the mark, the end of the last completed window, whose fills the
+            persist stored; with no completed window, the run's SEED (the column, else the reach
+            anchor). Holding at the seed is not creep: RPC R4 sets the bound to the passed instant
+            because `covers` (the walk start) is at or below the provisional seed, so passing the
+            seed leaves it unchanged while passing the walk start minus 1 ms lowered it by 1 h +
+            1 ms per refusal. A persist failure after the stop falls through to the walk start
+            minus 1 ms, because the completed windows' fills did not all land. None means the read
             was complete. Read once, in the epilogue, after the persist (`phase2_failed` can turn
             true in it)."""
             _throughs: list[int] = []
@@ -2872,6 +3018,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     or (_fills_stopped and _read_through is None)
                 ):
                     _throughs.append(_walk_start_ms - 1)
+            elif _bybit_deadline_stop and not _fills_persist_failed:
+                _throughs.append(
+                    _bybit_read_through_ms
+                    if _bybit_read_through_ms is not None
+                    else (fills_since_ms if fills_since_ms is not None else _reach_anchor_ms)
+                )
             elif phase2_failed or any(
                 key.startswith("sync_truncated_") and value
                 for key, value in exchange_dq_flags.items()
@@ -3006,6 +3158,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             )
             phase2_failed = True
             phase2_error_message = str(exc)[:200]
+            _fills_persist_failed = True
 
         # G12.A.6 amendment-detection observability (best-effort).
         amended_count = len(existing_pairs)
@@ -3053,10 +3206,16 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     cursor; never a partial maximum).
     # The stop record's derived state (`_fills_incomplete`, `_read_through`, `_fills_stopped`) is
     # computed above, before the fills persist, from the fetch's own flags.
+    # Phase 257: a Bybit deadline stop persisted its completed windows (`phase2_failed` stays True,
+    # the run stays flagged) and is stamp-eligible only when a window completed and every batch
+    # landed. The stamp is the newest persisted fill at or before the mark, via `_read_through`.
+    _bybit_partial_ok = (
+        _bybit_read_through_ms is not None and phase2_complete and not _fills_persist_failed
+    )
     advance_fetched_cursor = (
         bool(raw_fills)
         and phase2_complete
-        and not phase2_failed
+        and (not phase2_failed or _bybit_partial_ok)
         and not phase1_failed
         and not phase1_read_refused
         and not _fills_incomplete
