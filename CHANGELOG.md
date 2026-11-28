@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.133.120.0] - 2026-11-28 — Phase 245 ALERTPAGE: an MT5 outage pages once, recovers once and closes once, and every paging failure is loud
+
+Phase 245 (v1.23, requirements ALRT-01 to ALRT-04) changes the Python paging path in `analytics-service`. There is no migration, no dependency change (`sentry-sdk` stays on 2.x) and no frontend change.
+
+### Fixed
+- **No duplicate RECOVERED (ALRT-01).** A second healthy reading while a recovered notice's outcome is still held no longer builds a second notice whose text falsely says the service restarted. `mt5_outage_alert._RECOVERED_IN_FLIGHT` holds the source from the moment `page` returns until the held close finishes, and it is released in three places, including a task cancelled before it starts.
+- **A relaunch debt paid outside the heal still closes its page (ALRT-01).** `note_relaunch_debt_state` runs at the top of every heal tick and settles a debt page from this process once the debt is no longer owed. Before, only a debt the same tick paid was settled, so a debt cleared by the scrub path, the boot relaunch or a cancelled heal left the page open and the next episode inherited its `since` and tick count. The notice now says "the relaunch debt is no longer owed" rather than claiming a heal paid it.
+- **Sentry is credited only when a notification can go out (ALRT-02).** `ops_alert.page` keeps a per-fingerprint credit map. A capture is credited only on a real event id and only once `SENTRY_RULE_ACTION_INTERVAL_S` (3600 s, the live rule "Ops alert: outage (164.6.8)" read read-only on 2026-11-28: 60 minutes per issue, one throttle over the outage and recovered action groups) plus a 120 s margin has passed since the fingerprint's last credited capture. A capture with no event id, or one inside the interval, is not credited, the founder email alone decides delivery, a failed email releases the window so the next reading retries, and an ERROR line names the reason. That line is logged outside the capture's Sentry scope, so it never joins the alert's own issue.
+- **One startup ERROR for an unset DSN in production (ALRT-02).** `sentry_init.init_sentry` logs one ERROR when `SENTRY_DSN` is unset and the environment resolves to `production`.
+- **A credited recovery closes within the probe tick's budget (ALRT-03).** `mt5_validation_liveness.PROBE_TICK_BOUND_S` is now built from named terms: the lease wait, the acquire overshoot, the probe thread bound, the lease release RPC added in Phase 230, and two open-page calls (the read, then the close, after a restart). It is 67.5 s at the defaults; it was 52.5 s and budgeted one open-page call.
+- **Every paging-path failure is loud (ALRT-04).** Every except arm on the paging path in `ops_alert`, `mt5_outage_alert`, `ops_alert_open`, the two alert wrappers in `mt5_relogin`, `probe_validation_terminal` and the monitor tick logs at ERROR, so each one is a Sentry event under the LoggingIntegration. That includes a failed open-record write for a page that went out, and the argument-free fallbacks that used to `pass`. A probe that overruns its tick bound is now fed to the tracker as a `tick_deadline` reading, so a validation terminal that always hangs that way pages at the threshold instead of logging WARNING every ten minutes.
+- **Recovered wording no longer overclaims.** When no channel confirmed an incident's outage page, the re-sent recovered notice says it may be the first notice that arrived rather than calling itself a re-send. The relaunch-debt path tracks this the same way as the role runs.
+
+### Tests
+- Fake-clock, multi-tick tests for each ALRT-01 case (relapse inside the hour, second healthy reading during the held wait, debt paid outside the heal check), the ALRT-02 credit boundary and scope, the startup check, and a probe-bound pin that counts the open-page calls.
+- New `tests/test_alert_path_handlers_log_at_error.py`, an AST pin with mutants and controls: a paging-path handler that logs below ERROR fails it. Phase 246's scrub-reader arms are allowlisted by symbol, and a stale allowlist entry fails the pin, so 246 removes them when it moves those arms.
+- Every gate was neutered, seen RED with its named arm, restored from a byte backup (`cmp` 0) and seen GREEN; the readings are in the phase's plan summaries.
+- `test_prober_cadence_alert.py`: the accepted-body test now expects the extra no-event-id ERROR that its DSN-less run produces.
+
+### Removed
+- `TODOS.md` entries closed by this phase: `164.6.8-F3-SENTRY-HALF-NOOP`, `164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS`, `164.6.8-N2-OPEN-RECORD-FAILS-AT-WARNING`, `164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING`, `164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL`, `164.6.8-R4-SFH-F1-DUPLICATE-RECOVERY`, `164.6.8-WR-D16-01-PROBE-BOUND-INLINE-CLOSE`. The section's other five entries (Phase 246's and `164.6.8-SFH-D16-01`) stay.
+
+### Notes
+- **Known limits, documented in `ops_alert.py`.** A same-cause relapse that opens and ends inside the rule interval while the founder email is also down is never paged as an outage; its recovered notice is credited once the interval has passed. The credit map is process-local, so after a restart a same-fingerprint relapse inside the previous process's interval can be credited while Sentry still throttles it. A review round tried treating a fresh process as throttled and reverted it, because under the deploy cadence it sent duplicate RECOVERED notices and kept records open.
+- **Still open: the dated PROD drill reading** (success criterion 5, plan 04). It runs after this deploy and needs the founder to confirm the page arrived; verification stays `human_needed` until then. The startup ERROR also assumes the PROD environment is named `production`, which the drill reads live.
+
 ## [0.133.119.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plan 11: an options composite's smoothed pass reuses the cash pass's crawl, so the market-price headline fits the stitch budget
 
 ### Root cause
