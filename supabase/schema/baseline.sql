@@ -11150,6 +11150,38 @@ COMMENT ON FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_cl
 
 
 
+CREATE OR REPLACE FUNCTION "public"."set_compute_job_seed_hold"("p_job_id" "uuid", "p_claim_token" "uuid", "p_floor_ms" bigint) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO 'public', 'pg_catalog'
+    AS $$
+BEGIN
+  IF p_floor_ms IS NULL OR p_floor_ms < 0 THEN
+    RAISE EXCEPTION 'set_compute_job_seed_hold: p_floor_ms must be a non-negative epoch-millisecond value (got %)', p_floor_ms
+      USING ERRCODE = 'invalid_parameter_value';
+  END IF;
+
+  UPDATE public.compute_jobs
+     SET metadata = CASE WHEN jsonb_typeof(metadata) = 'object'
+                         THEN metadata
+                         ELSE '{}'::jsonb
+                    END
+                    || jsonb_build_object('seed_hold_ms', p_floor_ms)
+   WHERE id = p_job_id
+     AND claim_token IS NOT DISTINCT FROM p_claim_token
+     AND claim_token IS NOT NULL
+     AND status = 'running';
+  RETURN FOUND;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."set_compute_job_seed_hold"("p_job_id" "uuid", "p_claim_token" "uuid", "p_floor_ms" bigint) OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."set_compute_job_seed_hold"("p_job_id" "uuid", "p_claim_token" "uuid", "p_floor_ms" bigint) IS 'Phase 257 SEEDHOLD, migration 20261128120000 (founder ruling 2026-11-28, "Job''s private record"): merges {seed_hold_ms: p_floor_ms} into the running job''s own compute_jobs.metadata as ONE UPDATE, keeping every other key, so the next sync_trades run can read the seed this run could not record in the re-read bound. Fenced by claim token like set_compute_job_progress: lands only on a running row whose token matches and is not NULL, otherwise returns false and writes nothing. Non-object metadata becomes a fresh object. A NULL or negative floor raises 22023. Returns FOUND. Service-role only; sole caller is the analytics worker run_sync_trades_job provisional-bound failure arm.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."set_departed_key_history_inclusion"("p_api_key_id" "uuid", "p_inclusion" "text") RETURNS boolean
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -20099,6 +20131,11 @@ GRANT ALL ON FUNCTION "public"."set_allocator_holdings_updated_at"() TO "service
 
 REVOKE ALL ON FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_claim_token" "uuid", "p_progress" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."set_compute_job_progress"("p_job_id" "uuid", "p_claim_token" "uuid", "p_progress" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."set_compute_job_seed_hold"("p_job_id" "uuid", "p_claim_token" "uuid", "p_floor_ms" bigint) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."set_compute_job_seed_hold"("p_job_id" "uuid", "p_claim_token" "uuid", "p_floor_ms" bigint) TO "service_role";
 
 
 

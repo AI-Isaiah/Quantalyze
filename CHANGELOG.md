@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.118.1] - 2026-11-28 — BASELINE: automated re-dump after the PROD apply of 9a6e3039
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46155170495`, after the PROD apply of merge `9a6e3039`: sha256 `150e7162…` → `4e373545…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 151 → 152, distinct function names 149 → 150, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261128120000_compute_job_seed_hold.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.118.0 → 0.133.118.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=351 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 152 — MATCH 149, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46155170495` succeeded, and this entry was composed and pushed straight to `main` by the `redump-push` job. Run `46155170495` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so the bot does not write it. Every figure above is measured.
+
 ## [0.133.118.0] - 2026-11-28 — Phase 257 SEEDHOLD: a down re-read bound can no longer move a strategy's seed past a span nobody read, and a Bybit fills read that hits its deadline keeps what it read
 
 ### Fixed
