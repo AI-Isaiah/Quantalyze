@@ -229,7 +229,10 @@ def load_strategy_seed_hold(
             .eq("strategy_id", strategy_id)
             .eq("kind", "sync_trades")
             .eq("status", "done")
-            .order("created_at", desc=True)
+            # Review WR-02: `claimed_at` (stamped on every claim, retries included) tracks
+            # which row ran last; `created_at` would let a newer row that finished mark-less
+            # hide the mark an older row's retry wrote.
+            .order("claimed_at", desc=True)
             .limit(1)
             .execute()
         )

@@ -222,7 +222,9 @@ PERSISTENT = 99
 class JobsStore:
     """A stateful stand-in for `compute_jobs` and the seed-hold RPC.
 
-    `seq` stands in for `created_at` (an increasing integer). `rpc` models the fence of
+    `seq` stands in for `created_at` (an increasing integer) and `claimed_at` for the claim RPC's
+    `now()` stamp (a second increasing integer, re-stamped by every claim, retries included).
+    `rpc` models the fence of
     `set_compute_job_progress` exactly: the row with `id == p_job_id` must be `running` and carry a
     non-NULL claim token equal to `p_claim_token`; on a match `{seed_hold_ms: p_floor_ms}` is
     MERGED into that row's metadata and the answer is True, otherwise False and nothing changes."""
@@ -230,6 +232,7 @@ class JobsStore:
     def __init__(self) -> None:
         self.rows: list[dict[str, Any]] = []
         self._seq = itertools.count(1)
+        self._claim_clock = itertools.count(1)
         self.read_error: Exception | None = None
         self.rpc_error: Exception | None = None
         self.reads = 0
@@ -244,6 +247,7 @@ class JobsStore:
                 "status": status,
                 "claim_token": token,
                 "seq": next(self._seq),
+                "claimed_at": next(self._claim_clock),
                 "metadata": copy.deepcopy(metadata),
             }
         )
@@ -266,6 +270,7 @@ class JobsStore:
         row = self.row(job_id)
         row["status"] = "running"
         row["claim_token"] = token
+        row["claimed_at"] = next(self._claim_clock)
 
     def rpc(self, payload: dict[str, Any]) -> MagicMock:
         def _execute() -> MagicMock:
@@ -653,6 +658,41 @@ class TestSeedHoldRetry:
                 column=a2.column_after, job_id="job-r2", token="tok-r2",
             )
             _verdict(label, r2.out, RUN1_WALK_MS)
+
+    @pytest.mark.parametrize("venue", ["okx", "bybit"])
+    async def test_an_older_rows_retry_mark_outranks_a_newer_done_row(self, venue: str) -> None:
+        # Review WR-02: the schema allows a second `sync_trades` row while the older one waits in
+        # `failed_retry` (the in-flight unique index excludes it), so row B is created AFTER row A,
+        # runs and ends `done` with no mark, and A's retry is claimed last. A's retry writes the
+        # mark and ends `done`. The latest row by CLAIM is A; by creation it is B, which hides the
+        # mark. Run 2 must read it.
+        rows, column = _rows_and_column("set")
+        bounds = FlakyBounds(PERSISTENT)
+        jobs, flags = JobsStore(), {}
+        label = f"{venue} two-row retry"
+        jobs.add_row("job-A", "failed_retry", {})  # created and first claimed before B
+        jobs.add_row("job-B", "done", {})  # created later, finished with no mark
+        jobs.reclaim("job-A", "tok-A2")  # A's retry is claimed after B
+        a = await _run(
+            venue=venue, jobs=jobs, bounds=bounds, flags=flags, rows=rows, column=column,
+            job_id="job-A", token="tok-A2", start=False, daily_trades=DAILY_TRADES_RUN1,
+        )
+        _premise_run1(a, label)
+        jobs.finish("job-A", "done")
+        assert jobs.row("job-A")["seq"] < jobs.row("job-B")["seq"], (
+            f"SEEDHOLD-PREMISE: {label}: the marked row must be the OLDER one by creation"
+        )
+        assert SEED_HOLD_KEY_NAME in jobs.row("job-A")["metadata"], (
+            f"SEEDHOLD-PREMISE: {label}: the older row's retry must have written the mark"
+        )
+
+        bounds.fail_next = 0  # the RPC recovers
+        r2 = await _run(
+            venue=venue, jobs=jobs, bounds=bounds, flags=flags,
+            rows=[*rows, DAILY_MOVED, *_persisted_fills(a.rec, STRATEGY_ID)],
+            column=a.column_after, job_id="job-run2", token="tok-run2",
+        )
+        _verdict(label, r2.out, RUN1_WALK_MS)
 
 
 # ---- the mechanism pins (plan 04): when a mark is written, what it carries, what is ignored ----
