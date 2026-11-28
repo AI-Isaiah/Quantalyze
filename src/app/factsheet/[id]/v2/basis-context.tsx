@@ -85,9 +85,14 @@ export function useRangeGesture(): Pick<RangeGestureValue, "begin" | "end"> {
  * Ephemeral basis state. Renders children only (no DOM element) so wrapping the
  * FactsheetBody tree is transparent to the GUARD-02 byte-identity gate. Default
  * `cash_settlement` (D5).
+ *
+ * Phase 252 G252-MTM-PROMOTION: `initialBasis` seeds the state ONCE. The factsheet passes the basis the
+ * stored headline is measured on (`payload.headlineBasis`), so a promoted composite opens on the
+ * smoothed basis; every other mount omits it and opens on cash, as before. It is a seed, not a
+ * controlled value: a later change of the prop does not move the viewer's selection.
  */
-export function BasisProvider({ children }: { children: ReactNode }) {
-  const [basis, setBasis] = useState<Basis>("cash_settlement");
+export function BasisProvider({ children, initialBasis = "cash_settlement" }: { children: ReactNode; initialBasis?: Basis }) {
+  const [basis, setBasis] = useState<Basis>(initialBasis);
   const value = useMemo<BasisContextValue>(() => ({ basis, setBasis }), [basis]);
   const [held, setHeld] = useState<readonly [number, number] | null>(null);
   // begin / end keep ONE identity for the provider's life, so a consumer's

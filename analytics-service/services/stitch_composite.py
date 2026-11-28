@@ -98,6 +98,11 @@ class MemberBasisSignal(NamedTuple):
 # basis concept. Any member NOT on the native (deribit) venue gates MTM off.
 _NATIVE_VENUE = "deribit"
 
+# Phase 252: since wave 1, every TypeScript reader of this value reads it as "the
+# headline is the cash wallet of an options book" (the named withhold). A composite
+# whose smoothed headline was PROMOTED (``smoothed_headline_promotion``) therefore does
+# NOT carry it. Its MTM meaning survives in the ABSENT ``mark_to_market`` by-basis key,
+# which is what disables the MTM toggle.
 MTM_REASON_OPTIONS = "unsmoothed_options_book"
 MTM_REASON_VENUE = "mtm_basis_unavailable_for_venue"
 # Phase 101 (MTM-01) single-key derive gate: an option book whose mark_to_market
@@ -373,3 +378,55 @@ def smoothed_mtm_available(members: Sequence[MemberBasisSignal]) -> bool:
     ΔMTM to redistribute (``smoothed`` ≡ ``cash`` there), so there is nothing additive
     to persist (SC-4)."""
     return any(m.has_option_activity for m in members)
+
+
+# Phase 252 gap G252-MTM-PROMOTION. The data_quality_flags key that names which basis a
+# composite's top-level headline scalars were computed on. Present ONLY on a promoted
+# composite; absent means the historic default (cash). Two module-level literal
+# assignments on one line each: plan 10's cross-language pin parses them with a regex.
+# Deliberately NOT named ``MTM_REASON_*``: the wave-1 census counts every
+# ``MTM_REASON_*`` assignment as a gate reason.
+HEADLINE_BASIS_FLAG = "headline_basis"
+HEADLINE_BASIS_SMOOTHED = "smoothed_mtm"
+
+# The closed set of reasons an option-active composite's smoothed headline was NOT
+# promoted (the worker logs one of these literals, nothing else).
+SMOOTHED_HEADLINE_NOT_PROMOTED_CAUSES: tuple[str, ...] = (
+    "smoothed_basis_not_computed",
+    "retention_bucketed_option_days",
+    "smoothed_chain_broken",
+)
+
+
+def smoothed_headline_promotion(
+    *, smoothed_computed: bool, retention_bucketed: bool, chain_broken: bool
+) -> tuple[bool, str | None]:
+    """The pure promotion decision: does an option-active composite publish its
+    smoothed mark-to-market result as its HEADLINE? Returns ``(True, None)`` or
+    ``(False, cause)`` with ``cause`` a member of ``SMOOTHED_HEADLINE_NOT_PROMOTED_CAUSES``.
+
+    Founder ruling 2026-11-25 (``252-CONTEXT.md``): "Then measure market-price
+    valuation and switch the headline to it only if it actually works for these keys."
+    The criteria are stated in plan 252-09 ("Promotion criteria") and mirror the
+    probe's pass criteria; P1 (the composite has option activity,
+    ``smoothed_mtm_available``) is the CALLER's guard. This function checks, in order:
+
+      * P2 ``smoothed_computed`` — every Deribit member's smoothed build computed and
+        the stitched smoothed series derived (False after a budget refusal, a bounded
+        timeout, a structural ledger error, fewer than two interpretable days, an
+        overlap or a derive ``ValueError``);
+      * P3 ``retention_bucketed`` — some option day was valued at cash because its
+        marks aged past retention (``pre_mark_retention_option_dailies``);
+      * P4 ``chain_broken`` — the smoothed headline has an interior chain break, so a
+        promoted figure would be suffix-measured without the factsheet's dated note.
+
+    Fail-safe direction: any miss keeps today's cash headline and the named withhold,
+    which is the state the ruling's "only if" clause requires. None of the criteria is
+    a numeric plausibility bound (Phase 194 D-05)."""
+    if not smoothed_computed:
+        return (False, "smoothed_basis_not_computed")
+    if retention_bucketed:
+        return (False, "retention_bucketed_option_days")
+    if chain_broken:
+        return (False, "smoothed_chain_broken")
+    return (True, None)

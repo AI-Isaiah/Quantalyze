@@ -302,6 +302,13 @@ export const SFOX_UI_ENABLED = process.env.NEXT_PUBLIC_SFOX_ENABLED === "true";
  * byte-identical to pre-v1.14 while the basis ships dark. When ON, the segment
  * renders enabled/disabled per the persisted smoothed bundle presence (as v1.14
  * built it). cash / MTM segments are unaffected by this flag.
+ *
+ * Phase 252 G252-MTM-PROMOTION: the flag no longer hides the segment for a PROMOTED composite. When
+ * the worker stored the smoothed result as the headline (`payload.headlineBasis` names the smoothed
+ * basis, from `data_quality_flags.headline_basis`), the segment renders and the factsheet opens on it
+ * whatever this flag says, because hiding the basis the page opens on would be dishonest. The worker's
+ * composite smoothed pass no longer reads the worker half either. The flag still hides the segment
+ * for every other row.
  */
 export const SMOOTHED_MTM_UI_ENABLED =
   process.env.NEXT_PUBLIC_SMOOTHED_MTM_ENABLED === "true";

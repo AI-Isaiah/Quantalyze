@@ -20,8 +20,12 @@ import pytest
 
 from services.broker_dailies import gap_fill_daily_returns
 from services.metrics import compute_all_metrics
+from services.deribit_txn import PNL_BASIS_SMOOTHED_MTM
 from services.stitch_composite import (
+    HEADLINE_BASIS_FLAG,
+    HEADLINE_BASIS_SMOOTHED,
     MTM_REASON_OPTIONS,
+    SMOOTHED_HEADLINE_NOT_PROMOTED_CAUSES,
     CompositeOverlapError,
     MemberBasisSignal,
     MemberWindow,
@@ -29,6 +33,7 @@ from services.stitch_composite import (
     clip_to_window,
     coverage_mask,
     mark_to_market_available,
+    smoothed_headline_promotion,
     smoothed_mtm_available,
     stitch_clipped_series,
     windows_overlap,
@@ -333,3 +338,58 @@ def test_stitched_series_reproduces_arithmetic_cumulative_and_inception_maxdd() 
     )
     assert result.metrics_json["cumulative_return"] == pytest.approx(0.05)
     assert result.metrics_json["max_drawdown"] == pytest.approx(-0.10)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 252 (G252-MTM-PROMOTION) — smoothed_headline_promotion, the pure decision.
+# Founder ruling 2026-11-25: switch the headline to market-price valuation "only if
+# it actually works for these keys". P2 computed, P3 no retention-bucketed option
+# day, P4 no interior chain break; P1 (option activity) is the caller's guard.
+# --------------------------------------------------------------------------- #
+def test_g252_promotion_true_only_for_computed_unbucketed_unbroken() -> None:
+    """If this goes red an option-active composite either never switches (the ruled
+    switch does not happen on PROD) or switches on a basis that did not work."""
+    assert smoothed_headline_promotion(
+        smoothed_computed=True, retention_bucketed=False, chain_broken=False
+    ) == (True, None)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "cause"),
+    [
+        (dict(smoothed_computed=False, retention_bucketed=False, chain_broken=False),
+         "smoothed_basis_not_computed"),
+        (dict(smoothed_computed=True, retention_bucketed=True, chain_broken=False),
+         "retention_bucketed_option_days"),
+        (dict(smoothed_computed=True, retention_bucketed=False, chain_broken=True),
+         "smoothed_chain_broken"),
+    ],
+)
+def test_g252_each_single_failure_names_its_own_cause(
+    kwargs: dict[str, bool], cause: str
+) -> None:
+    """Each criterion refuses on its own and names itself: the post-deploy routing
+    (a founder question vs a budget measurement) reads this cause literal."""
+    promoted, got = smoothed_headline_promotion(**kwargs)
+    assert promoted is False
+    assert got == cause
+    assert got in SMOOTHED_HEADLINE_NOT_PROMOTED_CAUSES
+
+
+def test_g252_precedence_is_not_computed_then_bucketed_then_broken() -> None:
+    """When several criteria fail the first in P2, P3, P4 order is named. A series that
+    never computed has no meaningful bucket or break reading, so it must win."""
+    assert smoothed_headline_promotion(
+        smoothed_computed=False, retention_bucketed=True, chain_broken=True
+    ) == (False, "smoothed_basis_not_computed")
+    assert smoothed_headline_promotion(
+        smoothed_computed=True, retention_bucketed=True, chain_broken=True
+    ) == (False, "retention_bucketed_option_days")
+
+
+def test_g252_vocabulary_literals_and_basis_agree_with_the_ledger_basis() -> None:
+    """The marker value must be the SAME string the by-basis key and the ledger basis
+    use, else a reader that resolves metrics_json_by_basis[headline_basis] finds nothing."""
+    assert HEADLINE_BASIS_SMOOTHED == PNL_BASIS_SMOOTHED_MTM == "smoothed_mtm"
+    assert HEADLINE_BASIS_FLAG == "headline_basis"
+    assert len(set(SMOOTHED_HEADLINE_NOT_PROMOTED_CAUSES)) == 3
