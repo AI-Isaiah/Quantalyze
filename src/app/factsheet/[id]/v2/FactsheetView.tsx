@@ -28,6 +28,15 @@ import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { PeerRanksSection, hasPeerRanks } from "@/components/strategy/PeerRanksSection";
 import { formatCloseDay, formatUnpricedDays, withUnit } from "@/lib/factsheet/returns-unit";
+import {
+  unitSwitchLeverageReason,
+  unitSwitchMastheadLine,
+  unitSwitchSegmentsUnavailableNote,
+  unitSwitchUnpricedNote,
+  unitSwitchWithheldNote,
+  type UnitSegmentsView,
+  type UnitSwitchView,
+} from "@/lib/factsheet/unit-segments";
 import { TINY_BASE_PERCENT, TINY_BASE_WINDOW_DAYS } from "@/lib/tiny-base-flag";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -339,6 +348,24 @@ function UsdViewLeverageHold({ children }: { children: ReactNode }) {
   return <LeverageContext.Provider value={inUsd ? held : real}>{children}</LeverageContext.Provider>;
 }
 
+/**
+ * Phase 256 (OKXUNITSWITCH) plan 07, UI-SPEC surface table "Leverage control" — for a strategy
+ * whose unit switched, the leverage every consumer reads is 1.
+ *
+ * The headline series of a switched strategy is USD with the coin part converted at the stored
+ * daily close (Phase 164.6.6.2.1's conversion). Scaling it by L would also lever the coin price
+ * leg of that conversion, the reason `UsdViewLeverageHold` holds the USD view at 1x. Same
+ * mechanism: shadow `LeverageContext` with a held value, so the KPI strip, the charts, the rail
+ * and the cumulative segments all read 1 in one place with no per-consumer wiring. The real state
+ * lives in the `LeverageProvider` above and is never written while the shadow is up. The Provider
+ * element is rendered whether or not `held` is set, so the subtree never remounts.
+ */
+function UnitSwitchLeverageHold({ held, children }: { held: boolean; children: ReactNode }) {
+  const real = React.useContext(LeverageContext);
+  const heldValue = React.useMemo(() => ({ leverage: 1, setLeverage: () => {} }), []);
+  return <LeverageContext.Provider value={held ? heldValue : real}>{children}</LeverageContext.Provider>;
+}
+
 /** Every details element the print hardening forces open: all of them but the Advanced disclosure. */
 const PRINT_FORCE_OPEN_SELECTOR = "details:not(#factsheet-advanced)";
 
@@ -524,6 +551,7 @@ export function FactsheetBody({
     // the GUARD-02 byte-identity gate; basis is ephemeral (GUARD-04).
     <LeverageProvider>
     <UsdViewLeverageHold>
+    <UnitSwitchLeverageHold held={payload.unitSwitch != null}>
     <BasisProvider>
       <article
         id="factsheet-main"
@@ -624,6 +652,7 @@ export function FactsheetBody({
         {!printView && !hideFooter && <FactsheetFooter payload={payload} scenarioMode={scenarioMode} />}
       </article>
     </BasisProvider>
+    </UnitSwitchLeverageHold>
     </UsdViewLeverageHold>
     </LeverageProvider>
   );
@@ -1520,6 +1549,38 @@ function UsdDisclosure({ usdView }: { usdView: FactsheetUsdView }) {
   );
 }
 
+/**
+ * Phase 256 OKXUNITSWITCH (SC-3, UI-SPEC B): the sentence under the masthead that says an
+ * account moved from one unit into another, and, when the USD figures leave coin-segment days
+ * out for want of a stored close, which days. It prints, because the masthead prints. Neutral
+ * tone only (UI-SPEC rule 5): a denomination is a fact, not a warning. It never renders with
+ * a `UsdDisclosure` (a switched strategy has no `usdView`).
+ */
+function UnitSwitchDisclosure({ unitSwitch, unitSegments }: { unitSwitch: UnitSwitchView; unitSegments: UnitSegmentsView | undefined }) {
+  const unpricedNote = unitSegments ? unitSwitchUnpricedNote(unitSwitch, unitSegments.unpricedDays) : "";
+  const withheldNote = unitSegments ? unitSwitchWithheldNote(unitSwitch, unitSegments.withheldDays) : "";
+  return (
+    <div className="mt-4 flex max-w-3xl flex-col gap-1" data-testid="factsheet-unit-switch-disclosure">
+      <p className="text-caption text-text-muted">{unitSwitchMastheadLine(unitSwitch)}</p>
+      {unpricedNote !== "" && (
+        <p className="text-caption text-text-muted" data-testid="factsheet-unit-switch-unpriced-note">
+          {unpricedNote}
+        </p>
+      )}
+      {withheldNote !== "" && (
+        <p className="text-caption text-text-muted" data-testid="factsheet-unit-switch-withheld-note">
+          {withheldNote}
+        </p>
+      )}
+      {!unitSegments && (
+        <p className="text-caption text-text-muted" data-testid="factsheet-unit-switch-segments-unavailable">
+          {unitSwitchSegmentsUnavailableNote(unitSwitch)}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function FactsheetHeader({
   payload: payloadProp,
   ownershipMark,
@@ -1707,6 +1768,9 @@ function FactsheetHeader({
       </div>
       {unitView?.view === "usd" && unitView.nativePayload.usdView && (
         <UsdDisclosure usdView={unitView.nativePayload.usdView} />
+      )}
+      {payload.unitSwitch && (
+        <UnitSwitchDisclosure unitSwitch={payload.unitSwitch} unitSegments={payload.unitSegments} />
       )}
     </header>
   );
@@ -3008,6 +3072,10 @@ function ControlBar({
   const gatePayload = inUsd && unitView ? unitView.nativePayload : payload;
   const priceLeg = unitView?.selectedPayload.convertedFrom ?? nativeUnit ?? "BTC";
   const leverageUsdReason = `Leverage is off in the USD view: it would also lever ${priceLeg}.`;
+  // Phase 256 (UI-SPEC surface table): a switched strategy's headline USD series includes a part
+  // converted from the coin, so its leverage is held at 1 with the same treatment as the USD view.
+  const switchHeld = payload.unitSwitch != null;
+  const heldAtOne = inUsd || switchHeld;
   const basisUsdReason = `Shown in ${nativeUnit ?? "BTC"} only. Switch Units to ${nativeUnit ?? "BTC"} to see this basis.`;
   // Empty on mount; set by an ACTUAL switch so a screen reader hears the change
   // and a fresh mount is silent.
@@ -3081,7 +3149,7 @@ function ControlBar({
   const onLeverageChange = (raw: number) => {
     // D-16: the USD view holds the native multiplier untouched; a change event on
     // the read-only input (an assistive-tech or scripted write) must not reach it.
-    if (inUsd) return;
+    if (heldAtOne) return;
     if (!Number.isFinite(raw)) {
       setLeverageMsg(
         `Invalid leverage — enter a number between 0 and ${FACTSHEET_MAX_LEVERAGE}. The previous value was kept.`,
@@ -3181,9 +3249,9 @@ function ControlBar({
               step="0.1"
               min="0"
               max={FACTSHEET_MAX_LEVERAGE}
-              value={inUsd ? "1" : leverage.toString()}
-              readOnly={inUsd}
-              aria-disabled={inUsd ? "true" : undefined}
+              value={heldAtOne ? "1" : leverage.toString()}
+              readOnly={heldAtOne}
+              aria-disabled={heldAtOne ? "true" : undefined}
               title="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               aria-label="Leverage multiplier (1× = unlevered; excludes borrow / funding cost)"
               onChange={(e) => {
@@ -3194,12 +3262,12 @@ function ControlBar({
                 if (e.target.value.trim() === "") return;
                 onLeverageChange(Number(e.target.value));
               }}
-              className={`w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]${inUsd ? " opacity-60 cursor-not-allowed" : ""}`}
+              className={`w-16 rounded-sm border border-border bg-surface px-2 py-1 text-right text-caption font-mono tabular-nums focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent min-h-[28px] pointer-coarse:min-h-[44px]${heldAtOne ? " opacity-60 cursor-not-allowed" : ""}`}
             />
             <span aria-hidden="true" className="text-caption font-mono text-text-muted">
               ×
             </span>
-            {!inUsd && leverage !== 1 && (
+            {!heldAtOne && leverage !== 1 && (
               <button
                 type="button"
                 onClick={resetLeverage}
@@ -3211,7 +3279,12 @@ function ControlBar({
             )}
           </div>
           {inUsd && <p className="text-caption text-text-muted">{leverageUsdReason}</p>}
-          {!inUsd && leverageMsg && (
+          {!inUsd && payload.unitSwitch && (
+            <p className="text-caption text-text-muted" data-testid="factsheet-unit-switch-leverage-reason">
+              {unitSwitchLeverageReason(payload.unitSwitch)}
+            </p>
+          )}
+          {!heldAtOne && leverageMsg && (
             <p
               role="status"
               aria-live="polite"

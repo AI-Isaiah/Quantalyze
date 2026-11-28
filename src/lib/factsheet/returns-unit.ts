@@ -84,8 +84,12 @@ export function unitTag(unit: string): string {
 const DAY_MS = 86_400_000;
 const ISO_DAY_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
-/** Parse a strict `YYYY-MM-DD` to UTC epoch ms, or null when it is not a real calendar day. */
-function parseIsoDay(iso: string): number | null {
+/**
+ * Parse a strict `YYYY-MM-DD` to UTC epoch ms, or null when it is not a real calendar day.
+ * Exported (Phase 256) so the unit-switch parser shares this one strict parse rather than
+ * carrying a second copy that could drift.
+ */
+export function parseIsoDay(iso: string): number | null {
   const m = ISO_DAY_RE.exec(iso);
   if (!m) return null;
   const y = Number(m[1]);

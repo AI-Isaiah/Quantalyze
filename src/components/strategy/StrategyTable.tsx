@@ -51,6 +51,7 @@ import { SimulateImpactButton } from "@/components/discovery/SimulateImpactButto
 import { OwnershipTag } from "./OwnershipTag";
 import { VerifiedCheck } from "./VerifiedCheck";
 import { ReturnsUnitChip } from "./ReturnsUnitChip";
+import { UnitSwitchChip } from "./UnitSwitchChip";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { signTone, drawdownTone } from "@/lib/factsheet/display-sign";
 import { formatPercent, formatNumber, formatCurrency, formatDay } from "@/lib/utils";
@@ -1931,8 +1932,21 @@ export function StrategyTable({
                                   malformed or lower-case unit renders nothing,
                                   so a USD row's DOM is unchanged. */}
                               <ReturnsUnitChip
-                                unit={parseReturnsUnit(s.analytics.native_unit)}
+                                unit={s.analytics.unit_switch_coin ? null : parseReturnsUnit(s.analytics.native_unit)}
                                 variant="compact"
+                              />
+                              {/* Phase 256 plan 08 (D-05, UI-SPEC D) - a strategy that moved
+                                  from USD into a coin says so in the SAME slot, in place of
+                                  the "in BTC" chip, which would mislabel its USD figures.
+                                  The two chips are mutually exclusive (a switched row
+                                  never shows "in BTC", whatever its native unit says).
+                                  Three closed scalars
+                                  through `parseUnitSwitch`: a missing or malformed one
+                                  renders nothing, so a USD row's DOM is unchanged. */}
+                              <UnitSwitchChip
+                                coin={s.analytics.unit_switch_coin}
+                                lastUsdDay={s.analytics.unit_switch_last_usd_day}
+                                firstCoinDay={s.analytics.unit_switch_first_coin_day}
                               />
                               {s.strategy_types.map((t) => (
                                 <Badge key={t} label={t} className="whitespace-nowrap" />

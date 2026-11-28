@@ -26,6 +26,7 @@ import {
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, PeerRanks, TrustTierKind } from "@/lib/factsheet/types";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { parseUnitSwitch } from "@/lib/factsheet/unit-segments";
 import { OG_CARD_VERSION } from "@/lib/factsheet/og-metrics";
 import { provenanceFingerprint } from "@/lib/factsheet/provenance-fingerprint";
 import { withTrustTier } from "@/lib/factsheet/with-trust-tier";
@@ -344,7 +345,8 @@ function buildFactsheetPayloadCached(
     // Bumped v26→v27 (Phase 237 CACHE-03, 2026-11-23): the payload shape is unchanged, and a failed BTC price read is no longer stored. An entry stored before the deploy may hold a `price_read_failed` payload (USD toggle disabled), which the throw above cannot evict, so under v26 it would keep serving for the 1 h TTL drain.
     // Bumped v27→v28 (Phase 252 DERIBITOPTIONS, 2026-11-25): for the same inputs, a row whose flags carry the options-book reason now reads withheld (seven scalars null, a named note), without a shape change beyond the widened cause; under v27 an entry built before the deploy would keep serving the cash-wallet headline for the 1 h TTL drain.
     // Bumped v28→v29 (Phase 236 FIGUREMATH, 2026-11-25, one bump for the phase): the payload's values change at deploy without a reshaping of existing fields, and it gains `cagrStart` / `cagrEnd`. Every engine now annualizes one way and CVaR is the historical figure, so a v28 entry built before the deploy would keep serving the old Sharpe, Sortino, volatility, CAGR and CVaR for the 1 h TTL drain, beside a fresh build and the OG card; and a v28 entry lacks the two new fields.
-    ["factsheet-v2-payload-v29", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
+    // Bumped v29→v30 (Phase 256 OKXUNITSWITCH, 2026-11-27): the payload gained `unitSwitch` and `unitSegments`; an older entry lacks them, so for the 1 h TTL drain a switched strategy would render as a plain USD strategy with no switch sentence.
+    ["factsheet-v2-payload-v30", id, computedAt, tradesFetchedAt ?? "none", provenanceKey, computationStatus],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -407,7 +409,19 @@ export async function generateMetadata({
   const unit = parseReturnsUnit(
     (analytics?.data_quality_flags as { native_unit?: unknown } | null | undefined)?.native_unit,
   );
-  const ogImage = `/api/og/factsheet/${id}?v=${OG_CARD_VERSION}${unit == null ? "" : `&u=${encodeURIComponent(unit)}`}`;
+  // Phase 256 plan 08 (D-05, T-256-25, UI-SPEC E): a unit switch moves the URL too, for the same reason a
+  // unit does. The card gained a switch note, so a card cached before the switch was stored (or before the
+  // note existed) must not answer under a URL that looks like the plain one. The value is the strictly
+  // parsed coin and two days, so nothing but a unit code and two ISO days can reach the URL; the route
+  // never reads it and re-derives the switch from the database.
+  const unitSwitch = parseUnitSwitch(
+    (analytics?.data_quality_flags as { unit_switch?: unknown } | null | undefined)?.unit_switch,
+  );
+  const switchKey =
+    unitSwitch == null
+      ? ""
+      : `&us=${encodeURIComponent(`${unitSwitch.toUnit}.${unitSwitch.lastFromDay}.${unitSwitch.firstToDay}`)}`;
+  const ogImage = `/api/og/factsheet/${id}?v=${OG_CARD_VERSION}${unit == null ? "" : `&u=${encodeURIComponent(unit)}`}${switchKey}`;
   return {
     title: `${name} factsheet`,
     description,

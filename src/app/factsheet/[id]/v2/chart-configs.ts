@@ -1,6 +1,7 @@
 import { metricsBasisSeries } from "@/lib/factsheet/compute";
 import type { ComparatorBlock, FactsheetPayload } from "@/lib/factsheet/types";
-import { withUnit } from "@/lib/factsheet/returns-unit";
+import { unitTag, withUnit } from "@/lib/factsheet/returns-unit";
+import type { UnitSegmentPoint, UnitSegmentsView, UnitSwitchView } from "@/lib/factsheet/unit-segments";
 import type { HeadlineNote } from "./MetricsColumn";
 
 /**
@@ -92,6 +93,13 @@ export type ChartConfig = {
    *  (the one equity chart of the published factsheet). Absent, or with no
    *  `marksSince` in range, renders nothing. Mirrors segmentMarkers gating. */
   marksStart?: boolean;
+  /** Phase 256 (OKXUNITSWITCH) plan 07, UI-SPEC A: draw a switched strategy's two native
+   *  segments (`payload.unitSwitch` + `payload.unitSegments`) as two separate lines with a real
+   *  break, a marker and unit codes, instead of the one headline USD line. Set true only on
+   *  key:"cumulative", the one chart that draws native units; every other curve draws the
+   *  headline USD series unbroken. Absent, or with either payload field absent, renders
+   *  today's single series. Mirrors segmentMarkers / marksStart gating. */
+  unitSwitch?: boolean;
   /** Per-config stroke widths. Daily Returns wants a thin line so the noise reads as noise. */
   stratWidth?: number;
   comparatorWidth?: number;
@@ -166,6 +174,8 @@ export const CHART_CONFIGS: ChartConfig[] = [
     segmentMarkers: true,
     // D-08: the start-of-marks note lives on the cumulative track only.
     marksStart: true,
+    // Phase 256 (UI-SPEC A): the unit-switch two-segment break lives on the cumulative track only.
+    unitSwitch: true,
   },
   {
     key: "cumVsBench",
@@ -307,6 +317,12 @@ export type ResolvedSeries = {
    *  a null there instead of breaking the line (D-38, D-84). Strategy series of an
    *  opted-in config only; absent everywhere else. Index-aligned with `values`. */
   bridgeAt?: ReadonlyArray<boolean>;
+  /** Phase 256 (UI-SPEC A8): set only on a native unit-switch segment. The unit its values are
+   *  measured in; a hover reading prints it (`1.03× in BTC`), so neither segment is unlabelled. */
+  unit?: string;
+  /** Phase 256 (UI-SPEC A8): indices below this are drawn but not hoverable. The coin segment's
+   *  base vertex sits at the x of the last USD day and reads the USD point there, never a coin day. */
+  hoverFrom?: number;
 };
 
 export function resolveSeries(
@@ -380,4 +396,178 @@ export function resolveSeries(
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phase 256 (OKXUNITSWITCH) plan 07: the two native segments of a switched strategy.
+// ---------------------------------------------------------------------------------------------
+
+/** Index of `target` in ascending ISO `dates`, or -1 when absent. */
+function indexOfDay(dates: readonly string[], target: string): number {
+  let lo = 0;
+  let hi = dates.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (dates[mid] === target) return mid;
+    if (dates[mid] < target) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return -1;
+}
+
+/** Last index whose date is at or before `target`, or -1 when every date sorts after it. */
+function lastIndexAtOrBefore(dates: readonly string[], target: string): number {
+  let lo = 0;
+  let hi = dates.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (dates[mid] <= target) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo - 1;
+}
+
+/**
+ * One native segment compounded within its own unit from 1.00, indexed onto the shared headline
+ * `dates` by day. A day the headline does not carry gets no index of its own, but its return is
+ * still compounded, so the level drawn at every plotted day is the true native cumulative and no
+ * value is interpolated or invented (UI-SPEC A.0). A return of -100% or worse ruins the segment
+ * and it stays at zero rather than turning positive again.
+ */
+function compoundNative(points: readonly UnitSegmentPoint[], dates: readonly string[]): (number | null)[] {
+  const out: (number | null)[] = new Array(dates.length).fill(null);
+  let cum = 1;
+  for (const p of points) {
+    const growth = 1 + p.value;
+    cum = growth > 0 ? cum * growth : 0;
+    const idx = indexOfDay(dates, p.date);
+    if (idx >= 0) out[idx] = cum;
+  }
+  return out;
+}
+
+/** The first positive finite value at or after `from`: the rebase divisor `resolveSeries` uses. */
+function rebaseBase(values: ReadonlyArray<number | null>, from: number): number | null {
+  for (let i = Math.max(0, from); i < values.length; i++) {
+    const v = values[i];
+    if (v != null && Number.isFinite(v) && v > 0) return v;
+  }
+  return null;
+}
+
+function anyFinite(values: ReadonlyArray<number | null>, from: number, to: number): boolean {
+  for (let i = Math.max(0, from); i <= to && i < values.length; i++) {
+    const v = values[i];
+    if (v != null && Number.isFinite(v)) return true;
+  }
+  return false;
+}
+
+/** What the cumulative chart draws for a switched strategy in the current window. */
+export type UnitSwitchLayout = {
+  /** Index of the last USD day (S) on the headline axis; the coin base vertex sits at its x. */
+  idxS: number;
+  /** Switch inside the window with both segments drawn: the marker and both unit codes. */
+  marker: boolean;
+  /** Window wholly on one side of the switch: the one unit code drawn at the plot's top-left. */
+  singleUnit: string | null;
+  /** The coin segment holds only its base, so there is no coin day to draw yet. */
+  baseOnly: boolean;
+  /** A comparator is drawn (it stops at S). */
+  comparatorActive: boolean;
+};
+
+/**
+ * Phase 256 (UI-SPEC A): the cumulative chart's series for a switched strategy.
+ *
+ * Replaces the one headline strategy line with up to two native segments, each compounded in its
+ * own unit from 1.00 and drawn as its OWN series, so the chart draws two separate `<path>`
+ * elements and nothing joins the two units (the founder's "no line joining the two units").
+ * The comparator is cut at S: a USD benchmark beside a coin-measured line invites the
+ * cross-unit comparison SC-3 forbids.
+ *
+ * Null (the caller draws today's single series, byte-identical) when the config does not opt in,
+ * either payload field is absent, the strategy line did not resolve, or nothing of either segment
+ * is inside the window. `xRange[1]` is clamped to the axis here; `xRange[0]` feeds the rebase
+ * exactly as `resolveSeries` does, and a rebase never crosses S: a window starting inside the USD
+ * segment rebases only the USD part, one starting inside the coin segment only the coin part.
+ */
+export function resolveUnitSwitchChart(
+  cfg: ChartConfig,
+  payload: FactsheetPayload,
+  comparator: ComparatorBlock,
+  xRange: readonly [number, number],
+): { series: ResolvedSeries[]; layout: UnitSwitchLayout } | null {
+  const sw: UnitSwitchView | undefined = payload.unitSwitch;
+  const seg: UnitSegmentsView | undefined = payload.unitSegments;
+  if (!cfg.unitSwitch || !cfg.stratField || !sw || !seg) return null;
+  if (!Array.isArray(seg.fromReturns) || !Array.isArray(seg.toReturns)) return null;
+  // The strategy series is first whenever it resolved; without it there is nothing to replace.
+  if (payload[cfg.stratField] == null) return null;
+  const base = resolveSeries(cfg, payload, comparator, xRange[0]);
+  if (base.length === 0) return null;
+
+  const dates = payload.dates;
+  const idxS = lastIndexAtOrBefore(dates, sw.lastFromDay);
+  if (idxS < 0) return null;
+  const xStart = xRange[0];
+  const xEnd = Math.min(xRange[1], dates.length - 1);
+  const rebase = !!cfg.rebaseOnZoom && xStart > 0;
+  const baseOnly = seg.toReturns.length === 0;
+
+  let usdVals = compoundNative(seg.fromReturns, dates);
+  const usdVisible = anyFinite(usdVals, xStart, Math.min(xEnd, idxS));
+  if (usdVisible && rebase) {
+    const b = rebaseBase(usdVals, xStart);
+    if (b != null) usdVals = usdVals.map((v) => (v == null ? v : v / b));
+  }
+
+  let coinVals: (number | null)[] = baseOnly ? [] : compoundNative(seg.toReturns, dates);
+  let coinVisible = false;
+  if (!baseOnly) {
+    coinVisible = anyFinite(coinVals, Math.max(xStart, idxS + 1), xEnd);
+    if (xStart > idxS) {
+      // Window wholly in the coin segment: rebased at the window start; its base vertex is behind us.
+      if (coinVisible && rebase) {
+        const b = rebaseBase(coinVals, xStart);
+        if (b != null) coinVals = coinVals.map((v) => (v == null ? v : v / b));
+      }
+    } else {
+      // The coin base vertex: 1.00 at the x of the last USD day.
+      coinVals[idxS] = 1;
+    }
+  }
+  if (!usdVisible && !coinVisible) return null;
+
+  const width = cfg.stratWidth ?? 1.6;
+  const native = (unit: string, values: (number | null)[], hoverFrom?: number): ResolvedSeries => ({
+    name: `${payload.strategyName} ${unitTag(unit)}`,
+    values,
+    color: "var(--color-accent)",
+    width,
+    opacity: 1.0,
+    unit,
+    ...(hoverFrom != null ? { hoverFrom } : {}),
+  });
+  const strategy: ResolvedSeries[] = [];
+  if (usdVisible) strategy.push(native(sw.fromUnit, usdVals));
+  if (coinVisible) strategy.push(native(sw.toUnit, coinVals, idxS + 1));
+
+  // The comparator stops at S, so its path ends at the same x as the USD path.
+  const comparators = base.slice(1).map((s) => ({
+    ...s,
+    values: s.values.map((v, i) => (i > idxS ? null : v)),
+  }));
+
+  const marker = usdVisible && coinVisible;
+  return {
+    series: [...strategy, ...comparators],
+    layout: {
+      idxS,
+      marker,
+      singleUnit: marker || baseOnly ? null : usdVisible ? sw.fromUnit : sw.toUnit,
+      baseOnly,
+      comparatorActive: base.length > 1,
+    },
+  };
 }

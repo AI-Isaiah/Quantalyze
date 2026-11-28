@@ -263,6 +263,7 @@ def combine_realized_and_funding(
     open_unrealized_usd: float = 0.0,
     full_history: bool = False,
     realized_reach_start: str | None = None,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """Combine realized daily PnL + funding into one anchored, gap-filled
     daily-return series. Returns ``(returns, meta)`` where ``meta`` is the
@@ -282,6 +283,10 @@ def combine_realized_and_funding(
     so a day 0 that carries a positive flow on a base within tolerance of zero is the
     inception day (no dust / negative flag, no return). The ccxt jobs derive the verdict
     from the account's P&L history through ``nav_twr.ccxt_history_reaches_inception``.
+
+    ``floors`` (256 OKXUNITSWITCH, default ``USD_FLOORS`` = byte-identical): the unit the records,
+    funding rows, flows and balance are in. Forwarded to ``trades_to_daily_returns_with_status``;
+    only the coin segment of a switched account passes a native row.
 
     ``realized_reach_start`` (an ISO ``YYYY-MM-DD`` UTC day, or ``None``): the
     first day the REALIZED fetch could reach. Funding dated before it is dropped
@@ -339,6 +344,7 @@ def combine_realized_and_funding(
         external_flows=external_flows,
         open_unrealized_usd=open_unrealized_usd,
         full_history=full_history,
+        floors=floors,
     )
     returns = gap_fill_daily_returns(returns)
     returns = _leave_out_tiny_base_days(returns, meta)

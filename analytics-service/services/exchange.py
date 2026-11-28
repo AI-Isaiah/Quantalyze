@@ -8,8 +8,9 @@ import random
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal, NamedTuple, TypedDict
@@ -28,6 +29,7 @@ from services.ingestion._timestamps import coerce_to_aware_utc
 from services.metrics import _safe_float
 from services.price_rule import is_stable_value
 from services.redact import scrub_freeform_string
+from services.unit_switch import CoinBillCensus, UnitSwitch, UnitSwitchResolver
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -138,6 +140,84 @@ def get_and_clear_last_dq_flags() -> dict[str, Any]:
         _LAST_DQ_FLAGS.set({})
         return dict(flags)
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Phase 256 OKXUNITSWITCH (plan 03) — the unit-switch side channels.
+#
+# ``fetch_daily_pnl`` returns USDT daily-P&L records and nothing else; an OKX account that moved
+# from a stable coin into a coin has bills in two units, and the coin half never enters a record
+# (RESEARCH anti-pattern: coin amounts are not USDT). They travel on this side channel, set only
+# when a caller passed a ``unit_switch`` resolver and the walk found coin bills, drained by the
+# caller on the next statement exactly like the DQ flags.
+@dataclass(frozen=True, slots=True)
+class UnitSwitchRead:
+    """What one switch-aware OKX bills read found, besides the USDT records it returned.
+
+    ``switch`` is the resolver's ``UnitSwitch`` (``None`` when it refused); ``refusal`` is the
+    closed token the resolver returned (a ``UNIT_SWITCH_REFUSALS`` member, or the derive's
+    ``holdings_read_failed``); ``census`` is coin -> (first UTC day, bill count) as handed to the
+    resolver; ``stable_by_day`` is the signed stable P&L per UTC day (equal to the returned
+    records); ``coin_by_day`` is the native coin amount per UTC day (on either side of
+    ``switch.last_usd_day``; the splitter books the days up to it in USD). On a refusal both day maps are empty."""
+
+    switch: UnitSwitch | None
+    refusal: str | None
+    census: dict[str, tuple[str, int]]
+    stable_by_day: dict[str, float]
+    coin_by_day: dict[str, float]
+
+
+_LAST_UNIT_SWITCH_READ: ContextVar[UnitSwitchRead | None] = ContextVar(
+    "_LAST_UNIT_SWITCH_READ", default=None
+)
+
+
+def get_and_clear_last_unit_switch_read() -> UnitSwitchRead | None:
+    """Return the ``UnitSwitchRead`` the most recent ``fetch_daily_pnl`` on this task stored, then
+    reset it to ``None``. ``None`` when no resolver was passed or the walk found no coin bills.
+    The value is immutable, so no defensive copy is needed (unlike the DQ flags dict)."""
+    read = _LAST_UNIT_SWITCH_READ.get(None)
+    if read is not None:
+        _LAST_UNIT_SWITCH_READ.set(None)
+    return read
+
+
+# The live per-currency share of an OKX account's equity, from the SAME raw balance response
+# ``fetch_okx_total_equity_and_upl_usd`` already reads (no second request). The derive needs it for
+# a key that has no stored holdings. ``None`` until a clean response with a positive total.
+_LAST_OKX_CCY_SHARE: ContextVar[dict[str, float] | None] = ContextVar(
+    "_LAST_OKX_CCY_SHARE", default=None
+)
+
+
+def get_and_clear_last_okx_ccy_share() -> dict[str, float] | None:
+    """Return the per-ccy equity share (upper-case code -> fraction of the summed ``eqUsd``) the most
+    recent ``fetch_okx_total_equity_and_upl_usd`` on this task recorded, then reset to ``None``.
+    Returns a copy so a caller cannot mutate the stored dict."""
+    share = _LAST_OKX_CCY_SHARE.get(None)
+    if share is not None:
+        _LAST_OKX_CCY_SHARE.set(None)
+        return dict(share)
+    return None
+
+
+# The live USD price of each coin in the SAME balance response (``eqUsd / eq`` per currency): the unit
+# switch's coin anchor is the live equity divided by it, so the anchor never mixes the live equity with
+# yesterday's close (WR-01). ``None`` until a clean response with a priced coin.
+_LAST_OKX_CCY_PRICE: ContextVar[dict[str, float] | None] = ContextVar(
+    "_LAST_OKX_CCY_PRICE", default=None
+)
+
+
+def get_and_clear_last_okx_ccy_price() -> dict[str, float] | None:
+    """Return the per-ccy live USD price (upper-case code -> ``eqUsd / eq``) the most recent
+    ``fetch_okx_total_equity_and_upl_usd`` on this task recorded, then reset to ``None``."""
+    price = _LAST_OKX_CCY_PRICE.get(None)
+    if price is not None:
+        _LAST_OKX_CCY_PRICE.set(None)
+        return dict(price)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1865,11 +1945,83 @@ async def _okx_bills_window_read(
     return kept, "complete"
 
 
+def _okx_bill_utc_day(ts_raw: object) -> str | None:
+    """The UTC ISO day of an OKX bill ``ts`` (epoch ms digits), or ``None`` when it will not parse.
+    Never raises: a coin bill's day is read only for the switch path, and a bad ``ts`` there must
+    not change what a caller without a resolver sees (it refuses by ``daily_pnl_non_usd_okx``)."""
+    text = str(ts_raw or "")
+    if not text.isdigit():
+        return None
+    try:
+        return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+async def _okx_book_switched_coin(
+    resolver: UnitSwitchResolver,
+    coin_bills: Sequence[tuple[str, str | None, float]],
+    stable_by_day: Mapping[str, float],
+) -> bool:
+    """Phase 256 OKXUNITSWITCH: decide whether the coin bills the OKX walk counted are one switched
+    coin's, and store the ``UnitSwitchRead`` the caller drains. Returns True when the walk may go
+    on to book the stable P&L, False when it must refuse by ``daily_pnl_non_usd_okx`` exactly as it
+    does without a resolver.
+
+    ``coin_bills`` holds (upper-case regex-valid code, UTC day or ``None`` when the bill's ``ts``
+    would not parse, signed ``pnl + fee`` in the coin). A bill with no day cannot be placed in
+    either unit, so it refuses. The resolver is awaited ONCE, after the walk (the switch date
+    depends on this census, so a second walk is not needed). A coin amount is never added to
+    ``stable_by_day`` here or by the caller (T-256-08)."""
+    dated = [(code, day, amount) for code, day, amount in coin_bills if day is not None]
+    if len(dated) != len(coin_bills):
+        return False
+    first_day: dict[str, str] = {}
+    count: dict[str, int] = {}
+    for code, day, _amount in dated:
+        first_day[code] = min(day, first_day.get(code, day))
+        count[code] = count.get(code, 0) + 1
+    census: dict[str, tuple[str, int]] = {code: (first_day[code], count[code]) for code in first_day}
+    coin_census: CoinBillCensus = census
+    resolved = await resolver(coin_census)
+    if isinstance(resolved, str):
+        _LAST_UNIT_SWITCH_READ.set(
+            UnitSwitchRead(
+                switch=None, refusal=resolved, census=census, stable_by_day={}, coin_by_day={}
+            )
+        )
+        return False
+    coin_by_day: dict[str, float] = {}
+    for code, day, amount in dated:
+        # Any code that is not the switched coin is not covered by the switch: refuse as today. A
+        # coin bill on or before the last USD day (a transition fee) is carried and the splitter
+        # books it in USD at its own day's close (CR-01); the resolver already bounded how early.
+        if code != resolved.coin:
+            return False
+        coin_by_day[day] = coin_by_day.get(day, 0.0) + amount
+    _LAST_UNIT_SWITCH_READ.set(
+        UnitSwitchRead(
+            switch=resolved,
+            refusal=None,
+            census=census,
+            stable_by_day=dict(sorted(stable_by_day.items())),
+            coin_by_day=dict(sorted(coin_by_day.items())),
+        )
+    )
+    # Counts and the closed coin code only (T-256-07): no amount, bill id or venue string.
+    logger.info(
+        "OKX unit switch read: coin=%s coin_bills=%d coin_days=%d",
+        resolved.coin, len(dated), len(coin_by_day),
+    )
+    return True
+
+
 async def fetch_daily_pnl(
     exchange: ccxt.Exchange,
     since_ms: int | None = None,
     *,
     read_deadline_s: float | None = None,
+    unit_switch: UnitSwitchResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch daily PnL from the exchange account bills/ledger.
 
@@ -1898,6 +2050,9 @@ async def fetch_daily_pnl(
     # the daily-PnL caller's view. Mirrors the per-call isolation
     # contract documented in ``_LAST_DQ_FLAGS``.
     _LAST_DQ_FLAGS.set({})
+    # Phase 256: same entry-seam reset for the unit-switch side channel, so a read that stores
+    # nothing can never hand a caller the previous read's coin bills.
+    _LAST_UNIT_SWITCH_READ.set(None)
 
     _read_deadline = (
         float("inf") if read_deadline_s is None else _monotonic() + read_deadline_s
@@ -2017,6 +2172,12 @@ async def fetch_daily_pnl(
             _OKX_FUNDING_BILL_TYPE = "8"
             _okx_funding_bills_dropped = 0
             _okx_non_usd_census: Counter[str] = Counter()
+            # Phase 256: the counted coin bills (code, UTC day or None, signed pnl + fee in the
+            # coin) and whether any counted bill has a blank/malformed code. Kept ONLY so a
+            # caller-supplied ``unit_switch`` resolver can book a switched coin; they never reach
+            # ``daily_totals`` (T-256-08).
+            _okx_coin_bills: list[tuple[str, str | None, float]] = []
+            _okx_coin_code_unusable = False
             for bill in all_bills:
                 bill_type = str(bill.get("type", "")).strip()
                 if bill_type == _OKX_FUNDING_BILL_TYPE:
@@ -2048,6 +2209,12 @@ async def fetch_daily_pnl(
                         _ccy if _OKX_CCY_CODE_RE.match(_ccy)
                         else ("blank" if not _ccy else "malformed")
                     ] += 1
+                    if _OKX_CCY_CODE_RE.fullmatch(_ccy):
+                        _okx_coin_bills.append(
+                            (_ccy.upper(), _okx_bill_utc_day(bill.get("ts", "")), pnl_val)
+                        )
+                    else:
+                        _okx_coin_code_unusable = True
                     continue
                 ts_raw = bill.get("ts", "")
                 if ts_raw and ts_raw.isdigit():
@@ -2067,6 +2234,18 @@ async def fetch_daily_pnl(
                         ts_raw, bill.get("billId"), bill.get("billType"),
                     )
                     _record_dq_flag("daily_pnl_malformed_okx", True)
+
+            # Phase 256 OKXUNITSWITCH: ONLY a caller that passed a resolver (the derive) may have a
+            # switched coin's bills booked as coin instead of refused; a blank or malformed code
+            # never reaches the resolver. Every other caller (``unit_switch`` None) falls straight
+            # to the refusal below, byte-identical to before.
+            if (
+                _okx_non_usd_census
+                and unit_switch is not None
+                and not _okx_coin_code_unusable
+                and await _okx_book_switched_coin(unit_switch, _okx_coin_bills, daily_totals)
+            ):
+                _okx_non_usd_census.clear()
 
             if _okx_non_usd_census:
                 # Phase 232 VREAD-06: one non-USD bill refuses EVERY day of the read (the same
@@ -3651,11 +3830,15 @@ async def fetch_all_trades(
     since_ms: int | None = None,
     *,
     read_deadline_s: float | None = None,
+    unit_switch: UnitSwitchResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch daily PnL from exchange. Uses account-level APIs instead of
     scanning individual trading pairs (which is 200+ API calls on OKX).
-    ``read_deadline_s`` is ``fetch_daily_pnl``'s opt-in walk budget."""
-    return await fetch_daily_pnl(exchange, since_ms, read_deadline_s=read_deadline_s)
+    ``read_deadline_s`` is ``fetch_daily_pnl``'s opt-in walk budget; ``unit_switch`` is its opt-in
+    OKX coin-switch resolver (Phase 256), passed only by ``run_derive_broker_dailies_job``."""
+    return await fetch_daily_pnl(
+        exchange, since_ms, read_deadline_s=read_deadline_s, unit_switch=unit_switch
+    )
 
 
 def parse_since_ms(
@@ -3868,6 +4051,71 @@ def _okx_upl_or_zero(raw_upl: Any) -> tuple[float, bool]:
         return 0.0, True
 
 
+def _okx_ccy_share(details: object) -> dict[str, float] | None:
+    """Per-ccy fraction of an OKX balance response's summed ``eqUsd`` (upper-case code -> share).
+
+    A detail counts only when its ``ccy`` fullmatches ``_OKX_CCY_CODE_RE`` and its ``eqUsd`` parses
+    to a finite non-negative number; anything else is dropped, never zeroed in. ``None`` when
+    nothing is kept or the kept sum is not positive (a share of nothing is not 0)."""
+    if not isinstance(details, list):
+        return None
+    kept: dict[str, float] = {}
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        ccy = str(detail.get("ccy") or "")
+        if not _OKX_CCY_CODE_RE.fullmatch(ccy):
+            continue
+        raw_eq_usd = detail.get("eqUsd")
+        if isinstance(raw_eq_usd, bool) or not isinstance(raw_eq_usd, (int, float, str)):
+            continue
+        try:
+            eq_usd = float(raw_eq_usd)
+        except ValueError:
+            continue
+        if not math.isfinite(eq_usd) or eq_usd < 0.0:
+            continue
+        kept[ccy.upper()] = kept.get(ccy.upper(), 0.0) + eq_usd
+    total = sum(kept.values())
+    if total <= 0.0:
+        return None
+    return {ccy: value / total for ccy, value in kept.items()}
+
+
+def _okx_ccy_price(details: object) -> dict[str, float] | None:
+    """Per-ccy live USD price of an OKX balance response (upper-case code -> summed ``eqUsd`` over
+    summed ``eq``). A detail counts only when its ``ccy`` fullmatches ``_OKX_CCY_CODE_RE`` and both
+    amounts parse to finite positive numbers; a coin with no such detail has no price (never a
+    guess). ``None`` when nothing is priced."""
+    if not isinstance(details, list):
+        return None
+    sums: dict[str, tuple[float, float]] = {}
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        ccy = str(detail.get("ccy") or "")
+        if not _OKX_CCY_CODE_RE.fullmatch(ccy):
+            continue
+        amounts: list[float] = []
+        for key in ("eq", "eqUsd"):
+            raw = detail.get(key)
+            if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+                break
+            try:
+                number = float(raw)
+            except ValueError:
+                break
+            if not math.isfinite(number) or number <= 0.0:
+                break
+            amounts.append(number)
+        if len(amounts) != 2:
+            continue
+        eq_sum, usd_sum = sums.get(ccy.upper(), (0.0, 0.0))
+        sums[ccy.upper()] = (eq_sum + amounts[0], usd_sum + amounts[1])
+    prices = {ccy: usd / eq for ccy, (eq, usd) in sums.items()}
+    return prices or None
+
+
 async def fetch_okx_total_equity_and_upl_usd(
     exchange: ccxt.Exchange,
 ) -> tuple[float | None, float, bool]:
@@ -3891,7 +4139,13 @@ async def fetch_okx_total_equity_and_upl_usd(
     so the caller can DISTINGUISH a garbled/absent ``upl`` from a genuine 0.
     ``upl`` is read from the SAME ``data[0]`` object as ``totalEq`` — the mock is
     awaited exactly once (no second fetch).
+
+    Phase 256: as a side channel (return value unchanged) the per-currency equity share of the
+    same ``details`` is recorded for ``get_and_clear_last_okx_ccy_share``; it is reset here on
+    every call, so a failed read leaves ``None`` rather than the previous read's shares.
     """
+    _LAST_OKX_CCY_SHARE.set(None)
+    _LAST_OKX_CCY_PRICE.set(None)
     try:
         raw = await exchange.private_get_account_balance()
     except Exception as e:  # noqa: BLE001
@@ -3906,6 +4160,9 @@ async def fetch_okx_total_equity_and_upl_usd(
     if not data or not isinstance(data, list):
         return None, 0.0, False
     row = data[0] if isinstance(data[0], dict) else {}
+    # Phase 256: the live per-ccy share of this SAME response, for the unit-switch derive.
+    _LAST_OKX_CCY_SHARE.set(_okx_ccy_share(row.get("details")))
+    _LAST_OKX_CCY_PRICE.set(_okx_ccy_price(row.get("details")))
     upl, upl_unreadable = _okx_upl_or_zero(row.get("upl"))
     raw_eq = row.get("totalEq")
     if raw_eq is None:

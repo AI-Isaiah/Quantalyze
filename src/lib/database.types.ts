@@ -2941,6 +2941,7 @@ export type Database = {
           strategy_id: string
           trade_metrics: Json | null
           trades_fetched_at: string | null
+          unit_segments: Json | null
           volatility: number | null
           volume_metrics: Json | null
         }
@@ -2979,6 +2980,7 @@ export type Database = {
           strategy_id: string
           trade_metrics?: Json | null
           trades_fetched_at?: string | null
+          unit_segments?: Json | null
           volatility?: number | null
           volume_metrics?: Json | null
         }
@@ -3017,6 +3019,7 @@ export type Database = {
           strategy_id?: string
           trade_metrics?: Json | null
           trades_fetched_at?: string | null
+          unit_segments?: Json | null
           volatility?: number | null
           volume_metrics?: Json | null
         }

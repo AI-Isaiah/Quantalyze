@@ -146,13 +146,19 @@ def _strict_iso_day(raw: Any, what: str) -> str:
 
 def read_native_key_inputs(payload: Mapping[str, Any]) -> NativeKeyInputs | None:
     """The native-unit fields of a ``key_inputs`` payload, or ``None`` for a USD key (no
-    ``native_unit``). The JSONB is worker-written but untrusted (T-164.6.6.2.1-23): a present
+    ``native_unit`` and no ``unpriced_days`` / ``segment_terminals``; Phase 256 plan 09: a key that
+    switched from USDT into a coin carries those two without a unit). The JSONB is worker-written but untrusted (T-164.6.6.2.1-23): a present
     but malformed field raises ``ValueError`` / ``TypeError`` so the caller can leave the key
     OUT of the book by name, never read a guess as a price."""
     unit = payload.get("native_unit")
-    if unit is None:
+    if unit is None and not (payload.get("unpriced_days") or payload.get("segment_terminals")):
         return None
-    if not isinstance(unit, str) or not unit:
+    # Phase 256 plan 09: a key that moved from USDT into a coin stores its whole-history USD series
+    # with NO ``native_unit`` (nothing may price it twice) and still names the coin days a missing
+    # close left out, plus the USD level on each day before such a hole. Those two fields are
+    # honoured for any key that carries them; a native-unit key is validated and read exactly as
+    # before, and a USD key with neither field is still ``None``.
+    if unit is not None and (not isinstance(unit, str) or not unit):
         raise TypeError("key_inputs native_unit: not a unit code")
     through = payload.get("priced_through")
     close_day = payload.get("unpriced_close_day")

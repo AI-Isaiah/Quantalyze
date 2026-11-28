@@ -2228,11 +2228,19 @@ class TestRealizedReadRefusedByName:
         envelope and is retried with no resume."""
         from services.exchange import DAILY_PNL_READ_DEADLINE_S
 
+        # Phase 256 plan 09: an OKX key derive is the one key-mode caller that also hands the read
+        # the unit-switch resolver (the keyword is passed ONLY when there is one); every other
+        # venue's call is byte-identical to before.
         seen = await _refused_key_derive("okx", {})
-        assert seen["realized_kwargs"] == {  # type: ignore[comparison-overlap]
-            "since_ms": None,
-            "read_deadline_s": DAILY_PNL_READ_DEADLINE_S,
-        }
+        kwargs = dict(seen["realized_kwargs"])  # type: ignore[call-overload]
+        assert callable(kwargs.pop("unit_switch"))
+        assert kwargs == {"since_ms": None, "read_deadline_s": DAILY_PNL_READ_DEADLINE_S}
+        for other in ("bybit", "binance"):
+            seen_other = await _refused_key_derive(other, {})
+            assert seen_other["realized_kwargs"] == {  # type: ignore[comparison-overlap]
+                "since_ms": None,
+                "read_deadline_s": DAILY_PNL_READ_DEADLINE_S,
+            }, other
 
     @pytest.mark.asyncio
     async def test_okx_truncation_refuses_the_key_and_writes_only_the_marker(self) -> None:

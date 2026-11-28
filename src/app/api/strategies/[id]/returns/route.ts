@@ -67,6 +67,7 @@ import {
   isNativeLegUnpriced,
 } from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { parseUnitSwitch } from "@/lib/factsheet/unit-segments";
 import { readTinyBaseDays } from "@/lib/tiny-base-flag";
 import { deriveEmptySeriesState, isComputedAnalytics, type SeriesState } from "@/lib/closed-sets";
 import { analyticsHold } from "@/lib/analytics-hold";
@@ -207,6 +208,16 @@ export interface ReturnsResponse {
    * the 404 existence-oracle already gates.
    */
   returns_unit: string | null;
+  /**
+   * Phase 256 plan 08 (D-05, UI-SPEC "Surface rules") - present ONLY for a strategy that moved from
+   * USD into a coin: the three closed fields of `data_quality_flags.unit_switch`, strictly parsed
+   * (`parseUnitSwitch`), so a client composes the switch sentence from the same days the derive
+   * stored. `returns_unit` stays `null` for such a strategy and `daily_returns` stays the headline
+   * USD series: nothing here is a unit to convert from. ABSENT (no key) for every other strategy, so
+   * an unswitched response is byte-identical to the one before this field existed. Read from the
+   * EFFECTIVE flags (`effectiveFlags`), the generation of the numbers the response carries.
+   */
+  unit_switch?: { coin: string; last_usd_day: string; first_coin_return_day: string };
   /**
    * Phase 164.6.6.2 (D-18, D-22, D-23) — for a native-unit strategy, `daily_returns`
    * converted to USD by `convertNativeReturnsToUsd` on the stored BTC closes (the
@@ -589,7 +600,7 @@ export async function GET(
       // Phase 237: from the EFFECTIVE flags (see `effectiveFlags` above), so a held row in the
       // prestamp window reports the last success's composite, unit and tiny-base days.
       const dqf = effectiveFlags as
-        | { composite?: unknown; native_unit?: unknown; tiny_base_days?: unknown }
+        | { composite?: unknown; native_unit?: unknown; tiny_base_days?: unknown; unit_switch?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
@@ -600,6 +611,9 @@ export async function GET(
       // failed or empty price read leaves `daily_returns_usd` as `[]` (native but
       // unpriced), never `null` and never the raw BTC series.
       const returns_unit = parseReturnsUnit(dqf?.native_unit);
+      // Phase 256 plan 08: the switch, strictly parsed. It is NOT a unit: `returns_unit` stays null and
+      // `daily_returns_usd` stays null for a switched strategy (the series is already USD).
+      const unitSwitch = parseUnitSwitch(dqf?.unit_switch);
       let daily_returns_usd: DailyPoint[] | null = null;
       let native_unpriced = false;
       if (returns_unit !== null) {
@@ -660,6 +674,15 @@ export async function GET(
         figure_unreadable: figureUnreadable,
         figure_withheld_by: analyticsRankable && record.withheldBy ? record.withheldBy : null,
         returns_unit,
+        ...(unitSwitch === null
+          ? {}
+          : {
+              unit_switch: {
+                coin: unitSwitch.toUnit,
+                last_usd_day: unitSwitch.lastFromDay,
+                first_coin_return_day: unitSwitch.firstToDay,
+              },
+            }),
         daily_returns_usd,
         native_unpriced,
         tiny_base_days,
