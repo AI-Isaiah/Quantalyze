@@ -392,6 +392,18 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-11-27: one Phase 243 DBBACKSTOP plan 10 row. The fence function lives in
+  // 20261127220100_api_keys_insert_fence.sql, which lands before supabase/schema/baseline.sql
+  // knows it, so the migration snapshot has the name and the baseline does not.
+  {
+    name: "enforce_api_keys_insert_writer_fence",
+    side: "snapshot-only",
+    capturedAt: "2026-11-27",
+    clearedBy:
+      "a re-dump of supabase/schema/baseline.sql taken after 20261127220100_api_keys_insert_fence.sql applies to PROD",
+    reason:
+      "Phase 243 DBBACKSTOP plan 10 added the api_keys insert fence function in 20261127220100_api_keys_insert_fence.sql; the committed baseline predates that migration.",
+  },
   // ⭐ 2026-11-27: the two Phase 243 DBBACKSTOP plan 05 rows (`insert_api_key` and
   // `enforce_api_keys_user_id_immutable`, `snapshot-only`, captured 2026-11-27) are DELETED:
   // their clearing condition, a re-dump taken after

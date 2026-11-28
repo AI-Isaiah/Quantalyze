@@ -156,7 +156,7 @@
 -- and is scored NO-IDENTITY rather than RED (MEASURED 2026-09-04). It needs
 -- 10-fixture-strategies-rls-baseline.sql ahead of it for the three empty
 -- relations it writes policies for.
--- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql"]}
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/05-fixture-wizard-composite.sql","scripts/pg-lane/fixtures/10-fixture-strategies-rls-baseline.sql","scripts/pg-lane/fixtures/11-fixture-api-keys-created-at.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/21-fixture-api-keys-credential-columns.sql","supabase/migrations/20260405061912_rls_policies.sql","supabase/migrations/20260602190000_f6_wizard_session_idempotency.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710180000_wizard_composite.sql","supabase/migrations/20260810120000_lock_api_keys_exchange_column.sql","supabase/migrations/20260811210000_api_keys_attested_venue.sql","supabase/migrations/20260812083206_api_keys_venue_account_id.sql","supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql","supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql","scripts/pg-lane/fixtures/25-fixture-api-keys-e2e-census-seed.sql","supabase/migrations/20260823120000_revoke_api_keys_insert.sql","supabase/migrations/20261123180000_api_keys_venue_server.sql","supabase/migrations/20261127220100_api_keys_insert_fence.sql"]}
 
 BEGIN;
 
@@ -187,6 +187,7 @@ DECLARE
   -- migration lands, because 5c's whole premise is that the client INSERT path
   -- stays open.
   v_insert_revoked boolean;
+  v_fence_enabled text;
   v_seen       text;
   v_after      text;
   v_attested   text;
@@ -604,14 +605,25 @@ BEGIN
     --            (`occurrence-mismatch`, MEASURED 2026-09-04); a `\n` inside
     --            the needle cannot appear in a one-line comment.
     -- RED-UNDER-M: {"arm":"5c scrub half","apply":[{"kind":"edit","file":"supabase/tests/test_api_keys_exchange_not_user_writable.sql","find":"      RESET ROLE;\n      EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';","replace":"      RESET ROLE;\n      EXECUTE 'REVOKE INSERT ON public.api_keys FROM anon';","occurrences":1}]}
+    -- ⭐ PHASE 243 DBBACKSTOP plan 10 (DBACC-02). The insert fence
+    -- (20261127220100, last in this file's apply list) refuses EVERY client-role INSERT
+    -- on api_keys, so the scrub trigger's non-privileged branch can no longer be
+    -- reached by a real INSERT unless the fence is out of the way. That branch is
+    -- defence in depth behind the fence and must stay covered under a real client-role
+    -- INSERT, so the fence is DISABLED for this probe only and ENABLED again beside the
+    -- grant withdrawal. The whole file runs inside BEGIN ... ROLLBACK, so neither
+    -- statement outlives the test. The trigger names in the two statements are literal
+    -- on purpose: arm `5c fence restored` below and its twin read them.
     IF v_insert_revoked THEN
       EXECUTE 'GRANT INSERT ON public.api_keys TO authenticated';
+      ALTER TABLE public.api_keys DISABLE TRIGGER api_keys_insert_writer_fence;
       SET LOCAL ROLE authenticated;
       DELETE FROM public.api_keys WHERE id = v_key5;
       INSERT INTO public.api_keys (id, user_id, exchange, label, api_key_encrypted, attested_venue)
       VALUES (v_key5, v_uid, 'mt5', 'cr01-roundtrip', 'x', 'mt5');
       RESET ROLE;
       EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';
+      ALTER TABLE public.api_keys ENABLE TRIGGER api_keys_insert_writer_fence;
 
       -- Anti-vacuity: the temporary grant must actually have been withdrawn
       -- again, or every later assertion in this file runs against a database
@@ -622,6 +634,28 @@ BEGIN
       END IF;
       RAISE NOTICE 'Assertion 5c scrub half: INSERT briefly re-granted inside the rolled-back transaction so the trigger stays under a real client-role INSERT post-REVOKE; grant withdrawn again and verified.';
     END IF;
+
+    -- ---- (5c fence restored) the fence this probe disabled is ENABLED again --------
+    -- Phase 243 plan 10. The scrub-half block above disables the insert fence for its own
+    -- rolled-back probe. A fence left disabled would make every arm below, and every
+    -- later statement of this transaction, run against a database more permissive than
+    -- the one under test, with nothing failing. tgenabled 'O' = enabled on origin.
+    -- RED-UNDER: point the ENABLE statement at the wrong trigger
+    --            (api_keys_scrub_attested_venue), so the fence stays disabled.
+    --            ⚠️ The needle spans the preceding `EXECUTE 'REVOKE ...'` line because
+    --            the statement alone also names the fence in this twin's own JSON.
+    -- RED-UNDER-M: {"arm":"5c fence restored","apply":[{"kind":"edit","file":"supabase/tests/test_api_keys_exchange_not_user_writable.sql","find":"      EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';\n      ALTER TABLE public.api_keys ENABLE TRIGGER api_keys_insert_writer_fence;","replace":"      EXECUTE 'REVOKE INSERT ON public.api_keys FROM authenticated';\n      ALTER TABLE public.api_keys ENABLE TRIGGER api_keys_scrub_attested_venue;","occurrences":1}]}
+    SELECT t.tgenabled::text INTO v_fence_enabled
+      FROM pg_trigger t
+     WHERE t.tgrelid = 'public.api_keys'::regclass
+       AND t.tgname  = 'api_keys_insert_writer_fence'
+       AND NOT t.tgisinternal;
+    IF v_fence_enabled IS DISTINCT FROM 'O' THEN
+      RAISE EXCEPTION
+        'TEST FAILED (5c fence restored): api_keys_insert_writer_fence has tgenabled % after the scrub-half probe (expected O = enabled on origin). The probe disabled the fence and did not enable it again, so everything after it runs against a fence that refuses nobody.',
+        COALESCE(v_fence_enabled, '<missing>');
+    END IF;
+    RAISE NOTICE 'Assertion 5c fence restored: the insert fence is enabled again after the scrub-half probe.';
 
     IF TRUE THEN
 
