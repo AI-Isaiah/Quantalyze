@@ -86,8 +86,8 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 |---|---|
 | Taken | 2026-11-27 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `46057037202`) |
-| sha256 | `ab1b17201d5891fa40e7ac86715c4c7c4291f1ff0d0067b000f635c40d66c946` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `46068622836`) |
+| sha256 | `89693c203bdd9490c75efa2c851e5699a97cbc98628284d20e6618006774bb51` |
 | Shape | 73 tables, 155 policies, 150 function statements (148 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,26 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-11-27 — automated re-dump after Supabase Migrate run 46068622836
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `46068622836`, after that run's `apply` job applied merge `9c5c414b` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261127220000_strategy_analytics_anon_column_revoke.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-11-27 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 73 → 73, policies 155 → 155, function statements 150 → 150, distinct function names 148 → 148 |
+| Data statements | 0 → 0 |
+| sha256 | `ab1b1720…` → `89693c20…` |
+| Currency gate | `baseline-currency: carried=349 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-11-27 — automated re-dump after Supabase Migrate run 46057037202
 
@@ -1651,6 +1671,12 @@ one `CREATE EXTENSION` short, so the completeness check refuses it, and every la
 merge's re-dump refuses too, until a hand re-dump through `## Regenerating` commits a dump without it.
 The manual procedure above REMAINS the fallback, for a refusal that needs a human reading of the
 dump, or when the automation is unavailable.
+
+⛔ **CORRECTED 2026-11-27 (Phase 258 REDUMPDIRECT): the re-dump no longer goes through a pull request.** The AUTOMATED paragraph above is kept as lineage; where it says a bot branch, a pull request, a reviewer, **Approve workflows to run** or a human merge, read this paragraph instead. Founder ruling, 2026-11-27: "Push to main directly".
+After a succeeded `redump-dump` that found a changed dump, the `redump-push` job runs `scripts/baseline-redump.mjs --compose-and-push`. It composes the same six-path commit onto current `main` and pushes it straight to `main` with the job token. There is no bot branch, no pull request, no click and no human merge. A push refused because `main` moved is retried by re-composing onto the fresh `main`, three attempts at most. Any other refusal fails the job red.
+Every refusal listed above still refuses, and a refusal now reaches nowhere but a red job: nothing is pushed and nobody is asked. What verifies the bot commit runs before the push and is all automated. In `redump-dump` it is the five-class secret scan, the sha256-pinned gitleaks scan, the integrity gate, the shape gate (any data statement refuses the dump, so the content is schema only and never table rows) and the marker regeneration. In `redump-push` it is the compose-side re-scan of the same dump, the offline currency, content-drift, staleness and version-bump gates, the staged-set judge and the skip-token judge.
+A push made with the workflow token starts no workflow, so the bot commit on `main` carries no CI run. That is its normal shape, by construction, and it is not the skip-trailer failure `CLAUDE.md` describes. The full `ci.yml` and `sql-function-snapshot.yml` verdict on the re-dump tree arrives at the next push to `main`, and Railway deploys the check-less commit.
+⚠️ The D-33 recorded limit, now wider: a dump truncated after its `CREATE EXTENSION` lines is still not refused, and with no reviewer it now reaches `main` itself, where the sentence above saying it reaches only a pull request no longer holds. The next push's CI and the next re-dump are its first readers, and the remedy is a hand re-dump through the procedure above.
 
 ⚠️ **SP-M03 — the CLAIM used to exceed the COMMAND.** The certification above names five
 classes (DSN, `\connect`, `ALTER DATABASE`, JWT, project ref); this grep matched only three

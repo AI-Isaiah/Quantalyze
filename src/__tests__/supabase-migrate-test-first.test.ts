@@ -58,7 +58,7 @@ const TEST_JOB = "apply-test";
 const VERDICT_JOB = "apply-test-verdict";
 const DIVERGENCE_JOB = "prod-credential-divergence-verdict";
 const REDUMP_DUMP_JOB = "redump-dump";
-const REDUMP_PR_JOB = "redump-pr";
+const REDUMP_PUSH_JOB = "redump-push";
 const APPLY_JOB = "apply";
 
 /**
@@ -316,6 +316,11 @@ function scannableTestJob(text: string): string {
  * (secret-shaped text, a gitleaks finding, a truncated dump) exists to be RED before a dump
  * reaches a public PR, and `redump-pr`'s bot-branch refusal exists to be RED before a human
  * commit is force-pushed away. The "all four jobs" heading above is kept as lineage.
+ *
+ * ⛔ CORRECTED 2026-11-27 (Phase 258): the write job is now `redump-push`, which pushes one bot
+ * commit straight to main with no PR. Its refusals (a refused push with main unmoved, three
+ * refused pushes, any compose refusal) exist to be RED before anything reaches `main`, so the
+ * roster still scans it. The bot-branch refusal named above is gone with the bot branch.
  */
 const SCANNED_JOBS = [
   GUARD_JOB,
@@ -323,7 +328,7 @@ const SCANNED_JOBS = [
   VERDICT_JOB,
   DIVERGENCE_JOB,
   REDUMP_DUMP_JOB,
-  REDUMP_PR_JOB,
+  REDUMP_PUSH_JOB,
 ] as const;
 
 function scannableJob(text: string, job: string): string {

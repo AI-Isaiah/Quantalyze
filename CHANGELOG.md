@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.133.111.1] - 2026-11-28 — records: Phase 258 REDUMPDIRECT closed (verification passed)
+
+### Changed
+- Phase 258 records land on `main`: CONTEXT with the founder ruling "Push to main directly", the deviation record overriding 164.9.5 D-13 and D-23, and what verifies the bot commit; DISCUSSION-LOG, RESEARCH, PATTERNS, VALIDATION, three PLANs and SUMMARYs, REVIEW (one MEDIUM, booked as `[258-PUSH-LANDED-MISREPORT]`), SECURITY (SECURED, 0 open threats) and VERIFICATION (passed 6/6).
+- ROADMAP: Phase 258 booked in v1.23 HARDEN, ticked complete with its three plans and Progress row; STATE records the booking and the close.
+
+### Notes
+- Records only, no code. The code shipped as v0.133.111.0 (#1408). No `TODOS.md` entry is closed.
+- The live direct push to `main` is still unproven: the first migration merge after #1408 runs it. If that `redump-push` run fails, Phase 258 reopens.
+
+## [0.133.111.0] - 2026-11-28 — Phase 258 REDUMPDIRECT: after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval
+
+Founder ruling 2026-11-27, verbatim answer to "Bot token / Claude allow rule / Push to main directly": "Push to main directly". Until now the re-dump opened a bot PR with the job token, so GitHub held its CI for a human to approve, and a human then merged it. This overrides Phase 164.9.5 decisions D-13 (a human reviews and merges every re-dump) and D-23 (the bot PR's runs wait for approval). D-11, D-12 and D-24 retire with the bot branch. The override and its reason are recorded in `258-CONTEXT.md` and the ROADMAP.
+
+### Changed
+- `.github/workflows/supabase-migrate.yml`: job `redump-pr` is now `redump-push`, with `permissions: contents: write` only (`pull-requests: write` dropped). Its last step runs `node scripts/baseline-redump.mjs --compose-and-push --in "${RUNNER_TEMP}/redump-in"`. The workflow no longer has a live `git push` or `gh pr` line. `redump-dump` is unchanged, except that its no-op notice no longer looks up a bot PR.
+- `scripts/baseline-redump.mjs`: new mode `--compose-and-push` (`composeAndPush`). It composes the same six-path commit as before (`baseline.sql`, `baseline-carried-migrations.txt`, `BASELINE.md`, the VERSION and package.json patch bump, and its CHANGELOG entry) onto the current `main`, then pushes it with one frozen argv, `PUSH_ARGV`. The push targets `HEAD:refs/heads/main` and is plain: no force, no lease, no `+`. D-25's "one hard-coded refspec" is kept, retargeted.
+- A refused push is retried by re-composing, never by rebase or force. The job fetches `main` anonymously (`fetchMainTip`). If `main` moved, it hard-resets to the fresh tip and re-composes, which re-reads VERSION and re-picks the next patch version against the fresh `main`, then pushes again, `MAX_PUSH_ATTEMPTS = 3` attempts in all. If `main` did not move, the refusal is not a race and the job fails at once, naming the cause.
+- The job token reaches only the push child: `takePushToken(process.env)` is the first statement of the mode, so no gate child inherits it. An empty token is refused before anything is composed.
+- The skip-token judge (D-14) now runs before every commit, retries included, over the commit message, the CHANGELOG entry and the `### Regenerated` section.
+- The text the bot writes names `redump-push` and says the commit went straight to `main`. `composePrTitle` is renamed `composeCommitTitle`.
+
+### Removed
+- Modes `--check-bot-branch`, `--open-or-edit-pr` and the standalone `--compose`; they now exit 1 as unknown arguments. The bot-branch and PR machinery: `BOT_BRANCH`, `DEFAULT_REPO`, `findPullRefsForSha`, `botBranchTip`, `judgeForeignCommits`, `judgeOpenBotPrs`, `openBotPrsCurlArgv`, `checkBotBranch`, `buildPrArgv`, `openOrEditPr`, `composePrBody`, `botPrStatus`.
+- 41 self-test arms that proved only that machinery: 1 PR-body file arm, 3 bot-PR status notice arms, 8 PR-body presence arms, 17 bot-branch check arms and 12 open-or-edit-PR arms.
+
+### Tests
+- 16 new self-test arms: `PUSH_ARGV` frozen, `takePushToken`, a real push to a local bare origin on the first attempt with VERSION equal to package.json as a 4-digit string, empty token, race then success, not a race, retries exhausted, re-compose no-op, newer marker, migration merge in the window, fetch failure, remote name, no gate child sees the token across a retry, the skip token, and the two bot-text arms. `EXPECTED_ASSERTIONS` 226 -> 201 (210 with gitleaks), measured.
+- `baseline-redump-wiring.test.ts` pins zero live `git push` and zero `gh pr` in the workflow, `PUSH_ARGV` as imported, the script's single push literal and spread, `permissions` exactly `{contents: write}`, one `GH_TOKEN` env line, and the token taken first in `main()`. Each pin carries calibration mutants, and each was neutered, seen RED, restored from a byte backup and seen GREEN. `supabase-migrate-test-first.test.ts` follows the job rename.
+- The race arms clone their bare origin with `-b main`, because ubuntu runners leave `init.defaultBranch` unset, so a plain clone of a bare repo holding only `main` checks out nothing. Six arms were red on Linux (git 2.39, reproduced in a `node:22` container) and green on macOS. The wiring mutant that stands for a raw token read no longer spells a literal `process.env` key, so the env-manifest contract does not count it as an app read.
+
+### Notes
+- What verifies the bot commit: a push made with the job token starts no workflow, so the bot commit on `main` carries zero Actions runs by construction. That is not the skip-trailer failure. Everything that verifies it runs before the push. In `redump-dump`: the five-class secret scan, the sha256-pinned gitleaks scan, the integrity gate, the shape gate (it refuses any data statement, so the content is schema only) and the marker. In the push job: the compose-side re-scan, the currency, content-drift and staleness gates, the version-bump mirror, the six-path staged-set judge and the skip-token judge.
+- Accepted residuals, recorded rather than fixed. (1) The full `ci.yml` and `sql-function-snapshot.yml` verdict on a re-dump tree arrives only at the next push. A re-dump that breaks a test (precedents #1398, `NAME_SET_RATCHET`; #1406, the MT5 parity whole-row slices) lands red and is fixed by an ordinary PR. (2) The Railway API service deploys the check-less bot commit. (3) The next push's predecessor verdict reads `absent`, so it runs the FULL `sql-mutation` corpus. (4) The D-33 limit is wider: a dump truncated after its `CREATE EXTENSION` lines is not refused, and it now reaches `main` with no reviewer.
+- Code review: one MEDIUM (WR-01, not user-facing) booked as `[258-PUSH-LANDED-MISREPORT]` in `TODOS.md`, with no fixer round under the repo's review rule. Silent-failure hunt: clean. Security audit: SECURED, 0 open threats.
+- The live push is unproven until the first real `supabase-migrate.yml` run on `main` after this merges, normally the next migration merge.
+
+## [0.133.110.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 9c5c414b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46068622836`, after the PROD apply of merge `9c5c414b`: sha256 `ab1b1720…` → `89693c20…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 150 → 150, distinct function names 148 → 148, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127220000_strategy_analytics_anon_column_revoke.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.110.0 → 0.133.110.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=349 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46068622836` succeeded, and this entry was composed by the `redump-pr` job. Run `46068622836` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.110.0] - 2026-11-27 — Phase 243 DBBACKSTOP PR-B: every api_keys writer goes through insert_api_key, and anon loses metrics_json_by_basis
 
 ### Changed
