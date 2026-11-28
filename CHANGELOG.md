@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.133.118.0] - 2026-11-28 — Phase 257 SEEDHOLD: a down re-read bound can no longer move a strategy's seed past a span nobody read, and a Bybit fills read that hits its deadline keeps what it read
+
+### Fixed
+- **A failed re-read bound no longer lets another writer hide an unread span (`[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`, closed and deleted from `TODOS.md`).** Before, if `set_strategy_fills_reread_bound` was down for a whole sync run (both its provisional and its epilogue write failed), the run skipped its fills read. A daily row then stored by `cron_sync`, `/fetch-trades` or another writer moved the next run's seed past the span, and that run's clean read cleared `phase2_fill_ingestion_failed`. Now the run records its seed as `seed_hold_ms` on its own `compute_jobs` row, through the new fenced RPC `set_compute_job_seed_hold`. The next run lowers its seed to the mark on the most recently claimed `done` `sync_trades` row, or on its own re-claimed row. Founder ruling 2026-11-28: "Job's private record (Recommended)". Measured at HEAD before the fix: 7 arms RED (all four venues on a set column with no stored fill, and OKX, Bybit and Deribit on a first sync), all GREEN after.
+- **A Bybit fills read that hits its deadline keeps what it read (`[255-BYBIT-DEADLINE-NO-PROGRESS]`, closed and deleted from `TODOS.md`).** Before, the read was all-or-nothing: each refusal stored nothing, lowered the bound by the 1 h overlap, and the next run walked the same span again. Now `_fetch_raw_trades_bybit` hands back the 7-day windows whose paging ended naturally, never a partly read one, together with the end of the last such window. The worker persists them, stamps the newest persisted fill, and moves the bound to that end. When no window completed, the bound holds at the seed and does not creep. A persist failure still falls back to the walk start. The run stays flagged `phase2_fill_ingestion_failed`, so a stall never reads as clean.
+- **Review fixes before merge:**
+  - WR-01: a malformed stored mark drops the seed to the venue reach anchor, an over-fetch rather than a skipped span.
+  - WR-02: the hold is read from the row claimed last (`claimed_at`), not the row created last, so an older row's retry cannot be hidden by a newer row that ended `done` without a mark.
+  - WR-R2-01: a failed read of the hold fails the attempt as transient before anything is written. A `done` row can therefore never bury an earlier mark, and a healthy strategy is never pushed into a full-reach re-read by one blip.
+
+### Added
+- **Migration `20261128120000_compute_job_seed_hold.sql`, with a manual rollback under `supabase/migrations/down/`.** It adds `public.set_compute_job_seed_hold(uuid, uuid, bigint)`.
+  - It merges `seed_hold_ms` into the running job's own metadata in a single statement.
+  - It is fenced on an equal, non-NULL claim token and `status = 'running'`.
+  - SECURITY DEFINER, pinned search_path, EXECUTE for service_role only, with a verify block that reads only the catalogue.
+  - migration-reviewer and rls-policy-auditor: no MEDIUM+ finding.
+- `services/trade_resume.py`: `SEED_HOLD_KEY`, `parse_seed_hold`, `load_strategy_seed_hold`. The reader reports a read error separately from a malformed mark.
+
+### Changed
+- **`BYBIT_SYNC_FILLS_READ_DEADLINE_S = 420.0`: the Bybit sync read gets its own budget,** so the persist after a deadline stop fits inside the 900 s handler. Worst case `(1 + 4r) x 420 + 25 <= 900`: a 119 s margin at a round trip r = 0.2 s, breaking even at about 0.27 s. r is unmeasured. The handler cap is not raised.
+- **`scripts/dump-sql-functions.ts`:** the Phase 243 plan 10 `enforce_api_keys_insert_writer_fence` NAME_SET_RATCHET row is deleted. The gate reported it `ratchet-stale` once main's baseline re-dump landed.
+
+### Tests
+- **`analytics-service/tests/test_seedhold_bound.py`** (new):
+  - the SC-1 two-run matrix across four venues and three column states;
+  - hand-off arms A to D, the retry arms, and the two-row `claimed_at` arm;
+  - 7 Bybit deadline arms driving the real reader, plus the budget margin pin;
+  - mechanism arms with a Python-to-SQL parity pin.
+- **PROOF-01:** neuters B1-B8, H1-H8 and P1-P3 each went RED on their named arm, restored from a byte backup (`cp`, `cmp`) and went GREEN.
+- **`supabase/tests/test_compute_job_seed_hold.sql`:** 9 arms, each with a mutation twin.
+- **Census moves, re-measured after rebasing on Phase 243 plan 10:**
+  - `FILES_FLOOR` 101 -> 102 and `ARMS_FLOOR` 1134 -> 1143;
+  - `COMPARED_FLOOR` 151 -> 152;
+  - parser steps 1258 -> 1266.
+- **Dated intent changes in existing suites:**
+  - `test_nullanchor_bound.py`: the Bybit budget case;
+  - `test_okxtrades_cursor.py`: `_run_job` gains `expect_outcome`, defaulting to the old assertion.
+- **Full analytics suite:** 17991 passed, 107 skipped, 2 xfailed, coverage 95.08%. mypy strict: clean.
+
+### Notes
+- **Booked residual (MEDIUM, in `TODOS.md`): `[257-SEEDHOLD-DOUBLE-FAULT]`.** It fires when the bound RPC is down for a whole run and the mark is then lost: either the mark write fails too, or a run that wrote its mark ends `failed_final`. In that case a set column with no stored fill can still be seeded past. Two strict `RESIDUAL_DOUBLE_FAULT` arms pin it.
+- **LOW or Info, recorded in the phase review only, not booked:**
+  - the mark ageing out with the 30-day `done` reaper (it matters only if no sync succeeds for 30 days);
+  - a handler cancel landing mid-persist above the round-trip break-even (no span lost, the job fails loudly);
+  - the fee-currency flags of a deadline stop are discarded;
+  - a short read outage can end a sync row `failed_final` until the next cron sync;
+  - Deribit's first sync passes `since_ms = -1` to a reader that ignores it.
+- **Deploy ordering:** the seed-hold write is best-effort. If the worker deploys before the PROD apply, the write fails and is logged at ERROR, and the run behaves as it did before this phase.
+- **After the PROD apply,** a baseline re-dump clears the `snapshot-only` ratchet row for `set_compute_job_seed_hold` and its `SNAPSHOT_MISSING` drift finding.
+- **Review:** gsd-code-reviewer and silent-failure-hunter, three rounds. Two fixer rounds closed WR-01, WR-02 and WR-R2-01; round 3 found nothing at MEDIUM or above. Security: 17 threats, 0 open.
 ## [0.133.117.0] - 2026-11-28 — Phase 259 OKXARCHIVEFILLS fix: OKX error 51604 on the archive status GET means "no request", so the fills read applies
 
 ### Fixed
