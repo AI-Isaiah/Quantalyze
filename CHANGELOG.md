@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.133.118.3] - 2026-11-28 — records: Phase 257 SEEDHOLD closed (verification passed), and its NAME_SET_RATCHET row deleted after the re-dump
+
+This is a records PR. Apart from one gate allowlist row, it changes no source, test, workflow or migration file.
+
+### Changed
+- **The Phase 257 SEEDHOLD directory lands on `main`.** It carries:
+  - CONTEXT, with the founder rulings of 2026-11-27 ("Fix both in a follow-up (Recommended)") and 2026-11-28 ("Job's private record (Recommended)") verbatim;
+  - DISCUSSION-LOG, RESEARCH, VALIDATION, the five PLANs and their SUMMARYs;
+  - REVIEW (three rounds) and REVIEW-FIX;
+  - SECURITY (SECURED, 0 open);
+  - VERIFICATION (`passed`; SC-4 was met at ship in v0.133.118.0).
+- **ROADMAP.**
+  - The Phase 257 goal and SC-1/SC-2 wording is re-checked against the TODOS entries and HEAD. One correction from research: one failed provisional bound write is repaired by the epilogue write, so the hole needs the RPC down for the whole run.
+  - The section carries the 2026-11-28 ruling and lists its five plans, ticked.
+  - The Progress row is set to Complete.
+- **STATE.** Last activity records the ship and the close.
+
+### Fixed
+- **`scripts/dump-sql-functions.ts`: the `set_compute_job_seed_hold` `snapshot-only` NAME_SET_RATCHET row is deleted.** The re-dump after the PROD apply (v0.133.118.1) put the function on both sides, so the SQL function snapshot gate reported the row `ratchet-stale`.
 ## [0.133.118.2] - 2026-11-28 — records: Phases 228 KEYANSWERS and 230 MT5NIGHTLY move from v1.22 TRUTH to v1.23 HARDEN
 
 This is a records PR. It has no source, test, workflow or migration change. It records the founder's ruling of 2026-11-27 in chat, verbatim: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". This PR does the move only. Closing v1.22 once 252 closes, and starting v1.23, are not done here. The version is the next free patch above main's v0.133.118.1 (the baseline re-dump after #1419). The change was first cut at v0.133.109.0, rebuilt on main at v0.133.115.2 and rebased again onto v0.133.118.1, after #1419, #1420, #1421 and #1423 merged. Every count below was re-measured from disk on that base and is unchanged, because those merges touched only v1.23 phases (256, 257, 259).
