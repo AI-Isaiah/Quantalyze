@@ -209,3 +209,14 @@ No gaps in the scope of this run. Wave 1 is implemented, wired across every surf
 
 _Verified: 2026-11-25_
 _Verifier: Claude (gsd-verifier)_
+
+### Post-deploy PROD reading 2026-11-28 (gap plans 09-10 shipped as v0.133.115.0, #1412, merge 28ede757b): NOT promoted
+
+Marker query first, named PRODUCTION; read-only except the two re-stitch enqueues through `enqueue_compute_job` (the product path `keys/sync` uses), 11:50Z. Main CI on 28ede757b green; the API `/health` reported 28ede757b at 11:42Z; the jobs ran on worker hosts that came up after the deploy. Worker redeploys from later merges (#1417, #1418) restarted both jobs once.
+
+| composite | final job | claimed -> done | cash pass members done | result |
+|---|---|---|---|---|
+| B | attempt 2 | 12:37:25Z -> 12:54:56Z | 12:48:57Z (about 11.5 min) | cash headline, `unsmoothed_options_book`, by-basis keys `[cash_settlement]` only |
+| A | attempt 3 (last) | 12:55:26Z -> 13:12:56Z | 13:06:58Z (about 11.5 min) | same |
+
+No figure moved (the top-level scalars are byte-identical to the 2026-11-08 values) and the headline stays withheld, which is the designed fail-safe state. No `smoothed_mtm` key was stored, so the cause is `smoothed_basis_not_computed`. Timing: the stitch budget is 1200 s; the cash pass used about 690 s, leaving about 510 s, and the smoothed pass gets 0.7 of that (about 357 s). Both jobs ended about 358 s after their cash pass finished, which matches the bounded smoothed-pass timeout degrade. The worker log line naming the cause has been requested via the coordinator; this reading rests on timing until it arrives. G252-MTM-PROMOTION stays open.
