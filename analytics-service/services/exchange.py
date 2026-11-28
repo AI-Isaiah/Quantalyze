@@ -3246,6 +3246,133 @@ async def _fetch_raw_trades_binance(
     return fills
 
 
+def _normalize_okx_fill(
+    fill: dict[str, Any],
+    inst_type: str,
+    exchange: Any | None,
+) -> dict[str, Any] | None:
+    """Normalise one OKX fill into the stored ``trades`` row, or ``None`` to drop it.
+
+    The single per-fill OKX normaliser, shared by the live ``fills-history`` pager
+    (``_fetch_raw_trades_okx_inst_type``) and the Phase 259 archive mapper, so an archive fill and
+    a ``fills-history`` fill of the same trade are built by the same code. It mutates ``fill``
+    (adds ``_ingest_ctval`` for a linear contract whose ctVal is not 1.0) exactly as the loop
+    always did, before ``raw_data`` is copied. ``exchange`` is only used for the
+    ``exchange.markets`` contract-size fallback and may be None.
+    """
+    _is_linear_type = inst_type in ("SWAP", "FUTURES")
+    ts_raw = fill.get("ts", "")
+    if ts_raw and ts_raw.isdigit():
+        ts_dt = datetime.fromtimestamp(
+            int(ts_raw) / 1000, tz=timezone.utc
+        )
+    else:
+        logger.error(
+            "OKX fill dropped: unparseable ts=%r (instId=%s, tradeId=%s)",
+            ts_raw, fill.get("instId"), fill.get("tradeId"),
+        )
+        return None
+
+    raw_inst_id = fill.get("instId", "")
+    symbol = normalize_symbol("okx", raw_inst_id)
+    side = fill.get("side", "").lower()
+    # H-0669 — parse the exchange's decimal STRINGS straight to
+    # Decimal (not via float) so price/quantity reach the DECIMAL
+    # columns with no IEEE-754 drift.
+    price_chk = _finite_positive_decimal(fill.get("fillPx", 0), label="OKX fillPx")
+    amount_chk = _finite_positive_decimal(fill.get("fillSz", 0), label="OKX fillSz")
+    if price_chk is None or amount_chk is None:
+        logger.error(
+            "OKX fill dropped: non-finite price=%r or amount=%r "
+            "(instId=%s, tradeId=%s)",
+            fill.get("fillPx"), fill.get("fillSz"),
+            fill.get("instId"), fill.get("tradeId"),
+        )
+        return None
+    price = price_chk
+    fill_sz_contracts = amount_chk
+    # NEW-C13-01: for linear SWAP/FUTURES, fillSz is in contracts,
+    # not base units. Normalize to base units at ingest.
+    # SPOT/MARGIN fill fillSz is already in base units.
+    # Inverse perps (BTC-USD-SWAP settle currency = USD, not USDT)
+    # are excluded — their cost semantics differ from linear.
+    if _is_linear_type:
+        _inst_parts = raw_inst_id.split("-")
+        _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
+        if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
+            _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
+            # H-0669 — keep the contract-size rescale exact (Decimal
+            # contracts × Decimal ctVal); a Decimal × float multiply
+            # would both raise TypeError and re-introduce drift.
+            amount = fill_sz_contracts * Decimal(str(_ct))
+            if _ct != 1.0:
+                fill.setdefault("_ingest_ctval", _ct)
+        else:
+            amount = fill_sz_contracts  # inverse — skip normalization
+    else:
+        amount = fill_sz_contracts  # SPOT/MARGIN: already base units
+
+    # H-0669 (red-team bypass-hunter) — the ctVal rescale above
+    # introduces a NEW Decimal that never passed _finite_decimal:
+    # _okx_contract_size_for_inst_id falls back to
+    # ``exchange.markets[...]['contractSize']`` for instIds outside
+    # the hardcoded table, and a malformed value there yields
+    # ``float('inf')`` → ``Decimal('Infinity')`` → an unguarded
+    # ``Infinity`` quantity/cost (which, now that the carrier is a
+    # string, json.dumps no longer rejects and PG casts as a corrupt
+    # non-finite NUMERIC). Re-validate the post-rescale amount so a
+    # single bad fill is DROPPED gracefully, matching the fillSz guard.
+    amount_chk = _finite_positive_decimal(
+        str(amount), label="OKX amount (post-ctVal rescale)"
+    )
+    if amount_chk is None:
+        logger.error(
+            "OKX fill dropped: non-finite/oversized amount after "
+            "contract-size rescale (instId=%s, tradeId=%s)",
+            fill.get("instId"), fill.get("tradeId"),
+        )
+        return None
+    amount = amount_chk
+
+    fee_chk = _finite_decimal(fill.get("fee", 0), label="OKX fee")
+    fee = fee_chk if fee_chk is not None else Decimal("0")
+    fee_currency = fill.get("feeCcy", "USDT")
+    _check_fee_currency_mismatch(
+        exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
+    )
+    is_maker = fill.get("execType", "") == "M"
+
+    raw_data = dict(fill)
+    pos_side_raw = fill.get("posSide")
+    position_direction: Literal["long", "short"] | None = None
+    if pos_side_raw in _OKX_VALID_POS_SIDES:
+        raw_data["posSide"] = pos_side_raw
+        # "net" = one-way mode; direction is implied by side, not
+        # by a hedge flag. Only "long"/"short" assign through.
+        if pos_side_raw != "net":
+            position_direction = pos_side_raw
+    elif pos_side_raw not in (None, ""):
+        logger.warning("invalid posSide value=%s, using None", pos_side_raw)
+
+    # dict(...) widens the FillRow (TypedDict) factory output to the
+    # plain dict the helper's return type holds.
+    return dict(_make_fill_dict(
+        exchange="okx",
+        symbol=symbol,
+        side=side,
+        price=price,
+        quantity=amount,
+        fee=fee,
+        fee_currency=fee_currency,
+        timestamp=ts_dt.isoformat(),
+        exchange_order_id=fill.get("ordId", ""),
+        exchange_fill_id=fill.get("tradeId", ""),
+        is_maker=is_maker,
+        raw_data=raw_data,
+        position_direction=position_direction,
+    ))
+
+
 async def _fetch_raw_trades_okx_inst_type(
     exchange: ccxt.Exchange,
     since_ms: int | None,
@@ -3286,116 +3413,10 @@ async def _fetch_raw_trades_okx_inst_type(
                 break
 
             for fill in data:
-                ts_raw = fill.get("ts", "")
-                if ts_raw and ts_raw.isdigit():
-                    ts_dt = datetime.fromtimestamp(
-                        int(ts_raw) / 1000, tz=timezone.utc
-                    )
-                else:
-                    logger.error(
-                        "OKX fill dropped: unparseable ts=%r (instId=%s, tradeId=%s)",
-                        ts_raw, fill.get("instId"), fill.get("tradeId"),
-                    )
-                    continue
-
-                raw_inst_id = fill.get("instId", "")
-                symbol = normalize_symbol("okx", raw_inst_id)
-                side = fill.get("side", "").lower()
-                # H-0669 — parse the exchange's decimal STRINGS straight to
-                # Decimal (not via float) so price/quantity reach the DECIMAL
-                # columns with no IEEE-754 drift.
-                price_chk = _finite_positive_decimal(fill.get("fillPx", 0), label="OKX fillPx")
-                amount_chk = _finite_positive_decimal(fill.get("fillSz", 0), label="OKX fillSz")
-                if price_chk is None or amount_chk is None:
-                    logger.error(
-                        "OKX fill dropped: non-finite price=%r or amount=%r "
-                        "(instId=%s, tradeId=%s)",
-                        fill.get("fillPx"), fill.get("fillSz"),
-                        fill.get("instId"), fill.get("tradeId"),
-                    )
-                    continue
-                price = price_chk
-                fill_sz_contracts = amount_chk
-                # NEW-C13-01: for linear SWAP/FUTURES, fillSz is in contracts,
-                # not base units. Normalize to base units at ingest.
-                # SPOT/MARGIN fill fillSz is already in base units.
-                # Inverse perps (BTC-USD-SWAP settle currency = USD, not USDT)
-                # are excluded — their cost semantics differ from linear.
-                if _is_linear_type:
-                    _inst_parts = raw_inst_id.split("-")
-                    _settle = _inst_parts[1].upper() if len(_inst_parts) >= 2 else ""
-                    if _settle in ("USDT", "USDC", "BUSD", "USDE", "PYUSD", "USDB"):
-                        _ct = _okx_contract_size_for_inst_id(raw_inst_id, exchange)
-                        # H-0669 — keep the contract-size rescale exact (Decimal
-                        # contracts × Decimal ctVal); a Decimal × float multiply
-                        # would both raise TypeError and re-introduce drift.
-                        amount = fill_sz_contracts * Decimal(str(_ct))
-                        if _ct != 1.0:
-                            fill.setdefault("_ingest_ctval", _ct)
-                    else:
-                        amount = fill_sz_contracts  # inverse — skip normalization
-                else:
-                    amount = fill_sz_contracts  # SPOT/MARGIN: already base units
-
-                # H-0669 (red-team bypass-hunter) — the ctVal rescale above
-                # introduces a NEW Decimal that never passed _finite_decimal:
-                # _okx_contract_size_for_inst_id falls back to
-                # ``exchange.markets[...]['contractSize']`` for instIds outside
-                # the hardcoded table, and a malformed value there yields
-                # ``float('inf')`` → ``Decimal('Infinity')`` → an unguarded
-                # ``Infinity`` quantity/cost (which, now that the carrier is a
-                # string, json.dumps no longer rejects and PG casts as a corrupt
-                # non-finite NUMERIC). Re-validate the post-rescale amount so a
-                # single bad fill is DROPPED gracefully, matching the fillSz guard.
-                amount_chk = _finite_positive_decimal(
-                    str(amount), label="OKX amount (post-ctVal rescale)"
-                )
-                if amount_chk is None:
-                    logger.error(
-                        "OKX fill dropped: non-finite/oversized amount after "
-                        "contract-size rescale (instId=%s, tradeId=%s)",
-                        fill.get("instId"), fill.get("tradeId"),
-                    )
-                    continue
-                amount = amount_chk
-
-                fee_chk = _finite_decimal(fill.get("fee", 0), label="OKX fee")
-                fee = fee_chk if fee_chk is not None else Decimal("0")
-                fee_currency = fill.get("feeCcy", "USDT")
-                _check_fee_currency_mismatch(
-                    exchange="okx", symbol=raw_inst_id, fee_currency=fee_currency,
-                )
-                is_maker = fill.get("execType", "") == "M"
-
-                raw_data = dict(fill)
-                pos_side_raw = fill.get("posSide")
-                position_direction: Literal["long", "short"] | None = None
-                if pos_side_raw in _OKX_VALID_POS_SIDES:
-                    raw_data["posSide"] = pos_side_raw
-                    # "net" = one-way mode; direction is implied by side, not
-                    # by a hedge flag. Only "long"/"short" assign through.
-                    if pos_side_raw != "net":
-                        position_direction = pos_side_raw
-                elif pos_side_raw not in (None, ""):
-                    logger.warning("invalid posSide value=%s, using None", pos_side_raw)
-
-                # dict(...) widens the FillRow (TypedDict) factory output to the
-                # plain dict the list[dict[str, Any]] accumulator holds.
-                fills.append(dict(_make_fill_dict(
-                    exchange="okx",
-                    symbol=symbol,
-                    side=side,
-                    price=price,
-                    quantity=amount,
-                    fee=fee,
-                    fee_currency=fee_currency,
-                    timestamp=ts_dt.isoformat(),
-                    exchange_order_id=fill.get("ordId", ""),
-                    exchange_fill_id=fill.get("tradeId", ""),
-                    is_maker=is_maker,
-                    raw_data=raw_data,
-                    position_direction=position_direction,
-                )))
+                normalized = _normalize_okx_fill(fill, inst_type, exchange)
+                # None = the fill was dropped (the helper logged why); keep the rest of the page.
+                if normalized is not None:
+                    fills.append(normalized)
 
             new_cursor = data[-1].get("billId", "")
 

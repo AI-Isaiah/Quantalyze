@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.133.116.0] - 2026-11-28 — Phase 259 OKXARCHIVEFILLS: OKX fills older than fills-history's 3-month reach are read from OKX's quarterly bills archive
+
+Phase 255 NULLANCHOR's PROD re-read recovered OKX fills only back to about 2026-08-27, the reach of `GET /api/v5/trade/fills-history` ("the last 3 months"). The spans the old one-page pager dropped all predate 2026-08-19. Founder decision 2026-11-27: "Yea, get archive endpoint". OKX's per-fill archive ("Transaction details (in the past 2 years)", `trade/fills-archive`) was delisted on 2024-09-18, per the OKX v5 changelog. ccxt still maps it but marks it "not documented". The only documented source that reaches those spans is the quarterly `account/bills-history-archive` CSV ("since 2021", except the current quarter). Its trade bills carry `tradeId`, `ordId`, `instId`, `px`, `sz`, `fee`, `subType` and `fillTime`. Evidence: ROADMAP `### Phase 259`.
+
+### Added
+- **The archive fills read** (`analytics-service/services/okx_archive_fills.py`). Two new modes of the existing `okx_archive_rebuild` job, so no migration and no new job kind:
+  - `fills_calibrate` reads, maps and checks everything and writes nothing.
+  - `fills_apply` also writes.
+  - The job forks at the top of `run_okx_archive_rebuild_job` (one hunk), and the daily-returns rebuild's contract is untouched.
+  - Targets are the connected OKX keys of one account, found in the claim. D-02 checks each target's uid.
+  - Quarters are planned from the strategy's first daily return up to the `fills-history` floor. At most 4 quarters are read (see Notes).
+- **One stored fill per trade bill, built by the live code** (`services/okx_archive_fills_map.py`):
+  - **Same shape as a live fill.** The archive bill goes through the same `_normalize_okx_fill` helper that the `fills-history` pager now uses (extracted from the pager loop in `services/exchange.py`, behaviour pinned by a golden recorded on the unmodified code). Symbol, side (from `subType`), price, quantity (same contract-value conversion), fee, timestamp (`ts`) and `exchange_fill_id` (`tradeId`) therefore match a live fill of the same trade. The `trades_dedup_fill` index absorbs every overlap.
+  - **Source tag.** `raw_data.source` reads `okx_bills_history_archive`.
+  - **Named refusals.** Unproven instTypes (only USDT-settled SWAP is proven) and unmapped trade subTypes are refused by name, and so are unreadable trade cells, unknown contract sizes and duplicate tradeIds.
+- **Gates before any write, all or nothing across every target:**
+  - the existing bal-chain completeness proof;
+  - a by-value reconcile against stored `fills-history` fills where both sources overlap (`fills_reconcile_miss` names the field);
+  - a legacy gate. Stored fills inside the read quarters that the archive contradicts or lacks stop `fills_apply` with the permanent `fills_legacy_mismatch`.
+- **Apply budget and wait.**
+  - OKX's request state is read with GET first.
+  - An apply is made only when OKX has no entry, or on `failed`, or once for a finished quarter whose link has died, within a per-job cap.
+  - The count is stored before each POST, and no POST is made if it cannot be stored.
+  - A rate-limited POST gives its count back.
+  - The wait defers (`defer_compute_job`) and never sleeps in a claim.
+  - No download link, request `ts` or amount reaches a log, `last_error` or the result.
+- **Automatic chain from `sync_trades`** (`services/okx_archive_fills_chain.py`, one lazily imported seam at the tail of `run_sync_trades_job` that never changes the sync outcome):
+  - After a clean OKX fills read, a strategy whose first daily return is below the floor and whose earliest stored fill is more than 2 days after it enqueues `fills_apply` for the key.
+  - A 14-day cooldown is scoped to the account and counts only a permanent named stop.
+  - Enqueues inside 00:00-01:45 UTC run at 01:50 UTC.
+- **Archive parser keeps the trade cells** (`services/okx_archive_files.py`). `ArchiveRow` gains seven trailing raw fields. Its pins (28-column header, UTC+8 quarter cut, billId strip, duplicate conflict) and the daily-returns rebuild are unchanged.
+- **PROD runbook** `docs/runbooks/okxarchivefills-backfill.md`: marker query first, calibrate, a written go/no-go, the backfill through `enqueue_compute_job` `sync_trades`, the fills before/after report, unrecovered spans by name, and quarters beyond the cap.
+
+### Fixed
+- Review round 1 (code reviewer and silent-failure hunter, all MEDIUM fixed before ship):
+  - The apply count could be lost on a non-rate-limit venue error or a failed result write. It is now stored before the POST.
+  - A rate-limited apply was counted as spent and led to a 14-day lockout.
+  - A finished quarter with a dead link had no re-apply path.
+  - A partial write could become permanent and invisible to the chain. Writes now go newest first, and an exhausted transient stop re-chains.
+  - The cooldown counted unnamed dispatcher failures.
+  - An unread reconcile quarter was labelled `window_empty`; it is now `not_performed`.
+  - An unknown insert count read as zero, and the PostgREST SQLSTATE was dropped.
+
+### Tests
+- New suites: `test_okx_normalize_fill_golden.py`, `test_okx_archive_fills_parse.py`, `test_okx_archive_fills_map.py`, `test_okx_archive_fills_chain.py`, `test_okx_archive_fills_job.py` and `test_okx_archive_fills_apply.py`, with synthetic Q2/Q3 2026 fixtures and no real values. The existing archive suites pass unedited.
+- PROOF-01: 33 neuters each turned their named arm RED and went GREEN after a `cp` restore checked with `cmp`. The verifier re-ran 10 more on the post-fix code.
+
+### Notes
+- **Open at ship, owned by plan 259-09 Task 2.**
+  - **SC-5 (the PROD backfill).** Fills before and after, per strategy.
+  - **SC-2 (real data).** The first reconcile of real archive bills against stored `fills-history` fills happens at the PROD calibrate.
+  - `259-VERIFICATION.md` stays `human_needed` until the records PR records them. The code fails closed, so a mismatching real file writes nothing.
+  - Deploying turns the chain on, so a `fills_apply` can start on the next clean OKX sync before any calibrate. Its gates still apply.
+  - The Q3 2026 overlap that lets the reconcile prove the mapping on real data closes around 2026-12-29.
+- **Booked in `TODOS.md`:**
+  - `[259-LINK-EXPIRED-NO-COOLDOWN]` (review round 2 M-R2-01, MEDIUM, apply budget only). An exhausted `link_expired` does not cool down, so a dead-link quarter can re-spend applies on each sync.
+  - `[259-ARCHIVE-QUARTER-CAP]` (known gap). A fills job reads at most 4 archive quarters, keeping the newest. Older needed quarters are listed in `info.over_cap_quarters` and are reached only by a manual `fills_apply` job with a `quarters` override. The automatic chain re-reads the same newest four after each cooldown and never walks back. The three PROD OKX strategies need three quarters (2026 Q1 to Q3).
+- `[255-OKX-BEGIN-REACH-PROBE]`'s trigger ("the next phase that touches `_fetch_raw_trades_okx`") fired: this phase extracted its loop body without changing behaviour. The entry stays open with its owner unchanged. Spans before the current quarter that the floor's far edge skips are now reachable through the archive.
+- No migration, no workflow change, no new dependency. `exchange.py` has 2 hunks, `job_worker.py` 1 and `okx_archive_job.py` 1, measured against main after Phase 256 merged.
+
 ## [0.133.115.2] - 2026-11-28 — records: Phase 243 DBBACKSTOP closed (verification passed)
 
 This is a records PR. It has no source, test, workflow or migration change.

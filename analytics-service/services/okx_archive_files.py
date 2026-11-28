@@ -131,7 +131,10 @@ class ArchiveParseError(Exception):
 
 @dataclass(frozen=True)
 class ArchiveRow:
-    """One archive bill. Money fields are exact ``Decimal`` parsed from the CSV text."""
+    """One archive bill. Money fields are exact ``Decimal`` parsed from the CSV text.
+
+    The trailing fields are the raw trade cells kept for the Phase 259 fills read, never parsed
+    here; ``trade_id`` and ``ord_id`` carry the same D-17 wrap strip as ``bill_id``."""
 
     bill_id: str
     sub_type: str
@@ -144,6 +147,13 @@ class ArchiveRow:
     fee: Decimal
     bal_chg: Decimal
     bal: Decimal
+    trade_id: str = ""
+    ord_id: str = ""
+    inst_id: str = ""
+    px_raw: str = ""
+    sz_raw: str = ""
+    exec_type: str = ""
+    fill_time_raw: str = ""
 
 
 @dataclass(frozen=True)
@@ -352,6 +362,13 @@ def parse_archive_csv(data: bytes, *, year: int, quarter: str) -> ArchiveFile:
                 fee=_parse_amount(row["fee"], field="fee", line=line),
                 bal_chg=_parse_amount(row["balChg"], field="balChg", line=line),
                 bal=_parse_amount(row["bal"], field="bal", line=line),
+                trade_id=_strip_bill_id(row["tradeId"]),
+                ord_id=_strip_bill_id(row["ordId"]),
+                inst_id=row["instId"],
+                px_raw=row["px"],
+                sz_raw=row["sz"],
+                exec_type=row["execType"],
+                fill_time_raw=row["fillTime"],
             )
         )
 

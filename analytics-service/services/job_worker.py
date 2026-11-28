@@ -3762,6 +3762,28 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     ),
                 )
 
+    # Phase 259 OKXARCHIVEFILLS: best-effort re-entry on the api_key (NOT a parented follow-on,
+    # so JOB_CHAIN_FOLLOW_ON and the reaper ceiling are unchanged). Gated on a clean FILLS read
+    # only: the archive reconcile depends on the stored fills, and the daily read may be refused
+    # on its own (daily_pnl_non_usd_okx) while the fills read is clean. Never changes the outcome.
+    if (
+        ctx.key_row.get("exchange") == "okx"
+        and _RAW_TRADE_INGESTION_ENABLED
+        and not _fills_read_skipped
+        and not phase2_failed
+        and not _fills_incomplete
+    ):
+        try:
+            from services.okx_archive_fills_chain import chain_okx_archive_fills
+
+            await chain_okx_archive_fills(ctx.supabase, ctx.key_row, strategy_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sync_trades: okx archive fills chain failed for strategy %s; "
+                "the sync outcome is unchanged",
+                strategy_id,
+            )
+
     return DispatchResult(
         # NEW-C12-02: trade_count must reflect PERSISTED rows, not fetched.
         # Pre-fix a Phase-1 failure still reported len(trades) which gave a

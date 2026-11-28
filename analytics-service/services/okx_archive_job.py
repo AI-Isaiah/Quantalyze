@@ -2546,6 +2546,16 @@ async def run_okx_archive_rebuild_job(job: dict[str, Any]) -> DispatchResult:
     """``dispatch()`` handler for kind ``okx_archive_rebuild`` (``preflight``, ``calibrate``
     and ``apply``). See the module docstring for the order, which is the D-02 guarantee, and
     for the stateless wait."""
+    # Phase 259: the two archive-fills modes have their own module; the rebuild contract below is
+    # unchanged. Lazy import: that module imports this one.
+    fills_metadata = job.get("metadata")
+    if isinstance(fills_metadata, Mapping) and fills_metadata.get("mode") in (
+        "fills_calibrate",
+        "fills_apply",
+    ):
+        from services.okx_archive_fills import run_okx_archive_fills_job
+
+        return await run_okx_archive_fills_job(job)
     supabase = get_supabase()
     result = _blank_result(None)
     budget = _ClaimBudget(CLAIM_BUDGET_S)
