@@ -686,3 +686,82 @@ async def test_composite_sets_benchmark_unavailable_when_fetch_fails() -> None:
     assert result.outcome == DispatchOutcome.DONE
     assert fake.analytics_flags.get("benchmark_unavailable") is True
     assert "benchmark_note" in fake.analytics_flags
+
+
+# ---------------------------------------------------------------------------
+# Phase 252 (G252-MTM-PROMOTION) — the parity invariant, generalized. The headline is no
+# longer always the cash object: it equals metrics_json_by_basis[headline_basis] on a
+# promoted row and metrics_json_by_basis["cash_settlement"] on every other row. The
+# cash parity cases above keep their intent; with these fixtures they now ride a
+# promoted row whose smoothed series equals the cash one (combine is basis-independent
+# there), so only the two cases below distinguish the bases.
+# ---------------------------------------------------------------------------
+def _g252_headline_equals(headline: dict[str, Any], obj: dict[str, Any]) -> bool:
+    return all(headline.get(k) == v for k, v in obj.items())
+
+
+async def _g252_run_parity(
+    monkeypatch: pytest.MonkeyPatch, smoothed: tuple[pd.Series, pd.Series],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
+    fake = _StatefulSupabase(members=[
+        _member(1, "2024-01-01", "2024-01-03"),
+        _member(2, "2024-01-10", None),
+    ])
+    c1 = _returns([("2024-01-01", 0.02), ("2024-01-02", 0.01)])
+    c2 = _returns([("2024-01-10", 0.03), ("2024-01-11", -0.05)])
+    # cash pass (c1, c2) then smoothed pass (s1, s2); the helper repeats the list, so the
+    # second half of the repeat is never consumed.
+    with _apply(_patches(fake, combine_returns=[
+        (c1, {}), (c2, {}), (smoothed[0], {}), (smoothed[1], {}),
+    ])):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+    assert result.outcome == DispatchOutcome.DONE
+    for table, payload, _ in reversed(fake.upserts):
+        if (
+            table == "strategy_analytics"
+            and isinstance(payload, dict)
+            and "metrics_json_by_basis" in payload
+        ):
+            return payload, payload["metrics_json_by_basis"]
+    raise AssertionError("no by-basis strategy_analytics upsert found")
+
+
+@pytest.mark.asyncio
+async def test_g252_promoted_headline_equals_the_basis_object_named_by_headline_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a promoted composite the stored headline equals
+    metrics_json_by_basis[data_quality_flags.headline_basis], and differs from the cash
+    object. If this goes red the marker names a basis the figures are not on, which is
+    the cash-headline-under-a-smoothed-label defect."""
+    headline, by_basis = await _g252_run_parity(monkeypatch, (
+        _returns([("2024-01-01", 0.06), ("2024-01-02", -0.02)]),
+        _returns([("2024-01-10", 0.01), ("2024-01-11", 0.04)]),
+    ))
+    basis = headline["data_quality_flags"].get("headline_basis")
+    assert basis == "smoothed_mtm"
+    assert _g252_headline_equals(headline, by_basis[basis])
+    assert not _g252_headline_equals(headline, by_basis["cash_settlement"]), (
+        "anti-vacuity: the fixture's cash and smoothed objects must differ"
+    )
+
+
+@pytest.mark.asyncio
+async def test_g252_unpromoted_headline_equals_cash_settlement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On an option-active composite that does NOT promote (a smoothed interior chain
+    break here), the headline equals the cash by-basis object, carries no marker and
+    keeps the named withhold, while the smoothed object is still stored for the toggle.
+    If this goes red an unpromoted row publishes smoothed figures with no marker."""
+    headline, by_basis = await _g252_run_parity(monkeypatch, (
+        _returns([("2024-01-01", 0.06), ("2024-01-02", float("nan"))]),
+        _returns([("2024-01-10", 0.01), ("2024-01-11", 0.04)]),
+    ))
+    dq = headline["data_quality_flags"]
+    assert "headline_basis" not in dq
+    assert dq.get("mtm_gated_reason") == "unsmoothed_options_book"
+    assert _g252_headline_equals(headline, by_basis["cash_settlement"])
+    assert "smoothed_mtm" in by_basis
+    assert not _g252_headline_equals(headline, by_basis["smoothed_mtm"])

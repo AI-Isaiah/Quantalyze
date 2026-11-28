@@ -217,6 +217,14 @@ def mt5_enabled_is_deliberate() -> bool:
 # mark-hole can NEVER fail a real prod job until the founder flips it on after
 # monitoring. Flag ON → behavior is exactly as v1.14 built it.
 #
+# ⚠️ Phase 252 (G252-MTM-PROMOTION): the COMPOSITE route no longer reads this flag. The
+# founder's 2026-11-25 ruling makes the smoothed basis the headline candidate for an
+# option-active composite, so `run_stitch_composite_job` runs the smoothed third pass
+# whatever the flag says (GLB-3 still degrades every structural, budget and timeout
+# failure). The flag still gates the SINGLE-KEY smoothed third pass and the strategy
+# `pnl_basis='smoothed_mtm'` headline-config refusal in `run_derive_broker_dailies_job`.
+# The paragraph above describes the flag's history; its live scope is single-key only.
+#
 # Read per-call (never a module-load const) so a test / go-live env change takes
 # effect without a reimport. Fail-CLOSED with the SAME .strip().lower() == "true"
 # normalization as sfox_enabled_server above: unset / "" / "1" / "on" / "TRUE "

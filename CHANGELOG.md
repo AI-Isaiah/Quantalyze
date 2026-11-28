@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.133.115.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plans 09-10: an options composite whose market-price valuation computes headlines on it; otherwise the named withhold stays
+
+### Added
+- **The composite stitch promotes the smoothed mark-to-market headline (gap G252-MTM-PROMOTION, plan 09).** Founder ruling 2026-11-25 ("switch the headline to it only if it actually works for these keys"), after the 2026-11-27 PROD probe read verdict pass for 3 of 3 members. `run_stitch_composite_job` asks the new pure `smoothed_headline_promotion` (`stitch_composite.py`) with criteria stated before any PROD stitch: P1 the composite trades options; P2 every member's smoothed build computes and the stitched series derives; P3 no option day was valued at cash because its marks aged past retention; P4 the smoothed headline has no interior chain break. On a pass, the one headline upsert writes the smoothed scalars and top-level series (`returns_series`, `drawdown_series`, `monthly_returns`, sparklines), sets `data_quality_flags.headline_basis = "smoothed_mtm"` and drops `mtm_gated_reason`. On any miss the row is stored exactly as before: the cash headline plus `unsmoothed_options_book`, and a stale `headline_basis` is removed. `csv_daily_returns`, the cash by-basis object and the sibling series rows stay cash.
+- **The factsheet opens a promoted composite on "Smoothed mark-to-market" (plan 10).** `isSmoothedHeadlineRow` (`headline-basis.ts`, the options reason always wins) feeds `readCompositeFactsheet`, which sets the new payload field `headlineBasis` only when the smoothed object and series are both usable; `applyHeadlineBasis` keeps the "Cash settlement" view withheld under the wave-1 sentence. `BasisProvider` takes `initialBasis`, and the smoothed segment shows for a promoted row while `NEXT_PUBLIC_SMOOTHED_MTM_ENABLED` is off. Public payload cache key `factsheet-v2-payload-v30` -> `v31` (Phase 256 took v30 first).
+
+### Changed
+- **The composite smoothed pass no longer reads `SMOOTHED_MTM_ENABLED`** (orchestrator decision under the 2026-11-25 ruling, recorded in CONTEXT and the ROADMAP; cheap to revert). It runs for every composite that trades options, the population the wave-1 withhold already hid. The single-key smoothed pass and the RT-4 config refusal still read the flag.
+- The smoothed derive takes the cash derive's zero-fill arguments (`scalar_returns`, `densify_policy="zero_fill"`), so a member guard day surfaces as a chain break for P4 instead of a refilled flat day. PROD has never stored a smoothed row, so no stored value moves.
+- Every other surface (Discovery, owner lists, Compare, percentiles, allocations, OG card) reads the promoted top-level figures with no code change, because the reason is absent on a promoted row; plan 10's census proves they agree on one promoted row.
+
+### Fixed
+- Review WR-01 and R2-WR-01: on a composite job's last attempt, a transient in the smoothed pass (a transient `DispatchResult`, an escaping `DeribitTransientReadError` or `ccxt.NetworkError`, or a degraded-member divergence) degrades to the cash headline plus the named withhold instead of failing a healthy cash composite. Earlier attempts still retry.
+- Review WR-02: a stitch that withdraws a previously promoted headline logs at WARNING and reports to Sentry with the cause literal.
+- Silent-failure review SFH-MEDIUM-1 and SFH-R2-2: a row with the promoted marker but no usable smoothed series or object stays withheld (no smoothed label over cash charts) and reports a warning to Sentry.
+
+### Tests
+- Python: pure promotion cases, a fail-safe matrix (structural, budget, timeout, overlap, ValueError, degenerate length, transient, last-attempt degrades), stale-marker healing, no-option byte identity with the flag set and unset, and two parity cases; the three composite files read 178 passed; mypy strict clean. Four existing tests were re-stated with their new intent recorded in the plan SUMMARY.
+- TS: census arm 2b pins `headline_basis`/`smoothed_mtm` across Python and TS, arm 1b drives a promoted row through every seam, plus read-path and killswitch cases. PROOF-01 neuters went RED with their cases named and GREEN after a byte-copy restore.
+
+### Notes
+- PROD census at ship (marker query named PRODUCTION, read-only, 2026-11-27): rows carrying `mtm_gated_reason`: 2, both `unsmoothed_options_book`, both private composites; composite members: 6, all Deribit; MT5 members 0; no stored smoothed by-basis key. No published figure and no MT5 figure can move. The two composites move only after a post-deploy re-stitch through the product's job, never a backfill UPDATE; the moved figures are recorded in the phase records.
+- Known limits: the promotion is time-limited by venue mark retention, so a promoted headline returns to the withhold on its own as marks age (now reported); whether an in-the-money payout lands on the close day is unmeasured; json-ld omits CAGR on a promoted row; `[252-SINGLEKEY-OPTIONS-CASH]` stays open (single-key is out of scope).
+- Ongoing cost: every stitch of an options composite now runs a third crawl.
+- Review: gsd-code-reviewer and silent-failure-hunter, three rounds; two fixer rounds closed WR-01, WR-02, SFH-MEDIUM-1, R2-WR-01 and SFH-R2-2; round 3 found 0 MEDIUM+. No migration.
 ## [0.133.114.2] - 2026-11-28 — records: Phase 256 OKXUNITSWITCH shipped; verification human_needed until the post-deploy read; Phase 261 UNITSWITCHEDGES booked
 
 This is a records PR. It changes no source, test, workflow or migration file.

@@ -51,7 +51,16 @@ vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/server", () => ({ createClient: async () => ({}) }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: () => ({}) }));
 
-import { OPTIONS_CASH_WALLET_REASON, headlineVerdict, isOptionsCashWalletReason } from "@/lib/factsheet/headline-basis";
+import {
+  HEADLINE_BASIS_FLAG,
+  HEADLINE_BASIS_SMOOTHED,
+  OPTIONS_CASH_WALLET_REASON,
+  headlineVerdict,
+  isOptionsCashWalletReason,
+  isSmoothedHeadlineRow,
+} from "@/lib/factsheet/headline-basis";
+import { applyHeadlineBasis } from "@/lib/factsheet/composite-read-path";
+import { computeOgHeadline } from "@/lib/factsheet/og-metrics";
 import { shapeRowAnalytics } from "@/lib/queries";
 import { EMPTY_ANALYTICS } from "@/lib/utils";
 import { gateAnnualized } from "@/lib/figure-gate";
@@ -65,6 +74,12 @@ const REPO_ROOT = process.cwd();
 const TRIGGER_LITERAL = "unsmoothed_options_book";
 const CAUSE_LITERAL = "options_cash_wallet";
 const PRODUCER_FILE = "analytics-service/services/stitch_composite.py";
+/**
+ * Phase 252 G252-MTM-PROMOTION (plan 10): the marker a PROMOTED composite stores,
+ * `data_quality_flags.headline_basis = "smoothed_mtm"`. Typed here, never read from the code under test.
+ */
+const MARKER_FLAG_LITERAL = "headline_basis";
+const MARKER_VALUE_LITERAL = "smoothed_mtm";
 
 // ---------------------------------------------------------------------------------------------
 // Shared file helpers
@@ -117,6 +132,13 @@ function parseProducerReasons(python: string): Record<string, string> {
   return out;
 }
 
+/** Module-level `HEADLINE_BASIS_FLAG` / `HEADLINE_BASIS_SMOOTHED` assignments, name to value. */
+function parseProducerMarker(python: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const m of python.matchAll(/^(HEADLINE_BASIS_(?:FLAG|SMOOTHED))\s*=\s*"([^"\n]*)"\s*(?:#.*)?$/gm)) out[m[1]] = m[2];
+  return out;
+}
+
 const PRODUCER_REASONS = parseProducerReasons(readFileSync(resolve(REPO_ROOT, PRODUCER_FILE), "utf8"));
 const OTHER_REASONS = Object.entries(PRODUCER_REASONS)
   .filter(([name]) => name !== "MTM_REASON_OPTIONS")
@@ -144,6 +166,40 @@ describe("options-book census - arm 2: the TS trigger equals the Python producer
       '    MTM_REASON_E = "indented"',
     ].join("\n");
     expect(parseProducerReasons(planted)).toEqual({ MTM_REASON_A: "alpha", MTM_REASON_B: "beta" });
+  });
+});
+
+describe("options-book census - arm 2b: the promoted-row marker equals the Python producer's pair", () => {
+  const PRODUCER_MARKER = parseProducerMarker(readFileSync(resolve(REPO_ROOT, PRODUCER_FILE), "utf8"));
+
+  /**
+   * Rule 9: a producer that renamed the marker value would store promoted rows the reader no longer
+   * recognises. They would open on the withheld cash basis with no smoothed segment, silently undoing
+   * the founder's 2026-11-25 ruling. The pair must be the same string in both languages.
+   */
+  it("reads exactly the two producer assignments, and they equal the typed literals and the TS constants", () => {
+    expect(Object.keys(PRODUCER_MARKER).sort()).toEqual(["HEADLINE_BASIS_FLAG", "HEADLINE_BASIS_SMOOTHED"]);
+    expect(PRODUCER_MARKER.HEADLINE_BASIS_FLAG).toBe(MARKER_FLAG_LITERAL);
+    expect(PRODUCER_MARKER.HEADLINE_BASIS_SMOOTHED).toBe(MARKER_VALUE_LITERAL);
+    expect(HEADLINE_BASIS_FLAG).toBe(PRODUCER_MARKER.HEADLINE_BASIS_FLAG);
+    expect(HEADLINE_BASIS_SMOOTHED).toBe(PRODUCER_MARKER.HEADLINE_BASIS_SMOOTHED);
+  });
+
+  it("neither marker constant is an MTM_REASON_* assignment, so the one-trigger invariant above is untouched", () => {
+    expect(Object.keys(PRODUCER_REASONS).some((name) => name.startsWith("HEADLINE_BASIS"))).toBe(false);
+    expect(Object.values(PRODUCER_REASONS)).not.toContain(MARKER_VALUE_LITERAL);
+  });
+
+  it("anti-vacuity: the parser reads a planted producer and ignores a comment, an f-string and an indented line", () => {
+    const planted = [
+      'HEADLINE_BASIS_FLAG = "alpha"',
+      'HEADLINE_BASIS_SMOOTHED = "beta"  # trailing note',
+      '# HEADLINE_BASIS_FLAG = "gamma"',
+      'HEADLINE_BASIS_OTHER = "delta"',
+      'HEADLINE_BASIS_FLAG_X = f"{x}"',
+      '    HEADLINE_BASIS_SMOOTHED = "indented"',
+    ].join("\n");
+    expect(parseProducerMarker(planted)).toEqual({ HEADLINE_BASIS_FLAG: "alpha", HEADLINE_BASIS_SMOOTHED: "beta" });
   });
 });
 
@@ -230,6 +286,165 @@ describe("options-book census - arm 1: one triggered value through every pure se
       expect(gateAnnualized(recordFromScalars(scalars(reason), "crypto"))).toBe("full");
     },
   );
+});
+
+// ---------------------------------------------------------------------------------------------
+// Arm 1b - a PROMOTED row shows the stored (smoothed) figures on every seam
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * G252-MTM-PROMOTION (plan 10). A promoted composite stores the smoothed figures at top level, the
+ * marker `headline_basis`, and no `mtm_gated_reason`. The list shaper, the figure record, the
+ * constituent parser, the headline verdict and the OG card are all UNEDITED by plan 10: they read the
+ * stored top-level figures and the reason alias, so on a promoted row they must show the figures. Only
+ * the factsheet's CASH by-basis object, which `applyHeadlineBasis` is handed, is withheld. This arm
+ * makes "every surface agrees" falsifiable instead of assumed.
+ *
+ * The fail-safe rows pin the other direction: the reason beats the marker, and an untrusted marker is
+ * not a promoted row.
+ */
+describe("options-book census - arm 1b: one promoted row through every seam", () => {
+  const GATE = { applicable: true } as const;
+  const PROMOTED_FLAGS = { composite: true, [MARKER_FLAG_LITERAL]: MARKER_VALUE_LITERAL } as Record<string, unknown>;
+  // Both bases stored: the cash object is the cash-wallet artefact, the top-level scalars are the smoothed ones.
+  const CASH_ARTEFACT = {
+    cumulative_return: 16361.727,
+    volatility: 0.31,
+    max_drawdown: -0.4,
+    cagr: 5143012681330.363,
+    sharpe: 3.4,
+    sortino: 4.1,
+    calmar: 102.0,
+  };
+  const SMOOTHED_FIGURES = { cumulative_return: 0.4213, cagr: 0.62, sharpe: 1.9, max_drawdown: -0.11 };
+
+  const listRow = (reason: unknown): StrategyAnalytics =>
+    ({
+      ...EMPTY_ANALYTICS,
+      id: "an-1",
+      strategy_id: "s-1",
+      computed_at: "2026-11-27T10:00:00+00:00",
+      computation_status: "complete",
+      ...SMOOTHED_FIGURES,
+      series_start: "2025-01-01",
+      series_end: "2026-11-26",
+      record_observations: 330,
+      cumulative_method: "geometric",
+      mtm_gated_reason: reason,
+    }) as StrategyAnalytics;
+
+  const scalars = (reason: unknown) => ({
+    series_start: "2024-01-01",
+    series_end: "2026-01-01",
+    record_observations: 700,
+    mtm_gated_reason: reason,
+  });
+
+  const body = (withheldBy: unknown) => ({
+    figure_span_days: 700,
+    figure_observations: 700,
+    figure_crypto: true,
+    figure_withheld_by: withheldBy,
+  });
+
+  // A short returns series: the card prints the STORED figures, so these rows only have to exist.
+  const OG_ROWS = Array.from({ length: 40 }, (_, i) => ({
+    date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+    value: 0.001 + Math.sin(i / 5) * 0.003,
+  }));
+  const persisted = (flags: Record<string, unknown>) => ({
+    computation_status: "complete",
+    computed_at: "2026-11-27T10:00:00+00:00",
+    data_quality_flags: flags,
+    metrics_json_by_basis: { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_FIGURES },
+    sharpe: SMOOTHED_FIGURES.sharpe,
+    cagr: SMOOTHED_FIGURES.cagr,
+    max_drawdown: SMOOTHED_FIGURES.max_drawdown,
+  });
+
+  // One case per seam, so a neuter that reaches a seam fails THAT seam by name.
+  it("the predicate reads the promoted row as promoted, and the verdict is clean (not withheld)", () => {
+    expect(isSmoothedHeadlineRow(PROMOTED_FLAGS)).toBe(true);
+    expect(headlineVerdict(PROMOTED_FLAGS, GATE)).toEqual({ kind: "clean" });
+  });
+
+  it("the list shaper shows the stored figures and carries no headline_withheld_cause", () => {
+    const shaped = shapeRowAnalytics(listRow(null), "s-1");
+    expect(shaped).not.toHaveProperty("headline_withheld_cause");
+    expect(shaped.cagr).toBe(SMOOTHED_FIGURES.cagr);
+    expect(shaped.cumulative_return).toBe(SMOOTHED_FIGURES.cumulative_return);
+  });
+
+  it("the figure record carries no withheldBy and gateAnnualized reads full", () => {
+    const record = recordFromScalars(scalars(null), "crypto");
+    expect(record).not.toHaveProperty("withheldBy");
+    expect(gateAnnualized(record)).toBe("full");
+  });
+
+  it("the constituent parser, with no figure_withheld_by, reads full", () => {
+    expect(gateAnnualized(parseConstituentRecord(body(undefined)))).toBe("full");
+  });
+
+  it("the card prints the stored figures", () => {
+    const card = computeOgHeadline(OG_ROWS, "crypto", persisted(PROMOTED_FLAGS));
+    expect(card.sharpe).toBe(SMOOTHED_FIGURES.sharpe);
+    expect(card.cagr).toBe(SMOOTHED_FIGURES.cagr);
+    expect(card.maxDd).toBe(SMOOTHED_FIGURES.max_drawdown);
+  });
+
+  it("and only the factsheet's stored CASH object is withheld, under the options cause, with no chain or coverage flag", () => {
+    const out = applyHeadlineBasis(CASH_ARTEFACT, PROMOTED_FLAGS, { composite: true });
+    expect(out.redacted).toBe(true);
+    for (const value of Object.values(out.headline)) expect(value).toBeNull();
+    expect(out.quality).toEqual({ headlineWithheld: true, headlineWithheldCause: CAUSE_LITERAL });
+    // The stored object the caller holds is untouched: the withhold is a copy.
+    expect(CASH_ARTEFACT.cumulative_return).toBe(16361.727);
+  });
+
+  it("fail-safe: the marker AND the reason withhold through every seam, and the row is not a promoted row", () => {
+    const both = { ...PROMOTED_FLAGS, mtm_gated_reason: TRIGGER_LITERAL };
+    expect(isSmoothedHeadlineRow(both)).toBe(false);
+    expect(headlineVerdict(both, GATE)).toEqual({ kind: "withheld", cause: CAUSE_LITERAL });
+
+    const shaped = shapeRowAnalytics(listRow(TRIGGER_LITERAL), "s-1");
+    expect(shaped.headline_withheld_cause).toBe(CAUSE_LITERAL);
+    expect(shaped.cagr).toBeNull();
+
+    const record = recordFromScalars(scalars(TRIGGER_LITERAL), "crypto");
+    expect(record.withheldBy).toBe(CAUSE_LITERAL);
+    expect(gateAnnualized(record)).toBe("withheld");
+
+    expect(gateAnnualized(parseConstituentRecord(body(CAUSE_LITERAL)))).toBe("withheld");
+
+    const card = computeOgHeadline(OG_ROWS, "crypto", persisted(both));
+    expect([card.sharpe, card.cagr, card.maxDd].every((v) => Number.isNaN(v))).toBe(true);
+
+    // The cash object is withheld the same way a wave-1 row withholds it, and carries no promoted shape.
+    const out = applyHeadlineBasis(CASH_ARTEFACT, both, { composite: true });
+    expect(out.redacted).toBe(true);
+    expect(out.quality).toMatchObject({ headlineWithheld: true, headlineWithheldCause: CAUSE_LITERAL });
+  });
+
+  it.each([
+    ["a case variant", "SMOOTHED_MTM"],
+    ["a padded string", " smoothed_mtm"],
+    ["a boolean", true],
+    ["an array", ["smoothed_mtm"]],
+    ["null", null],
+  ])("an untrusted marker value (%s) is not a promoted row: nothing is withheld on any seam", (_label, value) => {
+    const flags = { composite: true, [MARKER_FLAG_LITERAL]: value } as Record<string, unknown>;
+    expect(isSmoothedHeadlineRow(flags)).toBe(false);
+    expect(headlineVerdict(flags, GATE)).toEqual({ kind: "clean" });
+    const out = applyHeadlineBasis(CASH_ARTEFACT, flags, { composite: true });
+    expect(out.redacted).toBe(false);
+    expect(out.headline).toBe(CASH_ARTEFACT);
+  });
+
+  it("a non-object flags blob is not a promoted row", () => {
+    for (const blob of [null, undefined, "smoothed_mtm", 7, [MARKER_VALUE_LITERAL]]) {
+      expect(isSmoothedHeadlineRow(blob)).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

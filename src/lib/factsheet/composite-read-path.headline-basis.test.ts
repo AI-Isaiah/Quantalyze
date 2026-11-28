@@ -8,6 +8,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { applyHeadlineBasis, readCompositeFactsheet, readSingleKeyBasisOpts } from "./composite-read-path";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { headlineCoverageNote } from "@/app/factsheet/[id]/v2/MetricsColumn";
+import { buildFactsheetPayload } from "./build-payload";
+import { BASIS_KPI_MAP } from "./basis-metrics";
+import type { DailyReturn } from "./types";
 
 /**
  * Phase 164.6.6.3.3 (D-01 note payload, D-03) — the read path decides, from ONE
@@ -21,12 +24,16 @@ const SPARSE_ROWS = [
   { date: "2025-08-02", daily_return: 0.02 },
 ];
 
-function mockAdmin(): SupabaseClient {
+function mockAdmin(smoothedSeriesPayload: unknown = null): SupabaseClient {
   // Honours the keyset cursor, as PostgREST does, so the paged read terminates.
   let after: string | null = null;
+  let kind: string | null = null;
   const chain = {
     select: () => chain,
-    eq: () => chain,
+    eq: (column: string, value: string) => {
+      if (column === "kind") kind = value;
+      return chain;
+    },
     gt: (_column: string, value: string) => {
       after = value;
       return chain;
@@ -37,7 +44,14 @@ function mockAdmin(): SupabaseClient {
         data: SPARSE_ROWS.filter((r) => after === null || r.date > after),
         error: null,
       }),
-    maybeSingle: () => Promise.resolve({ data: null, error: null }),
+    maybeSingle: () =>
+      Promise.resolve({
+        data:
+          kind === "smoothed_mtm_daily_returns" && smoothedSeriesPayload !== null
+            ? { payload: smoothedSeriesPayload }
+            : null,
+        error: null,
+      }),
   };
   return { from: () => chain } as unknown as SupabaseClient;
 }
@@ -531,5 +545,246 @@ describe("252 — the options-book composite through the read path", () => {
     expect(opts.dataQuality).toMatchObject({ twrChainBroken: true, headlineCoversFrom: "2025-12-16" });
     expect(opts.dataQuality?.headlineWithheld).toBeUndefined();
     expect(opts.metricsByBasis?.cash_settlement?.cumulative_return).toBe(LEGACY_CASH.cumulative_return);
+  });
+});
+
+/**
+ * Phase 252 G252-MTM-PROMOTION, surfaces half (plan 10), per the 2026-11-25 founder ruling
+ * ("... Then measure market-price valuation and switch the headline to it only if it actually
+ * works for these keys.").
+ *
+ * Plan 09 stores a PROMOTED composite with the smoothed scalars at top level,
+ * `data_quality_flags.headline_basis = "smoothed_mtm"`, no `mtm_gated_reason`, and a by-basis object
+ * holding both bases. The factsheet is the one surface whose default view is the CASH by-basis
+ * object, so the read path has to say two things for such a row: the stored headline is the smoothed
+ * basis, and the cash object is still the cash-wallet artefact and stays withheld.
+ *
+ * The marker is untrusted JSONB. The reason always wins over it, and an unrecognised marker value is
+ * NOT a promoted row.
+ */
+describe("G252-MTM-PROMOTION — a promoted composite through the read path and the payload", () => {
+  // The evidence-row artefact the cash object carries, and a smoothed object that differs from it.
+  const CASH_ARTEFACT = {
+    cumulative_return: 16361.727,
+    volatility: 0.31,
+    max_drawdown: -0.4,
+    cagr: 5143012681330.363,
+    sharpe: 3.4,
+    sortino: 4.1,
+    calmar: 102.0,
+  };
+  const SMOOTHED_OBJ = {
+    cumulative_return: 0.4213,
+    volatility: 0.18,
+    max_drawdown: -0.11,
+    cagr: 0.62,
+    sharpe: 1.9,
+    sortino: 2.7,
+    calmar: 5.6,
+  };
+  const PROMOTED_DQF = {
+    composite: true,
+    headline_basis: "smoothed_mtm",
+    cumulative_method: "geometric",
+    per_key: [],
+    gap_spans: [],
+  };
+  const STRATEGY = {
+    id: "s-252-10",
+    name: "Promoted Composite Fixture",
+    types: ["quant"],
+    markets: ["crypto"],
+    computedAt: "2026-11-27T00:00:00Z",
+    trustTier: null,
+    assetClass: "crypto",
+    ingestSource: "csv" as const,
+  };
+  const DAY = 86_400_000;
+  const ROWS: DailyReturn[] = Array.from({ length: 60 }, (_, i) => ({
+    date: new Date(Date.parse("2026-01-01T00:00:00Z") + i * DAY).toISOString().slice(0, 10),
+    value: 0.001 + Math.sin(i * 0.3) * 0.004,
+  }));
+
+  // The smoothed series a promoted row stores beside its scalars: two or more valid rows.
+  const SMOOTHED_SERIES = {
+    basis: "smoothed_mtm",
+    rows: ROWS.slice(0, 5).map((r) => ({ date: r.date, return: r.value })),
+    gap_spans: [],
+  };
+
+  async function run(
+    dqf: Record<string, unknown>,
+    byBasis: Record<string, unknown>,
+    smoothedSeriesPayload: unknown = SMOOTHED_SERIES,
+  ) {
+    const out = await readCompositeFactsheet(mockAdmin(smoothedSeriesPayload), {
+      strategyId: "s1",
+      dqf,
+      metricsJsonByBasis: byBasis,
+      returnsDenominatorConfig: null,
+    });
+    expect(out).not.toBeNull();
+    const payload = buildFactsheetPayload(STRATEGY, ROWS, out!.buildOpts);
+    expect(payload).not.toBeNull();
+    return { opts: out!.buildOpts, payload: payload! };
+  }
+
+  function expectCashWithheldWithTheOptionsSentence(
+    payload: Awaited<ReturnType<typeof run>>["payload"],
+  ) {
+    for (const { serverKey } of BASIS_KPI_MAP) {
+      expect(payload.metricsByBasis?.cash_settlement?.[serverKey], serverKey).toBeNull();
+    }
+    expect(payload.dataQuality?.headlineWithheld).toBe(true);
+    expect(payload.dataQuality?.headlineWithheldCause).toBe("options_cash_wallet");
+  }
+
+  /**
+   * (a) Rule 9: without this, a promoted composite's owner reads the cash-wallet artefact
+   * (+1636172.7%, CAGR 5.1e12) under "Cash settlement", because the producer dropped the reason when
+   * it promoted the row, or the factsheet does not open on the figures the founder ruled to publish.
+   */
+  it("(a) a promoted row names the smoothed headline and withholds the cash object by name", async () => {
+    const { payload } = await run(PROMOTED_DQF, { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ });
+    expect(payload.headlineBasis).toBe("smoothed_mtm");
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeDefined();
+    expectCashWithheldWithTheOptionsSentence(payload);
+    // The chain flags describe the SMOOTHED series on a promoted row, never the cash object withheld here.
+    expect(payload.dataQuality).not.toHaveProperty("twrChainBroken");
+    expect(payload.dataQuality).not.toHaveProperty("headlineCoversFrom");
+    expect(payload.dataQuality).not.toHaveProperty("headlineGuardReasons");
+    expect(payload.metricsByBasis?.smoothed_mtm).toEqual(SMOOTHED_OBJ);
+    expect(payload.smoothedGate?.available).toBe(true);
+  });
+
+  /**
+   * (b) Rule 9: the reason is the fail-safe. A row carrying both the marker and the unsmoothed-book
+   * reason (a half-written or stale producer state) must withhold on every surface exactly as wave 1
+   * does; letting the marker win would publish a smoothed headline the producer disowned.
+   */
+  it("(b) the reason wins: a row carrying the marker AND the options-book reason is withheld as at wave 1", async () => {
+    const { payload } = await run(
+      { ...PROMOTED_DQF, mtm_gated_reason: "unsmoothed_options_book" },
+      { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ },
+    );
+    expect(payload).not.toHaveProperty("headlineBasis");
+    expectCashWithheldWithTheOptionsSentence(payload);
+  });
+
+  /**
+   * (c) Rule 9: a marker with no usable smoothed object must not open the factsheet on a basis that
+   * has no figures. The cash object stays withheld; the basis does not switch.
+   */
+  it.each([
+    ["the smoothed object is missing", { cash_settlement: CASH_ARTEFACT }],
+    [
+      "the smoothed headline is not finite",
+      { cash_settlement: CASH_ARTEFACT, smoothed_mtm: { ...SMOOTHED_OBJ, cumulative_return: null } },
+    ],
+  ])("(c) a marker but %s: cash withheld, no headlineBasis, smoothed gate closed", async (_label, byBasis) => {
+    const { payload } = await run(PROMOTED_DQF, byBasis);
+    expect(payload).not.toHaveProperty("headlineBasis");
+    expectCashWithheldWithTheOptionsSentence(payload);
+    expect(payload.smoothedGate?.available).toBe(false);
+  });
+
+  /**
+   * (c2) SFH-MEDIUM-1 (252 gap-2 review): a marker plus smoothed scalars but NO usable smoothed series
+   * (no stored row, or fewer than two valid rows, which `readSmoothedSeries` reads as null) must not
+   * seed the factsheet on the smoothed basis. `build-payload` emits `seriesByBasis.smoothed_mtm` only
+   * from such a series, so `useBasisSeriesView` would fall back to the cash payload and put cash-wallet
+   * charts under smoothed KPIs. The cash object stays withheld by name.
+   */
+  it.each([
+    ["the series row is missing", null],
+    ["the series has a single valid row", { basis: "smoothed_mtm", rows: [{ date: "2026-01-01", return: 0.01 }], gap_spans: [] }],
+  ])("(c2) a marker and smoothed scalars but %s: no headlineBasis, cash withheld", async (_label, series) => {
+    const { opts, payload } = await run(
+      PROMOTED_DQF,
+      { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ },
+      series,
+    );
+    expect("headlineBasis" in opts).toBe(false);
+    expect(payload).not.toHaveProperty("headlineBasis");
+    expect(payload.seriesByBasis?.smoothed_mtm).toBeUndefined();
+    expectCashWithheldWithTheOptionsSentence(payload);
+  });
+
+  /**
+   * (c3) SFH-R2-2 (252 gap-2 round 2): a promoted marker the read cannot honour (no usable smoothed
+   * series, or no valid smoothed object) leaves the cash basis withheld, and that state is reported at
+   * warning level with the strategy id and no amount. A valid promoted row reports nothing. Without
+   * the report a promoted figure disappears from the page and nobody is told why.
+   */
+  describe("(c3) a promoted marker with no usable smoothed headline or series is reported", () => {
+    const sentry = vi.mocked(captureToSentry);
+    async function runLogged(byBasis: Record<string, unknown>, series: unknown) {
+      sentry.mockClear();
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await run(PROMOTED_DQF, byBasis, series);
+        const reported = sentry.mock.calls.filter(
+          ([, opts]) => (opts as { tags?: { stage?: string } } | undefined)?.tags?.stage === "factsheet-promoted-headline",
+        );
+        return { reported, warned: warn.mock.calls.length };
+      } finally {
+        warn.mockRestore();
+      }
+    }
+
+    it.each([
+      ["the series row is missing", { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ }, null],
+      ["the smoothed object is missing", { cash_settlement: CASH_ARTEFACT }, SMOOTHED_SERIES],
+    ])("%s: one warning-level report tagged with the strategy id, no amount", async (_label, byBasis, series) => {
+      const { reported, warned } = await runLogged(byBasis, series);
+      expect(warned).toBe(1);
+      expect(reported).toHaveLength(1);
+      const [err, opts] = reported[0];
+      expect(opts).toMatchObject({
+        level: "warning",
+        tags: { stage: "factsheet-promoted-headline", reason: "promoted_without_usable_smoothed", strategy_id: "s1" },
+      });
+      expect((err as Error).message).not.toMatch(/\d/);
+    });
+
+    it("a valid promoted row (object and series both usable) reports nothing", async () => {
+      const { reported, warned } = await runLogged(
+        { cash_settlement: CASH_ARTEFACT, smoothed_mtm: SMOOTHED_OBJ },
+        SMOOTHED_SERIES,
+      );
+      expect(reported).toHaveLength(0);
+      expect(warned).toBe(0);
+    });
+  });
+
+  /**
+   * (d) Rule 9: the marker is untrusted JSONB, compared strictly. A case variant, a padded string, a
+   * boolean, an array or null is an ordinary composite: nothing is withheld and no basis switches, and
+   * the payload equals the same row without the key.
+   */
+  it.each([
+    ["a case variant", "SMOOTHED_MTM"],
+    ["a padded string", " smoothed_mtm"],
+    ["a boolean", true],
+    ["an array", ["smoothed_mtm"]],
+    ["null", null],
+  ])("(d) an untrusted marker (%s) on a row with no reason is an ordinary composite", async (_label, marker) => {
+    const byBasis = { cash_settlement: LEGACY_CASH, smoothed_mtm: SMOOTHED_OBJ };
+    const { headline_basis: _drop, ...plain } = PROMOTED_DQF;
+    const withMarker = await run({ ...plain, headline_basis: marker }, byBasis);
+    const without = await run(plain, byBasis);
+    expect(withMarker.payload).not.toHaveProperty("headlineBasis");
+    for (const key of SEVEN_KEYS) {
+      expect(withMarker.payload.metricsByBasis?.cash_settlement?.[key]).toBe(LEGACY_CASH[key]);
+    }
+    expect(withMarker.payload.dataQuality?.headlineWithheld).toBeUndefined();
+    expect(withMarker.payload).toEqual(without.payload);
+  });
+
+  /** (e) Rule 9: every unpromoted payload stays byte-identical, so the new opts key must be absent, not undefined. */
+  it("(e) a clean non-options composite carries no headlineBasis key in its opts or its payload", async () => {
+    const { opts, payload } = await run({ composite: true }, { cash_settlement: LEGACY_CASH });
+    expect("headlineBasis" in opts).toBe(false);
+    expect("headlineBasis" in payload).toBe(false);
   });
 });
