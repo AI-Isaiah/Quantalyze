@@ -1352,10 +1352,14 @@ Plans:
 3. Binance's read-through behaviour, Phase 255's SC-1 matrix and `advance_sync_cursor`'s callers do not regress, and a test pins that.
 4. The `TODOS.md` entries `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]` are deleted in the ship PR and named in its CHANGELOG entry.
 5. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [ ] 257-01-PLAN.md — the gate before the fix: the SC-1 matrix (4 venues x 3 column states x RPC down for the run or once), research's hand-off arms A/B/C, retry arms and the SC-2 Bybit arms, measured on unmodified code; SC-2 reworded (research Pitfall 3)
+- [ ] 257-02-PLAN.md — migration `20261128120000_compute_job_seed_hold.sql`: the fenced, service-role-only seed-hold merge RPC (founder ruling 2026-11-28), its SQL gate with mutation twins, rollback file, function snapshot and census
+- [ ] 257-03-PLAN.md — a deadline-stopped Bybit read keeps its completed windows and advances the bound to the last one; the Bybit sync read gets its own 420 s budget
+- [ ] 257-04-PLAN.md — a down re-read bound leaves a seed-hold mark on the job's own row and the next run (or the same row's retry) seeds from it
+- [ ] 257-05-PLAN.md — PROOF-01 neuters B1 to B8 and H1 to H7 (H4 in plan 02), the phase gate and the ship hand-over
 
 ### Progress (HARDEN)
 
