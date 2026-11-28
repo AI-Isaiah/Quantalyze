@@ -45,9 +45,11 @@ metadata and keeps it) after a daily row lands; the walk start must stay at or b
 
 HOW IT WAS MEASURED. Every arm was run once UNMARKED on the unmodified code, that run was saved,
 and it is recorded verbatim in the 257-01 SUMMARY. The arms RED on unmodified code carry a strict
-expected-failure marker that accepts only an AssertionError: `RED_AT_HEAD_HOLD` (plan 04 removes it
-in its fix commit) and `RESIDUAL_DOUBLE_FAULT` (permanent). A third, `RED_AT_HEAD_BYBIT`, was removed
-with the seven Bybit deadline arms' fix (plan 03). An arm GREEN at HEAD carries no marker and stays as a
+expected-failure marker that accepts only an AssertionError: `RED_AT_HEAD_HOLD` and
+`RESIDUAL_DOUBLE_FAULT` (permanent). `RED_AT_HEAD_BYBIT` was removed with the seven Bybit deadline
+arms' fix (plan 03), and `RED_AT_HEAD_HOLD` with the seed-hold fix (plan 04, which re-measured the
+two first-sync hand-off C arms GREEN: only the two set-column C arms still fail, and keep the
+permanent marker). An arm GREEN at HEAD carries no marker and stays as a
 regression pin. A strict marker reports an unexpected pass as a failure, so a fix landing without
 its marker's removal cannot go unnoticed. There is deliberately no NEUTER block here: plan 05 adds it.
 
@@ -119,12 +121,7 @@ def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ex, "_now_ms", lambda: NOW_MS)
 
 
-# Markers, applied by id once the unmarked HEAD run has classified every arm.
-RED_AT_HEAD_HOLD = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="RED on unmodified code (257-01 measurement); plan 04 removes this marker in its fix commit",
-)
+# Marker, applied by id (257-04): the one permanent expected failure, classified by measurement.
 RESIDUAL_DOUBLE_FAULT = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
@@ -407,26 +404,26 @@ def _verdict(label: str, out2: _Outcome | None, walk_ms: int) -> None:
 # ---- SC-1: the 24-arm matrix --------------------------------------------------------------------
 
 _MATRIX_PARAMS = [
-    pytest.param("binance", "set", "persistent", marks=RED_AT_HEAD_HOLD, id="binance-set-persistent"),
+    pytest.param("binance", "set", "persistent", id="binance-set-persistent"),
     pytest.param("binance", "first", "persistent", id="binance-first-persistent"),
     pytest.param("binance", "nullseed", "persistent", id="binance-nullseed-persistent"),
     pytest.param("binance", "set", "once", id="binance-set-once"),
     pytest.param("binance", "first", "once", id="binance-first-once"),
     pytest.param("binance", "nullseed", "once", id="binance-nullseed-once"),
-    pytest.param("okx", "set", "persistent", marks=RED_AT_HEAD_HOLD, id="okx-set-persistent"),
-    pytest.param("okx", "first", "persistent", marks=RED_AT_HEAD_HOLD, id="okx-first-persistent"),
+    pytest.param("okx", "set", "persistent", id="okx-set-persistent"),
+    pytest.param("okx", "first", "persistent", id="okx-first-persistent"),
     pytest.param("okx", "nullseed", "persistent", id="okx-nullseed-persistent"),
     pytest.param("okx", "set", "once", id="okx-set-once"),
     pytest.param("okx", "first", "once", id="okx-first-once"),
     pytest.param("okx", "nullseed", "once", id="okx-nullseed-once"),
-    pytest.param("bybit", "set", "persistent", marks=RED_AT_HEAD_HOLD, id="bybit-set-persistent"),
-    pytest.param("bybit", "first", "persistent", marks=RED_AT_HEAD_HOLD, id="bybit-first-persistent"),
+    pytest.param("bybit", "set", "persistent", id="bybit-set-persistent"),
+    pytest.param("bybit", "first", "persistent", id="bybit-first-persistent"),
     pytest.param("bybit", "nullseed", "persistent", id="bybit-nullseed-persistent"),
     pytest.param("bybit", "set", "once", id="bybit-set-once"),
     pytest.param("bybit", "first", "once", id="bybit-first-once"),
     pytest.param("bybit", "nullseed", "once", id="bybit-nullseed-once"),
-    pytest.param("deribit", "set", "persistent", marks=RED_AT_HEAD_HOLD, id="deribit-set-persistent"),
-    pytest.param("deribit", "first", "persistent", marks=RED_AT_HEAD_HOLD, id="deribit-first-persistent"),
+    pytest.param("deribit", "set", "persistent", id="deribit-set-persistent"),
+    pytest.param("deribit", "first", "persistent", id="deribit-first-persistent"),
     pytest.param("deribit", "nullseed", "persistent", id="deribit-nullseed-persistent"),
     pytest.param("deribit", "set", "once", id="deribit-set-once"),
     pytest.param("deribit", "first", "once", id="deribit-first-once"),
@@ -462,18 +459,18 @@ class TestSeedHoldMatrix:
 # ---- the hand-off arms: an intervening row or run never hides run 1's hold ----------------------
 
 _HANDOFF_PARAMS = [
-    pytest.param("okx", "set", "A", marks=RED_AT_HEAD_HOLD, id="okx-set-A"),
-    pytest.param("okx", "set", "B", marks=RED_AT_HEAD_HOLD, id="okx-set-B"),
+    pytest.param("okx", "set", "A", id="okx-set-A"),
+    pytest.param("okx", "set", "B", id="okx-set-B"),
     pytest.param("okx", "set", "C", marks=RESIDUAL_DOUBLE_FAULT, id="okx-set-C"),
-    pytest.param("okx", "first", "A", marks=RED_AT_HEAD_HOLD, id="okx-first-A"),
-    pytest.param("okx", "first", "B", marks=RED_AT_HEAD_HOLD, id="okx-first-B"),
-    pytest.param("okx", "first", "C", marks=RED_AT_HEAD_HOLD, id="okx-first-C"),
-    pytest.param("bybit", "set", "A", marks=RED_AT_HEAD_HOLD, id="bybit-set-A"),
-    pytest.param("bybit", "set", "B", marks=RED_AT_HEAD_HOLD, id="bybit-set-B"),
+    pytest.param("okx", "first", "A", id="okx-first-A"),
+    pytest.param("okx", "first", "B", id="okx-first-B"),
+    pytest.param("okx", "first", "C", id="okx-first-C"),
+    pytest.param("bybit", "set", "A", id="bybit-set-A"),
+    pytest.param("bybit", "set", "B", id="bybit-set-B"),
     pytest.param("bybit", "set", "C", marks=RESIDUAL_DOUBLE_FAULT, id="bybit-set-C"),
-    pytest.param("bybit", "first", "A", marks=RED_AT_HEAD_HOLD, id="bybit-first-A"),
-    pytest.param("bybit", "first", "B", marks=RED_AT_HEAD_HOLD, id="bybit-first-B"),
-    pytest.param("bybit", "first", "C", marks=RED_AT_HEAD_HOLD, id="bybit-first-C"),
+    pytest.param("bybit", "first", "A", id="bybit-first-A"),
+    pytest.param("bybit", "first", "B", id="bybit-first-B"),
+    pytest.param("bybit", "first", "C", id="bybit-first-C"),
 ]
 
 
@@ -528,10 +525,10 @@ class TestSeedHoldHandOff:
 # ---- the retry arms: a re-claimed attempt keeps attempt 1's hold --------------------------------
 
 _RETRY_PARAMS = [
-    pytest.param("okx", "rpc-up", marks=RED_AT_HEAD_HOLD, id="okx-retry-rpc-up"),
-    pytest.param("okx", "rpc-down", marks=RED_AT_HEAD_HOLD, id="okx-retry-rpc-down"),
-    pytest.param("bybit", "rpc-up", marks=RED_AT_HEAD_HOLD, id="bybit-retry-rpc-up"),
-    pytest.param("bybit", "rpc-down", marks=RED_AT_HEAD_HOLD, id="bybit-retry-rpc-down"),
+    pytest.param("okx", "rpc-up", id="okx-retry-rpc-up"),
+    pytest.param("okx", "rpc-down", id="okx-retry-rpc-down"),
+    pytest.param("bybit", "rpc-up", id="bybit-retry-rpc-up"),
+    pytest.param("bybit", "rpc-down", id="bybit-retry-rpc-down"),
 ]
 
 
