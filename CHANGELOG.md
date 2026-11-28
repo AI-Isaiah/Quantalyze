@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.133.120.0] - 2026-11-28 — Phase 262 OKXREACHGUARD PR-1: a nightly OKX derive never overwrites a stored day older than the bills reach
+
+Urgent data-integrity fix, part (1) of Phase 262, shipped alone by founder ruling (2026-11-28, "Urgent phase now (Recommended)"). Parts (2), the restore of the August days already flattened, and (3), keeping a refused derive's balance reading, follow as later plans.
+
+### Root cause
+- `combine_realized_and_funding` (`analytics-service/services/broker_dailies.py`) has a guard that drops funding older than the realized fetch's reach, but only when the caller passes `realized_reach_start`, and no production caller passed it. OKX funding reaches further back than the 93-day bills walk (`OKX_BILLS_REACH_DAYS`). So every nightly OKX derive opened its series at the oldest funding day, rebuilt the days before the bills reach from funding alone, and the derive's authoritative reconcile overwrote the realized rows earlier derives had stored there. On the founder's OKX account (3 strategies), 2026-08-02 to 2026-08-26 are already flattened, a real loss day included. Diagnosis: the `okx-headline-drop` debug session.
+
+### Fixed
+- **The non-switched OKX derive passes the bills reach.** `run_derive_broker_dailies_job` passes `realized_reach_start=_okx_bills_reach_day(_now_utc)` on OKX. The new helper is the walk's first UTC day, read from a clock taken after the bills fetch, so it can only be the same day or a later one. Bybit and Binance read both streams over one window and still pass `None`, so they are unchanged.
+- **The switched (unit-switch) path bounds its USD-side funding by the same day.** `build_switched_series` drops USD-side funding older than `bills_from_day` in its funding split, so the whole USD run, the R2-02 early run and the `usd_has_history` verdict all see the same bounded funding. `bills_from_day` now comes from the same helper, so the two cannot drift apart.
+- **The first NAV mark's stored row survives the reach reaching it.** Once the bills reach is at or past an OKX strategy's first mark, that mark day has no return row. Naming it in the reconcile span would have deleted its stored row. The span is now named from the day after it, so a stale row on a gap day before the next mark is still reconciled away (D-05).
+
+### Tests
+- New `analytics-service/tests/test_okx_reach_guard.py` (16 arms). It drives the real derive with the real combiner: a stored row older than the reach survives, and so does one a single day before it. It also covers the switched builder and the switched derive, a literal pin of the reach day, Bybit and Binance unchanged, and the first-mark arms (reach + 7, reach + 1, on the reach day, plus a stale gap row). Each guard went RED on the pre-fix code and under its own neuter, was restored from a byte backup (`cmp` silent) and went GREEN.
+
+### Notes
+- Known limits, routed to later plans of Phase 262:
+  - The stitched composite member stays unguarded. The composite stitch deletes its rows before its first day, so the same guard there needs its own design, and PROD has no OKX composite member.
+  - One case still deletes a first-mark row: the first mark lies inside the reach, no bill or funding record falls on the reach day, and no input day comes before the mark. The earliest OKX mark is 2026-10-26, so this cannot happen before about 2027-01-27.
+  - `okx_archive_rebuild.py`'s note that it passes the derive's keyword arguments is now inaccurate. Part 2 owns it.
+- Nothing is written to PROD by this change. The days already flattened stay flattened until part (2) restores them, and that runs only after this fix is deployed.
+
 ## [0.133.119.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plan 11: an options composite's smoothed pass reuses the cash pass's crawl, so the market-price headline fits the stitch budget
 
 ### Root cause
