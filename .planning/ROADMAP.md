@@ -990,7 +990,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
 - [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, the retired compute_analytics enqueue and kind rows, and inert plumbing, with a migration; the poll_positions enqueue stays live (F-8)
 - [x] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
-- [ ] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
+- [x] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
 - [x] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
 - [ ] **Phase 245: ALERTPAGE — an MT5 outage pages once, recovers once and closes once, and every paging failure is loud** - Python paging path: episode lifecycle on a fake clock, honest Sentry credit, inline close budget, ERROR-level failures
 - [ ] **Phase 246: ALERTREADERS — every alert reader sees every row, reports its own delivery failure and pages per account** - S5 readers re-based on the narrowed body: pg_net delivery, scrub reader, per-account sync paging, match-engine cron signal
@@ -1139,19 +1139,39 @@ Plans:
 
 **Goal:** An anonymous request reads only named metric keys, an `api_keys` write must belong to its caller, and a client role cannot hold a table lock past a timeout:
 - **Anon factsheet read.** An anonymous request reads only the named metric keys a factsheet needs, never the whole `metrics_json_by_basis` column.
-- **`api_keys` ownership.** A database-level backstop refuses an `api_keys` write whose `user_id` is not the caller's, including an insert through the admin client. Its design gets architecture sign-off at plan time, and `FORCE RLS` on `api_keys` is not the mechanism: it breaks every connect.
+- **`api_keys` ownership.** A database-level backstop refuses an `api_keys` write whose `user_id` is not the caller's, including an insert through the admin client. Its design gets architecture sign-off at plan time, and `FORCE RLS` on `api_keys` is not the mechanism: it breaks every connect. ⭐ **FOUNDER DECISION 2026-11-26 (the architecture sign-off, "Two-part backstop"):** the backstop is (i) a BEFORE UPDATE trigger that makes `api_keys.user_id` immutable for every role, BYPASSRLS included, and (ii) a BEFORE INSERT check that refuses any insert made outside a sanctioned SECDEF writer function, through a transaction-local fence GUC. The founder accepts the narrowing from "the caller's `user_id`" to "only the audited writer path can insert, and `user_id` can never be repointed". The `validate-and-encrypt` insert, the e2e inserts and the seed inserts move to that writer RPC. ⛔ **CORRECTED 2026-11-26:** the fence is a `current_user` check (a client/API role is refused, a postgres-owned SECDEF writer passes), not a GUC. Migration `20260515114310` already rejected the GUC shape as forgeable. The GUC wording is kept as lineage.
 - **Lock hold.** A client role holding UPDATE or DELETE cannot keep a table-wide lock past a set timeout. The timeout mechanism is first proven on TEST to be honoured through PostgREST.
 **Requirements**: DBACC-01, DBACC-02, DBACC-03
 **Depends on:** Phases 237, 225 and 235 merged (all v1.22): DBACC-01 edits 237's payload-builder select, and DBACC-02's trigger is on `api_keys`, the table 225 changes and 235 reads. DBACC-03's timeout is measured on TEST as a client role before any migration.
 **Success Criteria** (what must be TRUE):
 1. An anonymous request reads only the named metric keys a factsheet needs; a test fails on a key outside the pinned alias set. (DBACC-01)
-2. A database-level backstop refuses an `api_keys` write whose `user_id` is not the caller's, including an insert through the admin client, without `FORCE RLS` on `api_keys`. (DBACC-02)
+2. A database-level backstop, without `FORCE RLS` on `api_keys`, refuses an UPDATE that changes `api_keys.user_id` for every role, and refuses any `api_keys` insert made outside the sanctioned SECDEF writer, including a direct insert through the admin client. (DBACC-02; narrowed by founder decision 2026-11-26. The original wording, "refuses an `api_keys` write whose `user_id` is not the caller's", is kept here as lineage.)
 3. A client role holding UPDATE or DELETE cannot keep a table-wide lock past a set timeout. A recorded TEST measurement comes first, showing that PostgREST honours the timeout and that no legitimate request needs longer. (DBACC-03)
 4. PROOF-01: each gate above goes RED on a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Each migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 10 plans
 
 Plans:
-- [ ] TBD — plans not listed yet
+**Wave 1**
+- [x] 243-01-PLAN.md — DBACC-03: TEST REST measurement of the client-role timeouts (PR-A, wave 1)
+- [x] 243-03-PLAN.md — DBACC-01(a): 21-alias by-basis projection in the payload builder (PR-A, wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 243-02-PLAN.md — DBACC-03: migration pins anon 3s / authenticated 8s, plus a pg-lane gate (PR-A, wave 2)
+- [x] 243-04-PLAN.md — DBACC-01(a): OG route reads the aliases (PR-A, wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 243-05-PLAN.md — DBACC-02 step 1: insert_api_key writer RPC and user_id immutability trigger (PR-A, wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 243-06-PLAN.md — DBACC-02 step 2: validate-and-encrypt writes through the RPC (PR-B, wave 4)
+- [x] 243-07-PLAN.md — DBACC-02 step 2: live-DB test seeds move to the RPC (PR-B, wave 4)
+- [x] 243-08-PLAN.md — DBACC-02 step 2: e2e, script, integration and Python seeds move to the RPC (PR-B, wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [x] 243-09-PLAN.md — DBACC-01(b): anon loses the metrics_json_by_basis column (PR-B, wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [x] 243-10-PLAN.md — DBACC-02 step 3: the INSERT fence, a current_user allow-list (PR-C, wave 6)
 
 ### Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI
 
@@ -1441,7 +1461,7 @@ Plans:
 | 221. SENTRYSCRUB2 | 0/? | Planned for v1.23 | - |
 | 224. DEADLEFTOVERS | 0/? | Planned for v1.23 | - |
 | 242. SECRETSHYGIENE | 6/6 | Complete | 2026-11-27 |
-| 243. DBBACKSTOP | 0/? | Planned for v1.23 | - |
+| 243. DBBACKSTOP | 10/10 | Complete | 2026-11-28 |
 | 244. ACCESSGUARDS | 4/4 | Complete (shipped v0.133.102.0, #1391; verification passed, SC-1 met as narrowed by founder decision 2026-11-27; SECURITY 0 open) | 2026-11-27 |
 | 245. ALERTPAGE | 0/? | Planned for v1.23 | - |
 | 246. ALERTREADERS | 0/? | Planned for v1.23 | - |

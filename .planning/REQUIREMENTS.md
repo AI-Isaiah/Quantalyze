@@ -190,9 +190,9 @@ Moved out of v1.22 by founder ruling F-10 (2026-11-23, "Yes, split into two mile
 
 ### Security: database access (DBACCESS)
 
-- [ ] **DBACC-01**: An anonymous request reads only the named metric keys a factsheet needs, never the whole `metrics_json_by_basis` column. (covers: RANK-SPLAT-01)
-- [ ] **DBACC-02**: A database-level backstop refuses an `api_keys` write whose `user_id` is not the caller's, including an insert through the admin client. The design gets architecture sign-off at plan time, and `FORCE RLS` on `api_keys` is not the mechanism. (covers: L2267)
-- [ ] **DBACC-03**: A client role holding UPDATE or DELETE cannot keep a table-wide lock past a set timeout. The timeout mechanism is first proven on TEST to be honoured through PostgREST. (covers: TRIGGERREVOKE-LOCKHOLD-01)
+- [x] **DBACC-01**: An anonymous request reads only the named metric keys a factsheet needs, never the whole `metrics_json_by_basis` column. (covers: RANK-SPLAT-01)
+- [x] **DBACC-02**: A database-level backstop refuses an `api_keys` write whose `user_id` is not the caller's, including an insert through the admin client. The design gets architecture sign-off at plan time, and `FORCE RLS` on `api_keys` is not the mechanism. (covers: L2267)
+- [x] **DBACC-03**: A client role holding UPDATE or DELETE cannot keep a table-wide lock past a set timeout. The timeout mechanism is first proven on TEST to be honoured through PostgREST. (covers: TRIGGERREVOKE-LOCKHOLD-01)
 - [x] **DBACC-04**: An owner-surface read that lacks `api_key_id` fails to compile. (covers: 170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD) ⭐ Founder decision 2026-11-27 ("Accept as narrowed"): met as narrowed — the compile guard (a public row cannot pass as `Strategy`) plus the blocking CI source-scan pin over cast-typed owner selects and its cast-site census; owner reads typed by casts are not compiler-checked. The shared StrategyTable/StrategyGrid optional-key remainder stays on TODOS `170.6.1.1-API-KEY-ID-OPTIONAL-OWNER-GUARD`.
 - [x] **DBACC-05**: Each of the six routes outside the audit-log law writes an audit row, or carries a recorded founder exemption. The exact-set allowlist only shrinks. (covers: L2120)
 - [x] **DBACC-06**: The `discovery-watchlist` RLS and auth assertions run in CI and can fail there. (covers: 158-OPS-03, MEDIUM entry)
@@ -365,9 +365,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | SECR-02 | Phase 241 | Complete |
 | SECR-03 | Phase 242 (v1.23) | Complete |
 | SECR-04 | Phase 242 (v1.23) | Complete |
-| DBACC-01 | Phase 243 (v1.23) | Pending |
-| DBACC-02 | Phase 243 (v1.23) | Pending |
-| DBACC-03 | Phase 243 (v1.23) | Pending |
+| DBACC-01 | Phase 243 (v1.23) | Complete |
+| DBACC-02 | Phase 243 (v1.23) | Complete |
+| DBACC-03 | Phase 243 (v1.23) | Complete |
 | DBACC-04 | Phase 244 (v1.23) | Complete |
 | DBACC-05 | Phase 244 (v1.23) | Complete |
 | DBACC-06 | Phase 244 (v1.23) | Complete |
