@@ -837,6 +837,24 @@ BINANCE_FILLS_READ_DEADLINE_S: float = 240.0
 #: run (loud, and permanent until the account's fills thin out), not one failed run; there is no
 #: fill-count stop (round-1 review WR-03).
 BINANCE_SYNC_FILLS_READ_DEADLINE_S: float = 840.0
+#: Phase 257 SEEDHOLD (CONTEXT [Timing]): the Bybit sync read's own budget, in seconds. Only
+#: ``run_sync_trades_job`` passes it (``read_deadline_s=``), minus the time the handler has already
+#: spent (floored at 1 s). WHY BYBIT HAS ITS OWN: since Phase 257 a deadline stop persists the
+#: completed windows' fills before the epilogue, so the handler needs room for that persist, which
+#: Binance's founder-ruled 840 s does not leave. DERIVATION: the worst case is no time elapsed
+#: before the read, which needs ``(1 + 2r / 0.5) x C + 10 + 15 <= 900``. Here 900 is
+#: ``TIMEOUT_PER_KIND["sync_trades"]``, 10 s is the in-flight ccxt request, 15 s is the flag,
+#: bound, cursor and enqueue tail, the persist is 2 round trips of ``r`` seconds per 100 fills (one
+#: amendment probe, one upsert), and a full page of 100 fills takes 0.5 s (255-REVIEW-R2 R2-WR-02
+#: (b), 44 pages measured at about 0.5 s a page). At C = 420 the margin is 119 s at r = 0.2 s and
+#: 287 s at r = 0.1 s; the break-even r is about 0.27 s. ``r``, the worker's PostgREST round trip,
+#: is UNMEASURED and assumed 0.05 to 0.2 s. Above the break-even the handler cancel can land
+#: mid-persist: the provisional bound still names the seed, the upserts are idempotent and no span
+#: is lost, so it is the SYNC HANDLER TAIL stall (visible, narrowed for Bybit), not a
+#: data-integrity outcome. Lower than the 485 s the phase research first proposed, because
+#: read-through keeps progress across runs: a lower budget costs only more runs to catch up, never
+#: data. The handler cap is never raised for this.
+BYBIT_SYNC_FILLS_READ_DEADLINE_S: float = 420.0
 
 
 class _BinanceSymbolRead(NamedTuple):

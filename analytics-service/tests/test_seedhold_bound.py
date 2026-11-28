@@ -77,6 +77,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from services import exchange as ex
+from services import job_worker as jw
 from services.job_worker import run_sync_trades_job as _real_run_sync_trades_job
 from tests._binance_fills import RereadBounds, column_after_advance
 from tests.test_binancefills_cursor import _persisted_fills, _two_run_walk_start_ms
@@ -831,3 +832,29 @@ class TestBybitDeadlineKeepsWhatItRead:
         assert _stamped_flag(rec1) is True, (
             "SEEDHOLD-BYBIT: a failed persist must stay flagged phase2_fill_ingestion_failed"
         )
+
+
+def test_the_bybit_sync_budget_leaves_the_persist_margin() -> None:
+    """CONTEXT [Timing]. A deadline stop now persists the completed windows' fills before the
+    epilogue, so the Bybit read budget C must leave the 900 s handler room for that persist. The
+    worst case is no time elapsed before the read: (1 + 4r) x C + in-flight + tail <= handler.
+    Every input is hand-typed here; r is UNMEASURED, so 0.2 s is the pessimistic end of the
+    assumed 0.05 to 0.2 s range. Only the two constants being judged and the handler cap are read
+    from the code under test."""
+    ROUND_TRIP_S = 0.2  # r: one PostgREST round trip from the worker (assumed, unmeasured)
+    FULL_PAGE_S = 0.5  # one full 100-fill page of the read (255-REVIEW-R2 R2-WR-02 (b))
+    IN_FLIGHT_S = 10.0  # the one ccxt request past the deadline check, bounded by ccxt's 10 s
+    TAIL_S = 15.0  # flag, bound, cursor and follow-on enqueue after the persist
+    RHO = 2 * ROUND_TRIP_S / FULL_PAGE_S  # persist seconds per read second: 2 round trips a page
+    assert RHO == pytest.approx(0.8)
+    budget = ex.BYBIT_SYNC_FILLS_READ_DEADLINE_S
+    handler = jw.TIMEOUT_PER_KIND["sync_trades"]
+    worst_case = (1 + RHO) * budget + IN_FLIGHT_S + TAIL_S
+    assert worst_case <= handler, (
+        f"SEEDHOLD-MARGIN: worst case {worst_case:.1f} s exceeds the {handler} s handler: the "
+        f"persist after a deadline stop would no longer fit (margin {handler - worst_case:.1f} s)"
+    )
+    assert budget == 420.0, f"SEEDHOLD-MARGIN: the Bybit budget is {budget}, the ruled value is 420.0"
+    assert budget < ex.BINANCE_SYNC_FILLS_READ_DEADLINE_S, (
+        "SEEDHOLD-MARGIN: Bybit's budget must stay below Binance's founder-ruled 840 s"
+    )

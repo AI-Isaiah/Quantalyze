@@ -123,6 +123,7 @@ from services.exchange import (
     BINANCE_FILLS_REACH_DAYS,
     BINANCE_SYNC_FILLS_READ_DEADLINE_S,
     BYBIT_EXECUTION_DEFAULT_LOOKBACK_DAYS,
+    BYBIT_SYNC_FILLS_READ_DEADLINE_S,
     BybitTradeWindowIncomplete,
     aclose_exchange,
     create_exchange,
@@ -2711,12 +2712,14 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 # undeadlined daily read, so a fixed 840 s could still overrun the 900 s handler
                 # before the epilogue. Give it the budget REMAINING since the handler began
                 # (floored at 1 s so the first request still runs and the refusal stays named).
-                # Binance keeps the fixed 840 s its founder ruling and tests pin.
+                # Binance keeps the fixed 840 s its founder ruling and tests pin. Phase 257: Bybit
+                # subtracts from its own lower budget so the persist after a deadline stop fits the
+                # handler (see BYBIT_SYNC_FILLS_READ_DEADLINE_S).
                 _fills_read_deadline_s = BINANCE_SYNC_FILLS_READ_DEADLINE_S
                 if ctx.key_row.get("exchange") == "bybit":
                     _fills_read_deadline_s = max(
                         1.0,
-                        BINANCE_SYNC_FILLS_READ_DEADLINE_S - (_monotonic() - _handler_start),
+                        BYBIT_SYNC_FILLS_READ_DEADLINE_S - (_monotonic() - _handler_start),
                     )
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=fills_since_ms,
