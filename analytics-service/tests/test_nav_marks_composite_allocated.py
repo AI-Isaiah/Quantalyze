@@ -190,7 +190,11 @@ async def run_allocated_composite(
     alloc_ledger = _stub_ledger()
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False) -> Any:
+        # Plan 252-11: the cash pass retains each member's crawl (``retain_raw_rows=True``).
+        # These composites are perp-only, so the smoothed pass and the options builder are
+        # never reached here.
         builds.append({"nav_twin": nav_twin, "exclude_spot_extraction": exclude_spot_extraction})
         report = CompletenessReport(
             total_return_rows=2, indexable_currencies=frozenset({"BTC"}), has_option_activity=False,

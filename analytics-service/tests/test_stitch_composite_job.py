@@ -20,7 +20,7 @@ import threading
 from contextlib import ExitStack
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -42,6 +42,21 @@ from services.metrics import (
 )
 from services.stitch_composite import MTM_REASON_OPTIONS
 from services.deribit_txn import LedgerValuationError
+import services.deribit_ingest as _di
+from tests.test_deribit_options_basis_ledger import _assert_ledgers_equal, _install_stubs
+from tests.test_smoothed_mtm_core import (
+    _IN_RET_CHARTS,
+    _IN_RET_ROWS,
+    _IN_RET_SUMMARIES,
+    _OptionsAdapterStub,
+)
+
+# Plan 252-11: the REAL ingest entry points, captured before any harness patches them, so a
+# pass-through spy can run the real code while recording what the stitch asked of it (the
+# `_REAL_OPTIONS_BUILD` idiom of test_deribit_key_mode_options_basis).
+_REAL_FETCH_STATE = _di.fetch_deribit_native_account_state
+_REAL_NATIVE_BUILD = _di.build_deribit_native_ledger
+_REAL_OPTIONS_BUILD = _di.build_deribit_options_basis_ledger
 
 
 # Phase 134 (smoothed_mtm kill-switch): the composite smoothed THIRD pass shipped DARK
@@ -485,8 +500,11 @@ def _deribit_patches(
     yields in seq order (cash pass, then MTM pass if the gate opens).
 
     Phase 132: an options book (``has_option_activity=True``) additionally runs the
-    smoothed_mtm THIRD pass, which re-crawls the SAME Deribit members in the same order
-    (combine is fully mocked here, so its stub output is basis-independent). Rather than
+    smoothed_mtm THIRD pass, which visits the SAME Deribit members in the same order
+    (combine is fully mocked here, so its stub output is basis-independent). Plan 252-11:
+    that pass builds each member's ledger from the cash pass's retained crawl, so it calls
+    ``build_deribit_options_basis_ledger`` (patched here, by default to the same stub ledger
+    and report) and no longer ``build_deribit_native_ledger``. Rather than
     force every options-composite caller to hand-double its ``combine_returns``, the
     harness REPEATS the provided sequence for the smoothed fan-out — deterministic and
     order-preserving within each pass. Callers still size ``combine_returns`` for ONE
@@ -503,10 +521,10 @@ def _deribit_patches(
         else list(combine_returns)
     )
     if preflight_side_effect is not None:
-        # Phase 132: the smoothed_mtm THIRD pass re-crawls the SAME members (its own
+        # Phase 132: the smoothed_mtm THIRD pass visits the SAME members (its own
         # per-member preflight fan-out), so an options composite consumes the preflight
         # side-effect list TWICE. Repeat it for has_option_activity so a per-member
-        # preflight list sized for one fan-out still resolves the smoothed re-crawl.
+        # preflight list sized for one fan-out still resolves the smoothed pass.
         _preflight_effects = (
             list(preflight_side_effect) + list(preflight_side_effect)
             if has_option_activity and isinstance(preflight_side_effect, list)
@@ -533,6 +551,10 @@ def _deribit_patches(
             "services.deribit_ingest.build_deribit_native_ledger",
             new=AsyncMock(return_value=(_stub_ledger(), report)),
         ),
+        patch(
+            "services.deribit_ingest.build_deribit_options_basis_ledger",
+            new=AsyncMock(return_value=(_stub_ledger(), report)),
+        ),
         patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
         patch(
             "services.broker_dailies.combine_native_ledger",
@@ -551,6 +573,19 @@ def _deribit_patches(
             new=AsyncMock(return_value=(None, True)),
         ),
     ]
+
+
+_NATIVE_BUILD = "services.deribit_ingest.build_deribit_native_ledger"
+_OPTIONS_BUILD = "services.deribit_ingest.build_deribit_options_basis_ledger"
+
+
+def _dual_patches(native: AsyncMock, options: AsyncMock) -> ExitStack:
+    """Plan 252-11: patch BOTH ledger builders. The cash pass reaches the native builder
+    (its crawl, rows retained) and the smoothed pass reaches the options builder (the same
+    rows, no second crawl), so a case that injects into, or asserts on, a smoothed build
+    now reads the OPTIONS spy. A per-basis injector is given to both spies: the native one
+    only ever sees the cash basis."""
+    return _apply([patch(_NATIVE_BUILD, new=native), patch(_OPTIONS_BUILD, new=options)])
 
 
 def _by_basis(fake: _FakeSupabase) -> dict[str, Any] | None:
@@ -1196,17 +1231,15 @@ async def test_mtm_gated_reason_in_dq_flags_when_option_active() -> None:
     )
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
         if pnl_basis == "smoothed_mtm":
             raise LedgerValuationError("no smoothed mark at book-channel boundary")
         return (_stub_ledger(), _opt_report)
 
     with _apply(_deribit_patches(
         fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
-    )), patch(
-        "services.deribit_ingest.build_deribit_native_ledger",
-        new=AsyncMock(side_effect=_build),
-    ):
+    )), _dual_patches(AsyncMock(side_effect=_build), AsyncMock(side_effect=_build)):
         await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     by_basis = _by_basis(fake)
     assert by_basis is not None
@@ -1245,18 +1278,18 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
     # cash pass (m1, m2) then SMOOTHED pass (m1, m2) → 4 combine calls (MTM gated off).
-    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+    _rep = CompletenessReport(
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=True,
-    )))
+    )
+    build_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
+    options_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
     patches = _deribit_patches(
         fake,
         combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=True,  # MTM gate CLOSED; smoothed gate OPEN
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-    ):
+    with _apply(patches), _dual_patches(build_spy, options_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
         # LOW-02 (132 review): grab the ACTIVE harness combine mock while the patch
         # is still applied — the exact-count assertion below is the load-bearing
@@ -1298,12 +1331,16 @@ async def test_options_composite_persists_smoothed_while_mtm_gated() -> None:
     assert MTM_REASON_OPTIONS == "unsmoothed_options_book"
     assert dq.get("headline_basis") == "smoothed_mtm"
     assert "mtm_gated_reason" not in dq
-    # The smoothed pass built the ledger with the smoothed_mtm basis.
+    # The smoothed pass built the ledger with the smoothed_mtm basis (Plan 252-11: through
+    # the options builder, from the cash pass's retained crawl).
     smoothed_calls = [
-        c for c in build_spy.await_args_list
+        c for c in options_spy.await_args_list
         if c.kwargs.get("pnl_basis") == "smoothed_mtm"
     ]
     assert smoothed_calls, "options composite must run a smoothed_mtm ledger pass"
+    assert not any(
+        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build_spy.await_args_list
+    ), "the smoothed ledger must NOT come from a second crawl (the native builder)"
 
 
 # ── Phase 252: SMOOTHED_MTM_ENABLED no longer gates the COMPOSITE smoothed pass ─────
@@ -1327,18 +1364,18 @@ async def test_smoothed_flag_off_composite_still_runs_smoothed_pass(monkeypatch)
     ])
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
-    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+    _rep = CompletenessReport(
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=True,
-    )))
+    )
+    build_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
+    options_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
     patches = _deribit_patches(
         fake,
         combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=True,
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-    ):
+    with _apply(patches), _dual_patches(build_spy, options_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
         import services.broker_dailies as _bd
 
@@ -1348,7 +1385,7 @@ async def test_smoothed_flag_off_composite_still_runs_smoothed_pass(monkeypatch)
         "flag off: an options composite still runs cash + smoothed (2 members x 2 passes)"
     )
     assert any(
-        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build_spy.await_args_list
+        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in options_spy.await_args_list
     ), "flag off: the composite smoothed_mtm ledger pass must run (Phase 252)"
     by_basis = _by_basis(fake)
     assert by_basis is not None
@@ -1389,7 +1426,8 @@ async def test_smoothed_composite_structural_failure_degrades() -> None:
     )
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
         # The cash fan-out builds cleanly; the smoothed re-crawl hits a structural
         # mark-hole on the first member.
         if pnl_basis == "smoothed_mtm":
@@ -1399,14 +1437,13 @@ async def test_smoothed_composite_structural_failure_degrades() -> None:
         return (_stub_ledger(), _options_report)
 
     build_spy = AsyncMock(side_effect=_build)
+    options_spy = AsyncMock(side_effect=_build)
     patches = _deribit_patches(
         fake,
         combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=True,  # MTM gated off; smoothed gate open
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-    ):
+    with _apply(patches), _dual_patches(build_spy, options_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE, (
         "a structural smoothed member failure must DEGRADE — the cash composite ships, "
@@ -1415,8 +1452,8 @@ async def test_smoothed_composite_structural_failure_degrades() -> None:
     # The smoothed fan-out WAS attempted (proves the degrade path, not a silent skip).
     assert any(
         c.kwargs.get("pnl_basis") == "smoothed_mtm"
-        for c in build_spy.await_args_list
-    ), "the smoothed_mtm crawl must be attempted before the structural degrade"
+        for c in options_spy.await_args_list
+    ), "the smoothed_mtm build must be attempted before the structural degrade"
     assert _no_failed_stamp(fake), (
         "a smoothed structural degrade must NOT stamp the composite analytics failed"
     )
@@ -1454,7 +1491,8 @@ async def test_smoothed_composite_budget_overrun_degrades(monkeypatch) -> None:
     )
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
         # The cash fan-out returns instantly; the smoothed re-crawl overruns the
         # bounded slice (~0.7s) so the outer wait_for fires and degrades.
         if pnl_basis == "smoothed_mtm":
@@ -1462,14 +1500,13 @@ async def test_smoothed_composite_budget_overrun_degrades(monkeypatch) -> None:
         return (_stub_ledger(), _options_report)
 
     build_spy = AsyncMock(side_effect=_build)
+    options_spy = AsyncMock(side_effect=_build)
     patches = _deribit_patches(
         fake,
         combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=True,
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-    ):
+    with _apply(patches), _dual_patches(build_spy, options_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE, (
         "a smoothed budget overrun must DEGRADE (cash composite ships DONE), never a "
@@ -1478,8 +1515,8 @@ async def test_smoothed_composite_budget_overrun_degrades(monkeypatch) -> None:
     # The smoothed crawl WAS started (proves the wait_for path fired, not a floor-skip).
     assert any(
         c.kwargs.get("pnl_basis") == "smoothed_mtm"
-        for c in build_spy.await_args_list
-    ), "the smoothed_mtm crawl must be started before the bounded wait_for degrades it"
+        for c in options_spy.await_args_list
+    ), "the smoothed_mtm build must be started before the bounded wait_for degrades it"
     assert _no_failed_stamp(fake), (
         "a smoothed budget-overrun degrade must NOT stamp the composite failed"
     )
@@ -1502,18 +1539,18 @@ async def test_perp_only_composite_persists_no_smoothed_artifacts() -> None:
     ])
     m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
     m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
-    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+    _rep = CompletenessReport(
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=False,
-    )))
+    )
+    build_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
+    options_spy = AsyncMock(return_value=(_stub_ledger(), _rep))
     patches = _deribit_patches(
         fake,
         combine_returns=[(m1, {}), (m2, {}), (m1, {}), (m2, {})],
         has_option_activity=False,  # MTM gate OPEN; smoothed gate CLOSED (no options)
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-    ):
+    with _apply(patches), _dual_patches(build_spy, options_spy):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
     by_basis = _by_basis(fake)
@@ -1522,7 +1559,10 @@ async def test_perp_only_composite_persists_no_smoothed_artifacts() -> None:
         "a perp-only composite persists NO smoothed_mtm (SC-4)"
     )
     assert "smoothed_mtm" not in by_basis
-    # No smoothed_mtm ledger pass was run.
+    # No smoothed_mtm ledger pass was run. Plan 252-11: the smoothed pass is an options-
+    # builder call now, so the negative assertion reads that spy (the native one never
+    # sees the smoothed basis, which would leave this vacuous).
+    assert options_spy.await_count == 0, "a no-option composite must NOT run a smoothed pass"
     assert not any(
         c.kwargs.get("pnl_basis") == "smoothed_mtm"
         for c in build_spy.await_args_list
@@ -1806,9 +1846,8 @@ async def test_composite_pre_mark_retention_stamps_complete_with_warnings() -> N
         ],
         has_option_activity=True,
     )
-    with _apply(patches), patch(
-        "services.deribit_ingest.build_deribit_native_ledger",
-        new=AsyncMock(side_effect=_build),
+    with _apply(patches), _dual_patches(
+        AsyncMock(side_effect=_build), AsyncMock(side_effect=_build)
     ):
         result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE
@@ -3807,6 +3846,10 @@ async def test_blowup_member_persists_finite_series_and_plausible_contribution()
             "services.deribit_ingest.build_deribit_native_ledger",
             new=AsyncMock(return_value=(_pnl_dominated_blowup_ledger(), report)),
         ),
+        patch(
+            "services.deribit_ingest.build_deribit_options_basis_ledger",
+            new=AsyncMock(return_value=(_pnl_dominated_blowup_ledger(), report)),
+        ),
         patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
         patch(
             "services.analytics_runner.run_csv_strategy_analytics",
@@ -5028,6 +5071,14 @@ def _g252_smoothed() -> tuple[pd.Series, pd.Series]:
     )
 
 
+class _G252Builds(NamedTuple):
+    """The two ledger-builder spies of one ``_g252_run``: ``native`` is the cash pass's crawl,
+    ``options`` is the smoothed pass's rebuild from that crawl (Plan 252-11)."""
+
+    native: AsyncMock
+    options: AsyncMock
+
+
 async def _g252_run(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -5041,11 +5092,16 @@ async def _g252_run(
     extra_patches: list[Any] | None = None,
     strategy_row: dict[str, Any] | None = None,
     job_extra: dict[str, Any] | None = None,
-) -> tuple[_FakeSupabase, Any, AsyncMock]:
+) -> tuple[_FakeSupabase, Any, _G252Builds]:
     """Drive run_stitch_composite_job over two Deribit members. Combine yields the cash
     pair then the smoothed pair in call order (cash pass, then smoothed pass; MTM is
     gated off for an options composite). ``flag`` None leaves SMOOTHED_MTM_ENABLED UNSET
-    (overriding the module opt-in), a string sets it."""
+    (overriding the module opt-in), a string sets it.
+
+    Plan 252-11: the smoothed pass builds each member from the cash pass's retained crawl,
+    so ``build_side_effect`` (an injector or a default ``(ledger, report)``) drives BOTH the
+    native builder (cash pass) and the options builder (smoothed pass) through separate
+    spies. The third return value is a ``_G252Builds`` (``.native``, ``.options``)."""
     if flag is None:
         monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
     else:
@@ -5067,27 +5123,28 @@ async def _g252_run(
         existing_flags=existing_flags,
         strategy_row=strategy_row if strategy_row is not None else dict(_G252_STRATEGY_ROW),
     )
-    build_spy = (
-        AsyncMock(side_effect=build_side_effect)
-        if build_side_effect is not None
-        else AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
-            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
-            has_option_activity=has_option_activity,
-        )))
-    )
+    def _spy() -> AsyncMock:
+        return (
+            AsyncMock(side_effect=build_side_effect)
+            if build_side_effect is not None
+            else AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+                total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+                has_option_activity=has_option_activity,
+            )))
+        )
+
+    builds = _G252Builds(native=_spy(), options=_spy())
     patches = _deribit_patches(
         fake, combine_returns=[], has_option_activity=has_option_activity,
     )
     with _apply(patches), patch(
         "services.broker_dailies.combine_native_ledger",
         new=MagicMock(side_effect=_combine),
-    ), patch(
-        "services.deribit_ingest.build_deribit_native_ledger", new=build_spy,
-    ), _apply(list(extra_patches or [])):
+    ), _dual_patches(builds.native, builds.options), _apply(list(extra_patches or [])):
         result = await run_stitch_composite_job(
             {"strategy_id": _STRATEGY_ID, **(job_extra or {})}
         )
-    return fake, result, build_spy
+    return fake, result, builds
 
 
 def _g252_series_rpc(fake: _FakeSupabase) -> dict[str, dict[str, Any]]:
@@ -5159,10 +5216,10 @@ async def test_g252_promoted_options_composite_stores_smoothed_headline_with_fla
     series and cash by-basis object stay for the toggle. If this goes red the founder's
     ruled switch never happens on PROD (the flag is off there), or a cash-wallet figure
     ships labelled as the smoothed headline."""
-    fake, result, build_spy = await _g252_run(monkeypatch)
+    fake, result, builds = await _g252_run(monkeypatch)
     assert result.outcome == DispatchOutcome.DONE, result.error_message
     assert any(
-        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build_spy.await_args_list
+        c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in builds.options.await_args_list
     ), "a smoothed_mtm ledger build must be issued with the flag unset"
     headline = _headline_row(fake)
     assert headline is not None
@@ -5251,21 +5308,24 @@ async def test_g252_promoted_row_carries_smoothed_top_level_series_and_pops_cash
 
 # ── Fail-safe matrix: every path that misses P1..P4 keeps today's cash headline ──────
 async def _g252_build_structural(exchange: Any, *, account_state: Any, pnl_basis: str,
-                                 exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                                 exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
     if pnl_basis == "smoothed_mtm":
         raise LedgerValuationError("no smoothed mark at book-channel boundary")
     return (_stub_ledger(), _G252_OPT_REPORT)
 
 
 async def _g252_build_slow(exchange: Any, *, account_state: Any, pnl_basis: str,
-                           exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                           exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
     if pnl_basis == "smoothed_mtm":
         await asyncio.sleep(5)
     return (_stub_ledger(), _G252_OPT_REPORT)
 
 
 async def _g252_build_retention(exchange: Any, *, account_state: Any, pnl_basis: str,
-                                exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                                exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
     if pnl_basis == "smoothed_mtm":
         return (_stub_ledger(), CompletenessReport(
             total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
@@ -5475,7 +5535,8 @@ async def test_g252_transient_in_the_smoothed_pass_retries_the_job_and_writes_no
     import ccxt
 
     async def _build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                     exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                     exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
         if pnl_basis == "smoothed_mtm":
             raise ccxt.RateLimitExceeded("429 too many requests")
         return (_stub_ledger(), _G252_OPT_REPORT)
@@ -5497,7 +5558,8 @@ async def test_g252_transient_in_the_smoothed_pass_retries_the_job_and_writes_no
 
 
 async def _g252_transient_build(exchange: Any, *, account_state: Any, pnl_basis: str,
-                                exclude_spot_extraction: bool, nav_twin: bool = False) -> Any:
+                                exclude_spot_extraction: bool, nav_twin: bool = False,
+                     retain_raw_rows: bool = False, report: Any = None) -> Any:
     """The smoothed pass ends transient as a returned DispatchResult (a ccxt 429)."""
     import ccxt
 
@@ -5508,7 +5570,8 @@ async def _g252_transient_build(exchange: Any, *, account_state: Any, pnl_basis:
 
 async def _g252_transient_read_build(exchange: Any, *, account_state: Any, pnl_basis: str,
                                      exclude_spot_extraction: bool,
-                                     nav_twin: bool = False) -> Any:
+                                     nav_twin: bool = False, retain_raw_rows: bool = False,
+                                     report: Any = None) -> Any:
     """The smoothed pass raises a DeribitTransientReadError that escapes the pass."""
     if pnl_basis == "smoothed_mtm":
         raise DeribitTransientReadError("marks read transient")
@@ -5517,7 +5580,8 @@ async def _g252_transient_read_build(exchange: Any, *, account_state: Any, pnl_b
 
 async def _g252_network_error_build(exchange: Any, *, account_state: Any, pnl_basis: str,
                                     exclude_spot_extraction: bool,
-                                    nav_twin: bool = False) -> Any:
+                                    nav_twin: bool = False, retain_raw_rows: bool = False,
+                                    report: Any = None) -> Any:
     """The smoothed pass raises a raw ccxt.RequestTimeout (a NetworkError that is not a
     RateLimitExceeded) that _reconstruct_all re-raises bare, as it does for a ccxt
     member's smoothed re-crawl."""
@@ -5751,16 +5815,18 @@ async def test_g252_failure_after_promotion_keeps_the_marker_beside_the_scalars(
 async def _g252_no_option_run(
     monkeypatch: pytest.MonkeyPatch, kind: str, flag: str | None,
     caplog: pytest.LogCaptureFixture,
-) -> tuple[_FakeSupabase, AsyncMock, list[str]]:
+) -> tuple[_FakeSupabase, _G252Builds, list[str]]:
     if flag is None:
         monkeypatch.delenv("SMOOTHED_MTM_ENABLED", raising=False)
     else:
         monkeypatch.setenv("SMOOTHED_MTM_ENABLED", flag)
     c1, c2 = _g252_cash()
-    build_spy = AsyncMock(return_value=(_stub_ledger(), CompletenessReport(
+    _no_opt_report = CompletenessReport(
         total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
         has_option_activity=False,
-    )))
+    )
+    build_spy = AsyncMock(return_value=(_stub_ledger(), _no_opt_report))
+    options_spy = AsyncMock(return_value=(_stub_ledger(), _no_opt_report))
     if kind == "perp_only_deribit":
         fake = _FakeSupabase(
             members=_g252_members(), strategy_row=dict(_G252_STRATEGY_ROW),
@@ -5784,12 +5850,10 @@ async def _g252_no_option_run(
         ) + _ccxt_fetch_patches(realized=_CCXT_REALIZED, funding=_CCXT_FUNDING)
     with caplog.at_level(logging.INFO, logger=_G252_LOG):
         caplog.clear()
-        with _apply(patches), patch(
-            "services.deribit_ingest.build_deribit_native_ledger", new=build_spy
-        ):
+        with _apply(patches), _dual_patches(build_spy, options_spy):
             result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
     assert result.outcome == DispatchOutcome.DONE, result.error_message
-    return fake, build_spy, [
+    return fake, _G252Builds(native=build_spy, options=options_spy), [
         r.getMessage() for r in caplog.records if "smoothed headline" in r.getMessage()
     ]
 
@@ -5812,8 +5876,11 @@ async def test_g252_no_option_composite_is_byte_identical_with_the_flag_unset_an
     for fake, build, lines in (
         (unset_fake, unset_build, unset_lines), (set_fake, set_build, set_lines),
     ):
+        # Plan 252-11: the smoothed pass is an options-builder call, so the negative reads
+        # that spy (the native one never sees the smoothed basis: it would stay vacuous).
+        assert build.options.await_count == 0
         assert not any(
-            c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build.await_args_list
+            c.kwargs.get("pnl_basis") == "smoothed_mtm" for c in build.native.await_args_list
         )
         headline = _headline_row(fake)
         assert headline is not None
@@ -5821,3 +5888,117 @@ async def test_g252_no_option_composite_is_byte_identical_with_the_flag_unset_an
         assert "smoothed_mtm" not in headline["metrics_json_by_basis"]
         assert lines == []
     assert _headline_row(unset_fake) == _headline_row(set_fake)
+
+
+# ===========================================================================
+# Plan 252-11 (gap G252-MTM-PROMOTION, third missing item) - the smoothed pass builds each
+# Deribit member's ledger from the CASH pass's own crawl, as key mode does.
+#
+# Founder decision 2026-11-28, verbatim choice "Fix inside 252 first": build the smoothed
+# ledger from the cash pass's own crawl, as key mode does (Phase 185, retain_raw_rows), with
+# no third crawl. PROD measured on 2026-11-28: the cash pass took ~690 s of the 1200 s
+# stitch_composite budget and the smoothed pass re-crawled every member and timed out
+# ~358 s later on both 3-member composites, so neither promoted.
+# ===========================================================================
+def _g252_spy_real(real: Any, returned: list[Any]) -> AsyncMock:
+    """A pass-through spy: runs the REAL coroutine function, records what it returned."""
+    async def _wrapped(*a: Any, **k: Any) -> Any:
+        out = await real(*a, **k)
+        returned.append(out)
+        return out
+
+    return AsyncMock(side_effect=_wrapped)
+
+
+@pytest.mark.asyncio
+async def test_g252_crawl_once_smoothed_ledger_comes_from_the_cash_crawl(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Gap G252-MTM-PROMOTION, founder decision 2026-11-28. The REAL ingest runs (only
+    combine is faked): every Deribit member's transaction log is crawled exactly once, in
+    the cash pass, and the smoothed ledger is assembled from that crawl's retained rows and
+    that member's own account-state read. If this goes red the evidence composites can never
+    promote inside the 1200 s stitch budget (a third full crawl per member), or the smoothed
+    headline is built from a different crawl than the cash basis stored beside it."""
+    calls = _install_stubs(monkeypatch, _IN_RET_ROWS)
+    stub = _OptionsAdapterStub(_IN_RET_SUMMARIES, _IN_RET_CHARTS)
+    # k = the paginate calls ONE standalone crawl makes on these stubs; then reset the log.
+    await _REAL_NATIVE_BUILD(stub, pnl_basis="cash_settlement")
+    k = len(calls)
+    assert k >= 1
+    calls.clear()
+
+    native_returned: list[Any] = []
+    options_returned: list[Any] = []
+    native_spy = _g252_spy_real(_REAL_NATIVE_BUILD, native_returned)
+    options_spy = _g252_spy_real(_REAL_OPTIONS_BUILD, options_returned)
+    state_spy = _g252_spy_real(_REAL_FETCH_STATE, [])
+    combined: list[Any] = []
+    c1, c2 = _g252_cash()
+    s1, s2 = _g252_smoothed()
+    seq = [(c1, {}), (c2, {}), (s1, {}), (s2, {})]
+
+    def _combine(ledger: Any, *_a: Any, **_k: Any) -> tuple[pd.Series, dict[str, Any]]:
+        combined.append(ledger)
+        return seq[len(combined) - 1]
+
+    def _stub_ctx(*_a: Any, **_k: Any) -> MagicMock:
+        ctx = _ctx()
+        ctx.exchange = stub
+        return ctx
+
+    with caplog.at_level(logging.INFO, logger=_G252_LOG):
+        fake, result, _ = await _g252_run(
+            monkeypatch,
+            extra_patches=[
+                patch("services.job_worker._allocator_key_preflight",
+                      new=AsyncMock(side_effect=_stub_ctx)),
+                patch("services.deribit_ingest.fetch_deribit_native_account_state",
+                      new=state_spy),
+                patch("services.deribit_ingest.build_deribit_native_ledger", new=native_spy),
+                patch("services.deribit_ingest.build_deribit_options_basis_ledger",
+                      new=options_spy),
+                patch("services.broker_dailies.combine_native_ledger",
+                      new=MagicMock(side_effect=_combine)),
+            ],
+        )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    # (a) one crawl per Deribit member (2 members), never the 4 crawls of a third pass.
+    assert len(calls) == 2 * k, f"{len(calls)} transaction-log calls, want {2 * k}"
+    # (b) cash builds retain the rows; the smoothed builds are options-builder calls over
+    # the SAME report object the same member's cash build returned.
+    assert native_spy.await_count == 2
+    for c in native_spy.await_args_list:
+        assert c.kwargs["pnl_basis"] == "cash_settlement"
+        assert c.kwargs["retain_raw_rows"] is True
+    assert options_spy.await_count == 2
+    for i, c in enumerate(options_spy.await_args_list):
+        assert c.kwargs["pnl_basis"] == "smoothed_mtm"
+        assert c.kwargs["report"] is native_returned[i][1]
+    # (c) each smoothed ledger handed to combine equals a fresh smoothed crawl.
+    before_fresh = len(calls)
+    fresh, _rep = await _REAL_NATIVE_BUILD(stub, pnl_basis="smoothed_mtm")
+    assert len(calls) == before_fresh + k
+    assert len(combined) == 4
+    for smoothed_ledger in combined[2:]:
+        _assert_ledgers_equal(smoothed_ledger, fresh)
+    # anti-vacuity: the smoothed basis differs from the cash one on this fixture (the dMTM
+    # day 2026-01-16 exists only on the smoothed ledger) and the marks were really read.
+    day = pd.Timestamp("2026-01-16")
+    assert day in fresh.native_pnl["BTC"].index
+    assert day not in combined[0].native_pnl["BTC"].index
+    assert stub.chart_calls
+    # (d) the row promotes on the evidence-shaped fixture.
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["data_quality_flags"]["headline_basis"] == "smoothed_mtm"
+    assert set(headline["metrics_json_by_basis"]) == {"cash_settlement", "smoothed_mtm"}
+    assert _g252_assert_exactly_one_marker(fake) == "smoothed_mtm"
+    # (e) the retained rows are released.
+    assert [r[1].raw_rows for r in native_returned] == [None, None]
+    # (f) exactly one INFO line naming the reuse, with seconds and the strategy id only.
+    lines = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.INFO and "built from the cash pass's crawl" in r.getMessage()
+    ]
+    assert len(lines) == 1, lines
