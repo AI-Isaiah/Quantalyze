@@ -172,6 +172,27 @@ def test_non_trade_bills_are_not_fills() -> None:
     assert map_trade_bills([_parse(funding)]) == []
 
 
+def test_funding_and_transfer_bills_with_a_trade_id_are_not_fills() -> None:
+    """Why this matters: measured on the real PROD files 2026-11-28, funding (173/174) and
+    transfer (11/12) bills carry a tradeId, and transfer bills carry no instType. Read as fills,
+    the first real calibrate stopped the whole read (unmapped_trade_subtype 430,
+    unproven_inst_type 6) on bills that record no trade. A fill is a mapped trade subType or a
+    bill with an execType; a documented fill-like subType is still refused by name."""
+    funding = _bill("910000102", subType="173", tradeId="880000301", ordId="", px="3000.5", sz="3", execType="", fillTime=str(_TS_BASE))
+    income = _bill("910000103", subType="174", tradeId="880000302", ordId="", px="3000.5", sz="3", execType="", fillTime=str(_TS_BASE))
+    transfer = _bill("910000104", subType="11", instType="", instId="", tradeId="880000303", px="", sz="", execType="", fillTime=str(_TS_BASE))
+    trade = _bill("910000105", subType="2", tradeId="880000304")
+    fills = map_trade_bills([_parse(funding, income, transfer, trade)])
+    assert [f.row["exchange_fill_id"] for f in fills] == ["880000304"]
+    census = archive_census([_parse(funding, income, transfer, trade)])
+    assert census["trade_bills"] == 1
+
+    liquidation = _bill("910000106", subType="104", tradeId="880000305", execType="")
+    with pytest.raises(FillsMapError) as raised:
+        map_trade_bills([_parse(liquidation)])
+    assert raised.value.stop_class == "unmapped_trade_subtype"
+
+
 def _case(**over: str) -> dict[str, str]:
     cells = {"tradeId": "123456789012", "px": "3333.4444", "sz": "7777.5555", "fee": "-0.8888", **over}
     return _bill("910000103", **cells)
