@@ -28,16 +28,6 @@ Scope notes (deliberate boundaries — see B8b PR body):
   decisions, so they are NOT folded together. Only the two genuinely
   same-semantic "treat-as-cash" definitions (equity reconstruction +
   allocator spot valuation) are unified through ``STABLECOINS`` here.
-
-* ``perp_quote`` is the CCXT-format quote extractor used during equity
-  replay (linear ``BTC/USDT:USDT`` / inverse ``BTC/USD:BTC``). It is NOT a
-  replacement for ``exchange._infer_quote_currency`` (a None-able,
-  multi-format — including OKX raw ``BTC-USDT-SWAP`` — validation helper)
-  nor for ``equity_reconstruction.split_holdings_symbol_to_base_quote`` (a
-  delimiterless suffix splitter returning a ``(base, quote)`` tuple). Those
-  are different contracts with different fallbacks (None / suffix-match);
-  collapsing them into one parameterized function would average conflicting
-  behaviors, so they stay separate by design.
 """
 
 import os
@@ -340,28 +330,3 @@ CRYPTO_VENUES: frozenset[str] = frozenset(
 # ``allocator_positions._NON_CCXT_HOLDINGS_FETCHERS`` syncs through that fetcher;
 # one without a fetcher yet skips HONESTLY with end-user copy.
 NON_CCXT_VENUES: frozenset[str] = frozenset({"mt5", "sfox"})
-
-
-# ---------------------------------------------------------------------------
-# Quote-currency derivation for the CCXT symbol format used during equity
-# replay. Single source for the two byte-identical inline derivations that
-# lived in ``_compute_daily_equity`` (the spot-balance loop and the perp
-# mark-to-market loop).
-# ---------------------------------------------------------------------------
-def perp_quote(symbol: str) -> str:
-    """Extract the quote currency from a CCXT-normalized symbol.
-
-    CCXT renders linear perpetuals as ``"BTC/USDT:USDT"`` and inverse
-    contracts as ``"BTC/USD:BTC"``; spot as ``"BTC/USDT"``. The quote leg is
-    the segment after ``/`` with any ``:settle`` suffix stripped
-    (``BTC/USD:BTC`` -> ``USD``, not ``USD:BTC``). Falls back to ``"USDT"``
-    (the legacy perp-settle assumption) when the symbol has no ``/`` — e.g. a
-    stripped holdings code.
-
-    Behavior-identical to the prior inline
-    ``raw_symbol.split("/")[-1].split(":")[0].upper() if "/" in raw_symbol
-    else "USDT"`` (pinned by golden parity tests).
-    """
-    if symbol and "/" in symbol:
-        return symbol.split("/")[-1].split(":")[0].upper()
-    return "USDT"

@@ -96,7 +96,7 @@ BEGIN
       (id, kind, strategy_id, status, priority, attempts,
        next_attempt_at, last_error, error_kind, claim_token)
     VALUES
-      (v_job, 'compute_analytics', v_strat, 'failed_retry', 'high', 1,
+      (v_job, 'compute_analytics_from_csv', v_strat, 'failed_retry', 'high', 1,
        TIMESTAMPTZ '1970-01-01 00:00:00+00', 'secret-leak-probe-xyz', 'transient', NULL);
 
   PERFORM public.claim_compute_jobs_with_priority(1, 'mig-rpc-worker-' || v_user, NULL);

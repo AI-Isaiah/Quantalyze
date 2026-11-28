@@ -3,13 +3,12 @@ import { join } from "node:path";
 import { describe, it, expect } from "vitest";
 
 /**
- * Phase 167.2.1.1.1.1 plan 09 (D-07, UI-SPEC U-06). The TypeScript half of the
- * stored price-gap pin. The Python twin `is_price_gap_holding`
- * (analytics-service/services/holding_equity.py) cannot import TypeScript, so
- * both runtimes replay ONE hand-typed fixture and must return its single
- * `expected_gap` for every case. That is what keeps the refresh (which holds a
- * gap row's last price) and the UI (which labels it unpriced) from reading
- * "gap" two ways.
+ * Phase 167.2.1.1.1.1 plan 09 (D-07, UI-SPEC U-06). The oracle test for the
+ * stored price-gap rule: it replays ONE hand-typed fixture against
+ * `holdingIsPriceGap` and must get its single `expected_gap` for every case.
+ * The fixture was shared with a Python twin until Phase 224 removed it because
+ * nothing called it; the fixture stays as this test's oracle, so the refresh (which holds a gap row's last price) and the UI
+ * (which labels it unpriced) keep reading "gap" one way.
  */
 
 import { holdingIsPriceGap, type HoldingPriceGapInput } from "./holding-equity";

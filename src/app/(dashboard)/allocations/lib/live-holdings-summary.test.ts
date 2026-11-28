@@ -34,7 +34,6 @@ import {
   holdingEquityIsReported,
   holdingsByRef,
   keyStateMapsOf,
-  managerSideKeyIds,
   pnlMissingSentence,
   priceGapHoldingsNote,
   priceGapSentence,
@@ -214,15 +213,11 @@ function summarize(opts: {
   holdings: readonly DashboardHolding[];
   contributing: readonly string[];
   toggles?: Record<string, boolean>;
-  /** Keys the payload identifies as manager-side: `eligibleApiKeyIds` minus
-   *  `allocatorEligibleApiKeyIds`. Defaults to none. */
-  managerSide?: readonly string[];
 }) {
   return summarizeLiveHoldings({
     toggleByScopeRef: opts.toggles ?? allOn(opts.holdings),
     holdingsByRef: holdingsByRef(opts.holdings),
     contributingApiKeyIds: opts.contributing,
-    managerSideApiKeyIds: opts.managerSide ?? [],
     statusByKeyId: STATUS_BY_KEY_ID,
     disconnectedAtByKeyId: new Map(),
   });
@@ -395,7 +390,6 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
       toggleByScopeRef: allOn(holdings),
       holdingsByRef: holdingsByRef(holdings),
       contributingApiKeyIds: [KEY_TRUSTED],
-      managerSideApiKeyIds: [],
       statusByKeyId: new Map(),
       disconnectedAtByKeyId: new Map(),
     });
@@ -408,85 +402,17 @@ describe("summarizeLiveHoldings — AUMTRUST (Phase 167.1)", () => {
     expect(s.excludedUnknownStatus).toEqual({ amount: 58_765, count: 2, unavailable: 0 });
   });
 
-  it("review round 3 WR-01: a key the payload names as manager-side is not the allocator's book, so a dropped holding on it is left out of excludedUnknownStatus as well (D-20)", () => {
+  it("excludedUntrusted is D-20's $Y: a sign_in_failed key with no series and a revoked key, both outside the contributing set, are counted; the trusted contributing key is not", () => {
     const s = summarize({
-      holdings: [H_TRUSTED, H_MISSING_KEY],
+      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_REVOKED],
       contributing: [KEY_TRUSTED],
-      managerSide: [KEY_MISSING_FROM_API_KEYS],
-    });
-    expect(s.total).toBe(480_000);
-    expect(s.excludedUnknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
-  });
-
-  it("D-20 (review WR-01): excludedUntrusted is D-20's $Y — a sign_in_failed MANAGER-SIDE key outside the contributing set is not the allocator's book and is left out, while an allocator-eligible sign_in_failed key with no series and an indistinguishable revoked key stay in", () => {
-    const s = summarize({
-      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_REVOKED, H_SIGN_IN_FAILED_OUTSIDE],
-      contributing: [KEY_TRUSTED],
-      // KEY_SIGN_IN_FAILED_OUTSIDE is the manager-side key the payload names.
-      // KEY_SIGN_IN_FAILED is allocator-eligible but not contributing.
-      // KEY_REVOKED is in neither eligible set, so the payload cannot say
-      // whose book it is (D-20: over-discloses, never hides).
-      managerSide: [KEY_SIGN_IN_FAILED_OUTSIDE],
     });
     // The total is the contributing book only, unchanged by the narrowing.
     expect(s.total).toBe(480_000);
     expect(s.untrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
-    // Hand-listed: 12,345 (allocator-eligible sign_in_failed) + 3,210
-    // (revoked) = 15,555, two holdings. NOT 71,110 = 15,555 + 55,555, which is
-    // what counting the manager-side holding would give; the exact toEqual
-    // already rules that out.
+    // Hand-listed: 12,345 (sign_in_failed) + 3,210 (revoked) = 15,555, two
+    // holdings.
     expect(s.excludedUntrusted).toEqual({ amount: 15_555, count: 2, unavailable: 0 });
-  });
-
-  it("D-20 residual (review round 2 WR-03): a manager-side key OUTSIDE eligibleApiKeyIds (here soft-disconnected, so in neither eligible set) cannot be told apart, so its untrusted holdings ARE counted in excludedUntrusted — over-disclosed, never hidden", () => {
-    // The payload's eligible sets both omit the manager key: a soft-disconnect
-    // (like a revoke or an inactive key) fails `isPerKeyDailiesEligibleKey`,
-    // so the difference that names manager-side keys cannot name it.
-    const managerSide = managerSideKeyIds([KEY_TRUSTED], [KEY_TRUSTED]);
-    expect(managerSide).toEqual([]);
-    const s = summarize({
-      holdings: [H_TRUSTED, H_SIGN_IN_FAILED_OUTSIDE],
-      contributing: [KEY_TRUSTED],
-      managerSide,
-    });
-    expect(s.total).toBe(480_000);
-    expect(s.excludedUntrusted).toEqual({ amount: 55_555, count: 1, unavailable: 0 });
-  });
-});
-
-// ---------------------------------------------------------------------------
-// D-20's manager-side set (review round 2 WR-01)
-// ---------------------------------------------------------------------------
-
-describe("managerSideKeyIds — the keys the payload names as manager-side (D-20)", () => {
-  it("is eligibleApiKeyIds MINUS allocatorEligibleApiKeyIds, in eligible order — never the reverse difference, never either set whole", () => {
-    // The two sets differ in BOTH directions: m-1 and m-2 are eligible only,
-    // z is allocator-eligible only. Hand-listed answer: m-1, m-2.
-    expect(
-      managerSideKeyIds(
-        ["aumtrust-key-a", "aumtrust-key-m-1", "aumtrust-key-b", "aumtrust-key-m-2"],
-        ["aumtrust-key-a", "aumtrust-key-b", "aumtrust-key-z"],
-      ),
-    ).toEqual(["aumtrust-key-m-1", "aumtrust-key-m-2"]);
-  });
-
-  it("is empty when every eligible key is allocator-eligible", () => {
-    expect(
-      managerSideKeyIds(
-        ["aumtrust-key-a", "aumtrust-key-b"],
-        ["aumtrust-key-b", "aumtrust-key-a"],
-      ),
-    ).toEqual([]);
-  });
-
-  it("review round 2 WR-06: a MISSING payload field yields NO manager-side key — it must not mark every eligible key manager-side and so hide their holdings from $Y (over-disclose, never hide)", () => {
-    // allocatorEligibleApiKeyIds absent: reading it as [] would make EVERY
-    // eligible key manager-side, which HIDES holdings from $Y.
-    expect(
-      managerSideKeyIds(["aumtrust-key-a", "aumtrust-key-b"], undefined),
-    ).toEqual([]);
-    expect(managerSideKeyIds(undefined, ["aumtrust-key-a"])).toEqual([]);
-    expect(managerSideKeyIds(undefined, undefined)).toEqual([]);
   });
 });
 
@@ -945,16 +871,15 @@ describe("buildKeyTrustClause — D-06 (b) excludes $Y from keys needing attenti
 // ---------------------------------------------------------------------------
 //
 // WHY: inside the modelled-book narrowing, a holding whose key is TRUSTED,
-// present in the status map, not contributing and not manager-side fell
+// present in the status map and not contributing fell
 // through every branch to `continue`: it was in neither the total nor any
 // excluded part, so the composer said nothing about it. On the founder's book
 // that is exactly where the shared account's dollars sat (attributed to a key
 // with no return history yet). Every toggled-on dollar must now be either in
-// the total or in a NAMED excluded part. A manager-side key's dollars get their
-// own part too: still undisclosed in copy (D-20: not the allocator's book), but
-// counted, so the conservation invariant below can be stated over every dollar.
+// the total or in a NAMED excluded part, which the conservation invariant
+// below states over every dollar.
 
-describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedManagerSide", () => {
+describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted", () => {
   it("a trusted key outside a non-empty contributing set lands in excludedTrusted (today: in no part at all)", () => {
     const s = summarize({
       holdings: [H_TRUSTED, H_SIGN_IN_FAILED],
@@ -965,7 +890,6 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedM
     expect(s.excludedTrusted).toEqual({ amount: 480_000, count: 1, unavailable: 0 });
     expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
     expect(s.excludedUnknownStatus).toEqual({ amount: 0, count: 0, unavailable: 0 });
-    expect(s.excludedManagerSide).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
   it("a status the REAL predicate calls trusted (`error`) is excludedTrusted too, not excludedUntrusted", () => {
@@ -975,19 +899,6 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedM
     });
     expect(s.total).toBe(480_000);
     expect(s.excludedTrusted).toEqual({ amount: 7_000, count: 1, unavailable: 0 });
-    expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
-  });
-
-  it("a manager-side key's dropped holdings land in excludedManagerSide, trusted and untrusted alike — never in a disclosed excluded part", () => {
-    const s = summarize({
-      holdings: [H_TRUSTED, H_SIGN_IN_FAILED, H_ERROR],
-      contributing: [KEY_TRUSTED],
-      managerSide: [KEY_SIGN_IN_FAILED, KEY_ERROR],
-    });
-    expect(s.total).toBe(480_000);
-    // Hand-listed: 12,345 (sign_in_failed) + 7,000 (error, trusted) = 19,345.
-    expect(s.excludedManagerSide).toEqual({ amount: 19_345, count: 2, unavailable: 0 });
-    expect(s.excludedTrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
     expect(s.excludedUntrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 
@@ -1012,7 +923,6 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedM
   it("the degrade branch (EMPTY contributing set) sums the whole book, so nothing is excluded", () => {
     const s = summarize({ holdings: ALL_HOLDINGS, contributing: [] });
     expect(s.excludedTrusted).toEqual({ amount: 0, count: 0, unavailable: 0 });
-    expect(s.excludedManagerSide).toEqual({ amount: 0, count: 0, unavailable: 0 });
   });
 });
 
@@ -1024,7 +934,7 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] excludedTrusted and excludedM
 // WHY: `holdingsSummary` is not filtered by key eligibility, so a
 // soft-disconnected or inactive key's last holdings still arrive. Its status
 // can be `complete`, `error` or null, so it is not untrusted, and it is not
-// contributing or manager-side. It landed in `excludedTrusted`, whose copy
+// contributing. It landed in `excludedTrusted`, whose copy
 // says the dollars come from CONNECTED keys with no history YET: both halves
 // false for a disconnected key that has history. The payload's own
 // `eligibleApiKeyIds` (built by isPerKeyDailiesEligibleKey on the server)
@@ -1046,7 +956,6 @@ describe("summarizeLiveHoldings — [review C2 WR-03] excludedNotConnected", () 
       toggleByScopeRef: allOn([H_TRUSTED, H_GONE, H_REVOKED]),
       holdingsByRef: holdingsByRef([H_TRUSTED, H_GONE, H_REVOKED]),
       contributingApiKeyIds: [KEY_TRUSTED],
-      managerSideApiKeyIds: [],
       statusByKeyId: statusWithGone,
       disconnectedAtByKeyId: new Map(),
       eligibleApiKeyIds: eligible,
@@ -1077,7 +986,7 @@ describe("summarizeLiveHoldings — [review C2 WR-03] excludedNotConnected", () 
 describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated books", () => {
   // A seeded LCG, so a failure names a reproducible case. 256 cases mixing
   // every status the fixture knows (trusted, untrusted, absent from the status
-  // map), contributing / manager-side / neither, spot and derivative holdings,
+  // map), contributing / not, spot and derivative holdings,
   // unreported values, negative P&L, toggles on and off, stray refs that are
   // not in holdingsByRef and non-holding refs, and the empty-contributing
   // degrade branch.
@@ -1149,12 +1058,9 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
       toggles[`strategy-${c}`] = true;
       const contributing =
         rand() < 0.15 ? [] : KEYS.filter(() => rand() < 0.4);
-      const managerSide = KEYS.filter(
-        (k) => !contributing.includes(k) && rand() < 0.25,
-      );
       // The payload's eligible set: every key but the disconnected one and
-      // the one the key list does not carry (contributing and manager-side
-      // keys are eligible by construction on the server).
+      // the one the key list does not carry (contributing keys are eligible by
+      // construction on the server).
       const eligible = KEYS.filter(
         (k) =>
           k !== "conservation-key-disconnected" && k !== KEY_MISSING_FROM_API_KEYS,
@@ -1163,7 +1069,6 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         toggleByScopeRef: toggles,
         holdingsByRef: holdingsByRef(holdings),
         contributingApiKeyIds: contributing,
-        managerSideApiKeyIds: managerSide,
         statusByKeyId: GEN_STATUS,
         disconnectedAtByKeyId: new Map(),
         eligibleApiKeyIds: eligible,
@@ -1216,15 +1121,13 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
         partAmount(s.excludedUntrusted) +
         partAmount(s.excludedUnknownStatus) +
         partAmount(s.excludedTrusted) +
-        partAmount(s.excludedNotConnected) +
-        partAmount(s.excludedManagerSide);
+        partAmount(s.excludedNotConnected);
       const excludedCount =
         s.excludedUntrusted.count +
         s.excludedUnknownStatus.count +
         s.excludedTrusted.count +
-        s.excludedNotConnected.count +
-        s.excludedManagerSide.count;
-      const label = `case ${c}: ${JSON.stringify({ contributing, managerSide })}`;
+        s.excludedNotConnected.count;
+      const label = `case ${c}: ${JSON.stringify({ contributing })}`;
       expect(s.total, label).toBeCloseTo(expectedTotal, 6);
       expect(excludedAmount, label).toBeCloseTo(expectedExcluded, 6);
       expect(s.pnlMissing, label).toBe(expectedMissing);
@@ -1241,7 +1144,6 @@ describe("summarizeLiveHoldings — [167.1.2 SC-4] conservation over generated b
             toggles[ref(h)] &&
             contributing.length > 0 &&
             !contributing.includes(h.api_key_id) &&
-            !managerSide.includes(h.api_key_id) &&
             (h.api_key_id === KEY_TRUSTED || h.api_key_id === KEY_ERROR) &&
             (holdingEquityContributionLocal(h) ?? 0) !== 0,
         )
@@ -1371,7 +1273,6 @@ describe("holdingsByRef + summarizeLiveHoldings — D-08 two keys, one venue:sym
       toggleByScopeRef: { [SHARED_REF]: on },
       holdingsByRef: holdingsByRef([ROW_A, ROW_B]),
       contributingApiKeyIds: [],
-      managerSideApiKeyIds: [],
       statusByKeyId: STATUS,
       disconnectedAtByKeyId: new Map(),
     });
@@ -1461,7 +1362,6 @@ describe("summarizeLiveHoldings — [167.1.1 D-02] a soft-disconnected key is ne
       toggleByScopeRef: allOn(opts.holdings),
       holdingsByRef: holdingsByRef(opts.holdings),
       contributingApiKeyIds: opts.contributing,
-      managerSideApiKeyIds: [],
       statusByKeyId: maps.statusByKeyId,
       disconnectedAtByKeyId: maps.disconnectedAtByKeyId,
       eligibleApiKeyIds: opts.eligible,

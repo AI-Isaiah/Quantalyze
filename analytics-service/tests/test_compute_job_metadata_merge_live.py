@@ -195,7 +195,7 @@ def _seed_job(conn: psycopg.Connection) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID
     ).fetchone()[0]  # type: ignore[index]
     conn.execute(
         "INSERT INTO public.compute_jobs (id, kind, strategy_id, status, metadata) "
-        "VALUES (%s, 'compute_analytics', %s, 'pending', %s)",
+        "VALUES (%s, 'compute_analytics_from_csv', %s, 'pending', %s)",
         (
             job_id,
             strategy_id,

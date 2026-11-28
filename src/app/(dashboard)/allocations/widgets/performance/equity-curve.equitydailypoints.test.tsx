@@ -176,8 +176,9 @@ describe("deriveSnapshotDrawdowns — WR-01 boundary regression", () => {
 // The producer (queries.ts:derivePhase07Fields) decides derived-vs-legacy and
 // stamps `equityCurveSource`; the widget renders an HONEST indicator off it.
 // These pins prove: (1) a derived-trustworthy source renders the derived label,
-// (2) a legacy source renders the plainer legacy label and NEVER the
-// api_verified-grade treatment (the RD-2 honesty invariant).
+// (2) a payload without a derived source renders NO provenance line and NEVER
+// the api_verified-grade treatment (the RD-2 honesty invariant; Phase 224
+// DEAD-03 removed the false "legacy" label).
 // ---------------------------------------------------------------------------
 
 // A positive-anchored dense series so the inner chart mounts (not warm-up).
@@ -223,28 +224,22 @@ describe("EquityChartWidget — equity provenance indicator (115.1 / RD-2)", () 
     expect(provenance).not.toHaveAttribute("title");
   });
 
-  it("legacy source → renders the legacy label and is NEVER api_verified-styled", () => {
-    const { getByTestId, queryByText } = renderWidget({
+  it("no source → renders NO provenance line (no derived curve, no claim) and no api_verified treatment", () => {
+    const { queryByTestId, queryByText } = renderWidget({
       equityDailyPoints: makeSeries(60),
-      equityCurveSource: "legacy",
       derivedCurveComputedAt: null,
     });
-    const provenance = getByTestId("equity-provenance");
-    expect(provenance).toHaveAttribute("data-source", "legacy");
-    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
-    // The HARD RULE (RD-2): a legacy-fallback curve must not read as
+    expect(queryByTestId("equity-provenance")).toBeNull();
+    // The HARD RULE (RD-2): a curve without a derived source must not read as
     // verified-grade — no api_verified label anywhere on the surface.
     expect(queryByText(/api[\s_-]?verified/i)).toBeNull();
-    expect(provenance.textContent).not.toMatch(/Derived from per-key/i);
   });
 
-  it("absent source field → defaults to the legacy label (warm-up / first-connect safety)", () => {
-    const { getByTestId } = renderWidget({
+  it("absent source field → no provenance line (warm-up / first-connect safety)", () => {
+    const { queryByTestId } = renderWidget({
       equityDailyPoints: makeSeries(60),
     });
-    const provenance = getByTestId("equity-provenance");
-    expect(provenance).toHaveAttribute("data-source", "legacy");
-    expect(provenance.textContent).toMatch(/Broker snapshot history/i);
+    expect(queryByTestId("equity-provenance")).toBeNull();
   });
 });
 

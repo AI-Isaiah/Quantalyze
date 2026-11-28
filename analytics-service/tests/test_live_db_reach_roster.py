@@ -230,7 +230,6 @@ ENV_GATED_SKIP_ALLOWLIST: dict[str, str] = {
     "test_nav_marks_writer_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_mt5_xlease_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_sync_trades_enqueue_failure_bridge_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
-    "test_trade_read_store_live.py::_need_supabase": _LANE_SUPABASE_FAIL_IN_CI,
     "test_compute_jobs_fencing.py::_need_supabase": (
         "Gates on SUPABASE_TEST_URL / SUPABASE_TEST_SERVICE_KEY: skips in local dev and FAILS "
         "under CI=true once supabase-py imports; the Lane handoff exports both, so it runs."

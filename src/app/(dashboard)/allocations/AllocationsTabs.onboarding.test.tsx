@@ -94,7 +94,6 @@ function basePayload(
     lastSyncAt: null,
     hasSyncing: false,
     equityDailyPoints: [],
-    equityCurveSource: "legacy",
     // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
     equityHistoryState: "rebuilding",
     equityDailyReturns: [],

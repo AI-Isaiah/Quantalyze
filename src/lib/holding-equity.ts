@@ -13,11 +13,11 @@
 // ONE hand-typed `expected` per case, replayed by vitest
 // (`src/lib/holding-equity-contribution.parity.test.ts`) and by pytest.
 //
-// Phase 167.2.1.1.1.1 D-07 adds `holdingIsPriceGap` here. Its Python twin is
-// `is_price_gap_holding` in the same module and its fixture is
+// Phase 167.2.1.1.1.1 D-07 adds `holdingIsPriceGap` here. Its oracle is
 // `analytics-service/tests/fixtures/holding_price_gap_cases.json` (vitest:
-// `src/lib/holding-price-gap.parity.test.ts`). It decides what the screen SAYS
-// about a stored 0 and never changes the AUM sum above.
+// `src/lib/holding-price-gap.parity.test.ts`). Its Python twin was removed in
+// Phase 224 because nothing called it. It decides what the screen SAYS about a
+// stored 0 and never changes the AUM sum above.
 //
 // Pure functions, no imports — safe in server, client, and test contexts.
 // ============================================================================
@@ -110,8 +110,8 @@ export type HoldingPriceGapInput = {
  * It is row-level and pure: it carries no stable-value set and no venue rule.
  * The refresh adds its stable-value and Deribit exclusions locally (plan 12).
  *
- * The Python twin is `is_price_gap_holding`; the fixture
- * `holding_price_gap_cases.json` pins both.
+ * The fixture `holding_price_gap_cases.json` is the oracle. Its Python twin was
+ * removed in Phase 224 because nothing called it.
  */
 export function holdingIsPriceGap(h: HoldingPriceGapInput): boolean {
   if (h.holding_type !== "spot") return false;

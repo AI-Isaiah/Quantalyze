@@ -24,11 +24,13 @@ so any database access by the stub fails the test.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 from unittest.mock import MagicMock
 
 import pytest
 
+import main_worker
 import services.equity_reconstruction as er
 import services.job_worker as jw
 from services.job_worker import DispatchOutcome
@@ -142,8 +144,8 @@ async def test_a_force_rebuild_job_fails_permanent_and_warns_instead_of_reportin
 
 
 # ---------------------------------------------------------------------------
-# Phase 176 plan 11 (D-02, D-04): the legacy writers are gone, the cap and
-# marker helpers stay inert.
+# Phase 176 plan 11 (D-02): the legacy writers are gone. Phase 224 DEAD-04: the
+# cap and marker helpers are gone too.
 # ---------------------------------------------------------------------------
 
 _RETIRED_WRITERS = (
@@ -163,7 +165,7 @@ _SURVIVORS_OTHER_MODULES_READ = (
     "read_okx_option_exposure",
 )
 
-_D04_INERT_HELPERS = (
+_D04_REMOVED_HELPERS = (
     "_reconstruct_outcome_completes_the_key",
     "_mark_api_key_history_reconstructed",
     "_account_marker_key_ids",
@@ -196,16 +198,29 @@ def test_the_legacy_writers_are_gone() -> None:
         )
 
 
-def test_the_d04_inert_helpers_stay() -> None:
-    """D-04: the cap and marker helpers outlive the reconstruct job, inert.
+def test_the_d04_helpers_are_gone() -> None:
+    """Phase 224 DEAD-04 removed the cap and marker helpers because nothing calls them.
 
-    They are deliberately left byte-identical and unused by the writers, and
-    they are booked in TODOS.md under 176-RECONSTRUCT-CAP-MARKER-INERT. A later
-    phase removes them as a set; deleting one here would break the cap and
-    marker twins that still read them.
+    Phase 176 D-04 left them inert in ``services.equity_reconstruction`` after the
+    reconstruct job's body went, and the orphaned-cap report in
+    ``services.job_worker`` was their last reader. Both are deleted, and so are the
+    columns they read. A helper that comes back here is dead code with no caller.
     """
-    for name in _D04_INERT_HELPERS:
-        assert hasattr(er, name), (
-            f"{name} is missing from services.equity_reconstruction: D-04 keeps the cap and "
-            "marker helpers inert (TODOS 176-RECONSTRUCT-CAP-MARKER-INERT)"
+    for name in _D04_REMOVED_HELPERS:
+        assert not hasattr(er, name), (
+            f"{name} is back in services.equity_reconstruction: Phase 224 DEAD-04 deleted "
+            "the reconstruct cap and marker helpers, which nothing calls"
         )
+    for name in ("_capture_history_reconstruct_capped", "report_orphaned_capped_reconstructs"):
+        assert not hasattr(jw, name), (
+            f"{name} is back in services.job_worker: Phase 224 DEAD-04 deleted the cap "
+            "hook and the orphaned-cap report"
+        )
+    assert importlib.util.find_spec("services.trade_read_store") is None, (
+        "services.trade_read_store is back: Phase 224 DEAD-04 deleted the trade-read store "
+        "and the worker's expiry sweep, and PR-2 drops its tables"
+    )
+    assert not hasattr(main_worker, "sweep_expired_trade_reads"), (
+        "main_worker.sweep_expired_trade_reads is back: Phase 224 DEAD-04 deleted it with "
+        "the trade-read store"
+    )

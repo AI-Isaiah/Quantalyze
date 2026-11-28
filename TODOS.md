@@ -819,17 +819,6 @@ in the same PR.
       **Evidence:** `.planning/phases/164.8.1-refdata-.../164.8.1-04-RESTORE.log`,
       `164.8.1-04-SUMMARY.md`.
 
-- [ ] **`[164.5-STALE-GENERATED-TYPES]` `src/lib/database.types.ts` keeps a generated declaration
-      for `create_allocator_connected_strategy` after PR #758 drops it (booked 2026-09-08).**
-      Inert, and deliberately left rather than hand-edited: **nothing generates or gates this
-      file** — `grep -rn 'database.types' .github/workflows/` returns nothing and `package.json`
-      carries no `gen:types`-shaped script, so there is no regeneration step to run and no CI job
-      that would catch the staleness. Hand-editing a generated file to match would create the
-      illusion that something keeps it current. The right fix is a types-regeneration step with a
-      freshness gate; until one exists, a declaration for an RPC that has zero `.rpc()` call sites
-      is dead weight, not a defect.
-      ⭐ **Owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-05; tagged 2026-11-23.**
-
 - [ ] **`[164.2-SEAMCODE-UNION]` `UPSTREAM_STATUS_TO_SEAM_CODE`'s "every value is a key of
       `SEAM_CODE_TO_WIZARD_CODE`" law is enforced by a source-text scan, not by the compiler
       (booked 2026-09-06, Phase 164.2 ship review).**
@@ -4564,12 +4553,6 @@ It runs the marker query first and reports counts only.
 **Still open (re-measured 2026-11-14).** `run_derive_broker_dailies_job` now reads Bybit capital flows through `fetch_bybit_unified_flows` (Phase 186), but `run_stitch_composite_job` still reads only the on-chain deposit and withdrawal pair through `fetch_ccxt_transfers`, so a Bybit account funded off-chain (sub-account / universal transfers, as account a6 is) is read from different flows on the composite path. **Closed when:** the composite path reads the same kinds, with its own measurement, or the founder rules otherwise.
 
 ## Phase 176 (LEGACYRETIRE) — routed items (logged 2026-10-31)
-
-### 176-INERT-LEFTOVERS — the managerSide* plumbing and the equityCurveSource "legacy" value are inert after Phase 176 (booked 2026-10-31, Phase 176 plans 03 and 05, CLEANUP) (owned by Phase 224 DEADLEFTOVERS, v1.23; REQUIREMENTS.md DEAD-03; tagged 2026-11-23)
-
-**Reading.** Since D-01 (Phase 176 plan 03) `allocatorEligibleApiKeyIds` equals `eligibleKeyIds` in `getMyAllocationDashboard`, so `managerSideKeyIds` (`src/app/(dashboard)/allocations/lib/live-holdings-summary.ts`) is always empty and `excludedManagerSide` is always zero. The composer's partial-book note still reads both. `equityCurveSource` keeps its two-value type because `equityChartWidgetDataSchema`'s enum pins it; since Phase 176 its `"legacy"` value means "no trustworthy derived curve", and no legacy source is read. Nothing is wrong on screen, and no number depends on either.
-
-**Owner / Trigger:** unowned. Trigger: the next change to the composer's partial-book note or to EquityChart's freshness stamp. Closed when `managerSideKeyIds`, `excludedManagerSide` and the `"legacy"` value are deleted together with their tests.
 
 ### 176-PR1-REVIEW-RESIDUALS — four below-the-bar residues of the PR 1 review rounds, none user-facing at the time of writing (logged 2026-10-31, Phase 176 PR 1, DATA INTEGRITY and TEST)
 

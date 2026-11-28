@@ -181,7 +181,6 @@ import {
   holdingEquityContributionLocal,
   holdingsByRef,
   keyStateMapsOf,
-  managerSideKeyIds,
   pnlMissingSentence,
   priceGapSentence,
   summarizeLiveHoldings,
@@ -4779,25 +4778,12 @@ export function ScenarioComposer({
     () => keyStateMapsOf(payload.apiKeys),
     [payload.apiKeys],
   );
-  // D-20: the keys the payload itself names as manager-side, derived by the
-  // one pinned helper (`managerSideKeyIds`), never re-derived here.
-  const managerSideApiKeyIds = useMemo(
-    () =>
-      // Raw fields, no `?? []`: the helper treats a missing one as "no
-      // manager-side key" (WR-06), which over-discloses rather than hides.
-      managerSideKeyIds(
-        payload.eligibleApiKeyIds,
-        payload.allocatorEligibleApiKeyIds,
-      ),
-    [payload.eligibleApiKeyIds, payload.allocatorEligibleApiKeyIds],
-  );
   const liveHoldingsSummary = useMemo(
     () =>
       summarizeLiveHoldings({
         toggleByScopeRef: scenario.draft.toggleByScopeRef,
         holdingsByRef: holdingsByScopeRef,
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
-        managerSideApiKeyIds,
         statusByKeyId: keyStates.statusByKeyId,
         disconnectedAtByKeyId: keyStates.disconnectedAtByKeyId,
         // Review C2 WR-03: the server-built eligible set, read raw (no
@@ -4808,7 +4794,6 @@ export function ScenarioComposer({
       scenario.draft.toggleByScopeRef,
       holdingsByScopeRef,
       payload.contributingApiKeyIds,
-      managerSideApiKeyIds,
       keyStates,
       payload.eligibleApiKeyIds,
     ],

@@ -590,34 +590,3 @@ def test_the_oracle_module_is_get_only_and_writes_nothing() -> None:
         assert forbidden not in names, forbidden
     assert "private_get_account_bills_archive" in source
     assert "private_get_account_balance(" in source
-
-
-def test_opening_agrees_is_inclusive_at_the_usd_floor() -> None:
-    """A small account: the anchor implies an opening of 8.0 (10.0 less a replay that ended at
-    2.0). The USD floor dominates here because every allowed relative tolerance times 10 is
-    below 1, so an opening of 7.0 (a difference of exactly the floor) agrees and 6.99 does not.
-    An exclusive comparison would refuse the boundary; a floor that grew would accept 6.99."""
-    assert obal.opening_agrees(10.0, 2.0, 7.0) is True
-    assert obal.opening_agrees(10.0, 2.0, 6.99) is False
-
-
-@pytest.mark.parametrize("sign", [-1.0, 1.0], ids=["below", "above"])
-def test_opening_agrees_scales_with_the_anchor(sign: float) -> None:
-    """A large account: the allowance is the relative tolerance times the anchor, in either
-    direction (the bills can show more or less money than the anchor implies). 0.999 of it
-    agrees and 1.001 of it does not, so the tolerance follows the account instead of staying a
-    flat dollar amount."""
-    anchor, replay_final = 100000.0, 10000.0
-    implied = anchor - replay_final
-    allowance = obal.OPENING_TOLERANCE_REL * anchor
-    assert obal.opening_agrees(anchor, replay_final, implied + sign * 0.999 * allowance) is True
-    assert obal.opening_agrees(anchor, replay_final, implied + sign * 1.001 * allowance) is False
-
-
-def test_the_tolerance_is_the_measured_value() -> None:
-    """The founder's recorded decision D-08 (179-05-SUMMARY.md `tolerance-founder-decision: Tighten
-    to 2%`, `tolerance-rel-after: 0.02`) on a4's measured residual -0.0136 of the anchor on a
-    complete walk. It replaced Phase 172 plan 03's 5%. Changing it is a decision to record there
-    first, not an edit to make here."""
-    assert obal.OPENING_TOLERANCE_REL == 0.02
-    assert obal.OPENING_TOLERANCE_USD == 1.0

@@ -69,7 +69,7 @@ describe("derive refusal rows: the reader names a line it already has", () => {
       expect(result.equityHistoryRebuildReason).toBe(row.reader_reason);
       expect(result.equityDailyPoints).toEqual([]);
       expect(result.equityDailyReturns).toEqual([]);
-      expect(result.equityCurveSource).toBe("legacy");
+      expect(result.equityCurveSource).toBeUndefined();
       expect(result.derivedCurveComputedAt).toBeNull();
     },
   );
@@ -150,7 +150,7 @@ describe("a refusal row can never render as a curve: each guard holds on its own
     expect(result.equityHistoryState).toBe("rebuilding");
     expect(result.equityDailyPoints).toEqual([]);
     expect(result.equityDailyReturns).toEqual([]);
-    expect(result.equityCurveSource).toBe("legacy");
+    expect(result.equityCurveSource).toBeUndefined();
     expect(result.derivedCurveComputedAt).toBeNull();
   };
 

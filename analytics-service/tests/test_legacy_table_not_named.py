@@ -41,6 +41,13 @@ DROPPED_OBJECTS = (
     "replace_allocator_equity_snapshots",
     "extract_symbol_value_at",
     "enqueue_refresh_allocator_equity_for_all",
+    # Phase 224 DEAD-01/DEAD-04: dropped by PR-2's migration.
+    "get_admin_compute_jobs",
+    "backfill_api_keys_history_reconstructed_at",
+    "allocator_trade_reads",
+    "allocator_trade_read_windows",
+    "history_reconstructed_at",
+    "history_reconstruct_attempts",
 )
 
 SCAN_PATHSPECS = (
@@ -111,6 +118,6 @@ def test_no_production_string_names_a_dropped_object() -> None:
 
     offences = [line for path in files for line in _offences(path)]
     assert not offences, (
-        "production code names an object the Phase 176 drop migration removes; "
+        "production code names an object a drop migration (Phase 176 or Phase 224) removes; "
         "on PROD this fails the job at run time, not in CI:\n  " + "\n  ".join(offences)
     )

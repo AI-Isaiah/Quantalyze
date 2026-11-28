@@ -405,20 +405,6 @@ function parityDbClient() {
   };
 }
 
-// Phase 167.1 review round 2 WR-01 — `excludedUntrusted` renders nowhere
-// until the founder answers D-06, so the composer's wiring of D-20's
-// manager-side set is observable only at the call. A PASS-THROUGH spy: the real
-// helper runs, so every other case in this file sees the real summary, and the
-// AUMTRUST block can assert the arguments and the result.
-vi.mock("../lib/live-holdings-summary", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../lib/live-holdings-summary")>();
-  return {
-    ...actual,
-    summarizeLiveHoldings: vi.fn(actual.summarizeLiveHoldings),
-  };
-});
-
 vi.mock("./CustomRangePicker", () => ({
   CustomRangePicker: vi.fn(
     (props: {
@@ -501,7 +487,6 @@ import { ScenarioCommitDrawer } from "./ScenarioCommitDrawer";
 // @/lib/scenario is never mocked, so these are the genuine functions the composer
 // runs. ENGINE-01: no alias collapse is involved — the engine set is series-space.
 import { buildPerKeyStrategyForBuilderSet } from "../lib/scenario-adapter";
-import { summarizeLiveHoldings } from "../lib/live-holdings-summary";
 import {
   computeScenario as realComputeScenario,
   buildDateMapCache as realBuildDateMapCache,
@@ -745,7 +730,6 @@ function makePayload(
       { date: "2026-01-01", value: 100_000 },
       { date: "2026-01-02", value: 101_000 },
     ],
-    equityCurveSource: "legacy",
     derivedCurveComputedAt: null,
     // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
     equityHistoryState: "rebuilding",
@@ -18330,63 +18314,6 @@ describe("ScenarioComposer — AUMTRUST (Phase 167.1)", () => {
     );
   });
 
-  it("D-20 (review round 2 WR-01): the composer hands summarizeLiveHoldings the payload's manager-side keys — eligibleApiKeyIds minus allocatorEligibleApiKeyIds — so a sign_in_failed manager key is left out of excludedUntrusted while a revoked key stays in", () => {
-    const AT_KEY_MANAGER = "aumtrust-key-m";
-    const base = atBook([
-      {
-        id: AT_KEY_TRUSTED,
-        status: null,
-        venue: "binance",
-        symbol: "AUMTRUST-A",
-        spotUsd: AT_TRUSTED_USD,
-      },
-      {
-        id: AT_KEY_MANAGER,
-        status: "sign_in_failed",
-        venue: "okx",
-        symbol: "AUMTRUST-M",
-        spotUsd: 55_555,
-        eligible: false,
-      },
-      {
-        id: AT_KEY_REVOKED,
-        status: "revoked",
-        venue: "kraken",
-        symbol: "AUMTRUST-D",
-        spotUsd: 3_210,
-        eligible: false,
-      },
-    ]);
-    // The manager key is per-key-dailies ELIGIBLE but not ALLOCATOR-eligible:
-    // it feeds a strategy the owner runs as a manager. The revoked key is in
-    // neither set, so the payload cannot say whose book it is (D-20).
-    const payload: MyAllocationDashboardPayload = {
-      ...base,
-      eligibleApiKeyIds: [AT_KEY_TRUSTED, AT_KEY_MANAGER],
-      allocatorEligibleApiKeyIds: [AT_KEY_TRUSTED],
-    };
-    expectDistinctTriples(payload);
-    expect(payload.contributingApiKeyIds).toEqual([AT_KEY_TRUSTED]);
-    renderAt(payload);
-
-    const spy = vi.mocked(summarizeLiveHoldings);
-    expect(spy).toHaveBeenCalled();
-    const lastArgs = spy.mock.calls.at(-1)?.[0];
-    expect(lastArgs?.managerSideApiKeyIds).toEqual([AT_KEY_MANAGER]);
-    // Hand-listed: only the revoked key's 3,210 is D-20's $Y. Counting the
-    // manager key would give 58,765 over two holdings.
-    const lastResult = spy.mock.results.at(-1)?.value as ReturnType<
-      typeof summarizeLiveHoldings
-    >;
-    expect(lastResult.excludedUntrusted).toEqual({
-      amount: 3_210,
-      count: 1,
-      unavailable: 0,
-    });
-    // D-03: the field is the contributing book only.
-    expect(aumField().value).toBe(String(AT_TRUSTED_USD));
-  });
-
   it("D-06 (component pin, answered (b) 2026-09-24): a revoked key's holding outside the eligible and contributing sets stays out of the field, and the marker now says so — 'Excludes $55,555 from keys needing attention.'", () => {
     // ⭐ CONTEXT D-06 RESOLVED 2026-09-24 by the founder: option (b). Until
     // plan 05 this test pinned the OPEN behaviour — the revoked key's holdings
@@ -19032,8 +18959,8 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     });
 
   it.each([
-    ["a null count on the legacy source (SFH-05's book, the producer's own shape)", null, "legacy"],
-    ["a non-null count of 3, which must not decide it (D-15: by state, never by count)", 3, "legacy"],
+    ["a null count with no source (SFH-05's book, the producer's own shape)", null, undefined],
+    ["a non-null count of 3, which must not decide it (D-15: by state, never by count)", 3, undefined],
   ] as const)(
     "rebuilding + %s: the disclosure renders exactly once, and the live-book KPIs stay (D-15)",
     (_label, snapshotCount, equityCurveSource) => {
@@ -19082,7 +19009,7 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
     ],
     [
       "neither source (no derived curve)",
-      "legacy",
+      undefined,
       null,
       "awaiting_derivation",
     ],
@@ -19110,10 +19037,10 @@ describe("ScenarioComposer — 167.1.2 D-02 own-book comparison hidden while reb
   // D-15: blank mode has no own book to compare with, so the disclosure never
   // renders there, whatever the state and whatever the history shape.
   it.each([
-    ["rebuilding", "rebuilding", "legacy"],
+    ["rebuilding", "rebuilding", undefined],
     ["rebuilding", "rebuilding", "derived"],
-    ["null", null, "legacy"],
-    ["an unrecognised state", "partial", "legacy"],
+    ["null", null, undefined],
+    ["an unrecognised state", "partial", undefined],
     ["ready", "ready", "derived"],
   ] as const)(
     // Review C3 SFH-C3-05 / IN-04: one placeholder per column, in row order

@@ -3,8 +3,6 @@
 Pins the single-source registry's contracts and the two behaviors that
 matter for correctness:
 
-* ``perp_quote`` reproduces the exact prior inline quote derivation that
-  lived (twice) in ``_compute_daily_equity`` (golden parity).
 * ``_make_fill_dict`` flags — but does not drop — a fill with an
   unrecognized trade side, closing the NEW-C01-09 ingest gap where bad
   sides silently reached ``trades``.
@@ -22,7 +20,6 @@ from services.closed_sets import (
     TRADE_SIDES,
     TRADE_SIDES_SET,
     is_trade_side,
-    perp_quote,
 )
 
 
@@ -73,46 +70,6 @@ def test_is_trade_side_accepts_known_case_insensitive(value):
 )
 def test_is_trade_side_rejects_unknown_and_non_strings(value):
     assert is_trade_side(value) is False
-
-
-# ---------------------------------------------------------------------------
-# perp_quote — golden parity with the prior inline derivation
-# ---------------------------------------------------------------------------
-def _legacy_inline_quote(symbol: str) -> str:
-    """The exact logic that lived inline in _compute_daily_equity twice."""
-    if "/" in symbol:
-        return symbol.split("/")[-1].split(":")[0].upper()
-    return "USDT"
-
-
-@pytest.mark.parametrize(
-    "symbol",
-    [
-        "BTC/USDT:USDT",   # linear perp
-        "ETH/USDT:USDT",
-        "BTC/USD:BTC",     # inverse perp — quote is USD, NOT USD:BTC
-        "BTC/USDT",        # spot
-        "ETH/USDC",
-        "DOGE/USDT:USDT",
-        "BTCUSDT",         # stripped holdings code — no slash
-        "",                # empty
-        "WEIRD",           # no slash, non-stable
-        "a/b:c",           # lowercase -> uppercased
-    ],
-)
-def test_perp_quote_matches_legacy_inline(symbol):
-    assert perp_quote(symbol) == _legacy_inline_quote(symbol)
-
-
-def test_perp_quote_strips_inverse_settle_suffix():
-    # The WR-03 bug this guards: a naive split("/")[-1] would yield "USD:BTC".
-    assert perp_quote("BTC/USD:BTC") == "USD"
-    assert perp_quote("BTC/USDT:USDT") == "USDT"
-
-
-def test_perp_quote_defaults_usdt_without_slash():
-    assert perp_quote("BTCUSDT") == "USDT"
-    assert perp_quote("") == "USDT"
 
 
 # ---------------------------------------------------------------------------

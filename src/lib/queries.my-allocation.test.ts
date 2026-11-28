@@ -170,15 +170,6 @@ const state = vi.hoisted(() => ({
     strategy_id: string;
     api_key_id: string;
   }>,
-  // Phase 167.1.2.1 review 09 (WR-02) — compute_jobs rows, read by the
-  // dashboard (admin client, deny-all RLS) only to learn which capped keys have
-  // a reconstruct job in flight.
-  computeJobs: [] as Array<{
-    id: string;
-    kind: string;
-    status: string;
-    api_key_id: string | null;
-  }>,
   // 151 test-analyzer gap 2 — per-table read-error injection. A PostgREST
   // failure (or a `strategy_keys` missing from the schema cache on a
   // pre-migration environment) must degrade, not blank the dashboard: the
@@ -215,7 +206,6 @@ function resetState() {
   state.allocatorEquityDerived = [];
   state.strategies = [];
   state.strategyKeys = [];
-  state.computeJobs = [];
   state.tableErrors = {};
   state.maxRows = null;
   state.auditLog = [];
@@ -231,7 +221,7 @@ type ChainAuditEntry = {
   table: string;
   select: string | null;
   eqs: Array<{ column: string; value: unknown }>;
-  // Phase 167.1.2.1 review 09 (WR-02): `.in()` calls, to pin the compute_jobs read.
+  // `.in()` calls, so a test can pin which ids and kinds a read asked for.
   ins: Array<{ column: string; value: unknown }>;
   limitN: number | null;
   headCount: boolean;
@@ -361,8 +351,6 @@ function buildChain(table: string) {
         return applyFilters(
           state.strategyKeys as Array<Record<string, unknown>>,
         );
-      case "compute_jobs":
-        return applyFilters(state.computeJobs as Array<Record<string, unknown>>);
       case "audit_log":
         return applyFilters(state.auditLog);
       case "api_key_nav_marks":
@@ -4133,7 +4121,7 @@ describe("115.1 equity display-repoint", () => {
     );
   }
 
-  it("SAFETY (never redden): no derived row → equityDailyPoints is [], the source stamps 'legacy' and snapshotCount is null", async () => {
+  it("SAFETY (never redden): no derived row → equityDailyPoints is [], the source is absent and snapshotCount is null", async () => {
     // No allocator_equity_derived row seeded: the book is rebuilding
     // (awaiting_derivation). Phase 176 (D-02): there is no legacy render to fall
     // back to, so nothing is drawn, no source is claimed and no warm-up count is
@@ -4144,12 +4132,12 @@ describe("115.1 equity display-repoint", () => {
     const result = await getMyAllocationDashboard("user-1");
 
     expect(result.equityDailyPoints).toEqual([]);
-    // Neuter gap: the no-row case must stamp the source 'legacy' (only the
+    // Neuter gap: the no-row case must carry NO source (only the
     // derived/untrusted pins asserted the source before): a producer that
     // defaulted to 'derived' on an absent row would mislabel the history.
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     expect(result.snapshotCount).toBeNull();
   });
 
@@ -4174,7 +4162,7 @@ describe("115.1 equity display-repoint", () => {
     expect(result.equityDailyPoints).toEqual([]);
   });
 
-  it("RED (plan 05): an untrustworthy derived row falls back to the legacy render and marks the source 'legacy'", async () => {
+  it("RED (plan 05): an untrustworthy derived row carries no source (no derived curve)", async () => {
     state.portfolios = [P1151_PORTFOLIO];
     state.allocatorEquityDerived = [derivedRow(false)];
 
@@ -4184,7 +4172,7 @@ describe("115.1 equity display-repoint", () => {
     // Fails now: the provenance indicator is missing.
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
@@ -4214,7 +4202,7 @@ describe("115.1 equity display-repoint", () => {
 
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
@@ -4247,7 +4235,7 @@ describe("115.1 equity display-repoint", () => {
 
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
@@ -4283,7 +4271,7 @@ describe("115.1 equity display-repoint", () => {
 
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
@@ -4312,7 +4300,7 @@ describe("115.1 equity display-repoint", () => {
 
     expect(
       (result as unknown as { equityCurveSource?: string }).equityCurveSource,
-    ).toBe("legacy");
+    ).toBeUndefined();
     // Phase 167.1.2 / D-02: the producer withholds the display series ([] for
     // every allocator). What it WOULD show is pinned directly on the extractor
     // it calls (review round 1 SFH-04), so this case can still fail on a
@@ -4824,48 +4812,34 @@ describe("getMyAllocationDashboard — every eligible key, linked or not, is in 
   });
 
   // -------------------------------------------------------------------------
-  // 151 test-analyzer gap 2 — THE DEGRADATION PATH, as D-01 leaves it.
-  //
-  // Both link reads stay NON-FATAL (never assertOk'd): a transient failure must
-  // not blank a working dashboard, and `strategy_keys` can be absent from the
-  // PostgREST schema cache on a pre-migration environment. They no longer feed
-  // book membership: `allocatorEligibleApiKeyIds` is `eligibleKeyIds` whether
-  // the reads succeed or fail, so a read failure cannot change what a saved
-  // scenario's persisted membership (`memberKeyIdsForSave =
-  // contributingApiKeyIds`) claims to model. What the reads still feed is the
-  // reconstruct note, which names nothing when the link source is unreadable.
-  // These pins keep the failure visible and non-fatal: a future refactor that
-  // added an `assertOk` (blanking the dashboard) or dropped the capture (making
-  // the fault invisible) goes red here.
+  // Phase 224 (DEAD-04). The two owner-scoped link reads (`strategies` and
+  // `strategy_keys`) existed only for the Overview's "history could not be
+  // rebuilt" note, which is gone. Since Phase 176 (D-01) book membership never
+  // read them, so a dashboard load makes neither read any more (two round-trips
+  // fewer). This pin is what makes the book-membership assertion below able to
+  // fail: with both tables erroring, the book is `eligibleKeyIds` only because
+  // nothing asks them, and a refactor that reads a link table again to decide
+  // membership goes red on the read assertion first.
   // -------------------------------------------------------------------------
-  it("degradation (strategy_keys read errors): the dashboard still returns, book membership is unchanged, and the fault is reported to Sentry", async () => {
+  it("the dashboard reads neither link table, and book membership is unchanged when both would fail", async () => {
     state.portfolios = [P7_PORTFOLIO];
     state.apiKeys = AUM04_KEYS;
     state.strategies = AUM04_STRATEGIES;
     state.strategyKeys = AUM04_LINKS;
     seedSeriesFor(["k-bybit", "k-okx", "k-mt5-1", "k-deribit-1"]);
-    // The link table is unreadable.
     state.tableErrors["strategy_keys"] = {
       message: "PGRST002 schema cache lookup failed (test)",
     };
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const sentry = await import("./sentry-capture");
-    const captureSpy = vi
-      .spyOn(sentry, "captureToSentry")
-      .mockImplementation(async () => {});
+    state.tableErrors["strategies"] = { message: "connection reset (test)" };
 
     const { getMyAllocationDashboard } = await import("./queries");
     const result = await getMyAllocationDashboard("user-1");
 
-    // (a) NEVER blank the dashboard — the read is not a gate. If someone adds
-    // an assertOk here, this rejects instead of resolving.
-    expect(result).toHaveProperty("bookEntryGateSatisfied");
-    expect(result.eligibleApiKeyIds).toHaveLength(8);
-
-    // (b) Membership does not depend on the link reads: the failing run holds
-    // the same book as the healthy run (the control below pins the healthy
-    // one). Pinning the exact set, in census order, is what stops a refactor
-    // from making the book depend on a read again.
+    expect(
+      chainAudit.entries.filter(
+        (e) => e.table === "strategy_keys" || e.table === "strategies",
+      ),
+    ).toHaveLength(0);
     expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
     expect(result.contributingApiKeyIds).toEqual([
       "k-bybit",
@@ -4874,101 +4848,6 @@ describe("getMyAllocationDashboard — every eligible key, linked or not, is in 
       "k-mt5-1",
     ]);
     expect(result.bookEntryGateSatisfied).toBe(true);
-
-    // (c) The fault stays OBSERVABLE — the breadcrumb is the only signal that
-    // this book projection is degraded rather than correct.
-    expect(captureSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          reason: "role_discriminator_read_failed",
-        }),
-      }),
-    );
-    // The log names what the reads still feed, not a book-gate degradation the
-    // reads no longer cause.
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "strategy-link read failed (the reconstruct note names nothing)",
-      ),
-      expect.anything(),
-    );
-    expect(errSpy).not.toHaveBeenCalledWith(
-      expect.stringContaining("book gate degrades"),
-      expect.anything(),
-    );
-
-    captureSpy.mockRestore();
-    errSpy.mockRestore();
-  });
-
-  it("degradation (own-`strategies` read errors): the SAME non-fatal + reported posture on the other read", async () => {
-    // The two reads are OR'd into one error signal, so the sibling arm needs its
-    // own pin — dropping either read's error from `phase151LinkReadError` would
-    // otherwise stay green.
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = AUM04_KEYS;
-    state.strategies = AUM04_STRATEGIES;
-    state.strategyKeys = AUM04_LINKS;
-    seedSeriesFor(["k-bybit", "k-okx"]);
-    state.tableErrors["strategies"] = { message: "connection reset (test)" };
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const sentry = await import("./sentry-capture");
-    const captureSpy = vi
-      .spyOn(sentry, "captureToSentry")
-      .mockImplementation(async () => {});
-
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    expect(result).toHaveProperty("bookEntryGateSatisfied");
-    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
-    expect(captureSpy).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          reason: "role_discriminator_read_failed",
-        }),
-      }),
-    );
-    expect(errSpy).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "strategy-link read failed (the reconstruct note names nothing)",
-      ),
-      expect.anything(),
-    );
-
-    captureSpy.mockRestore();
-    errSpy.mockRestore();
-  });
-
-  it("control: with BOTH reads healthy, no degradation breadcrumb fires", async () => {
-    // Non-vacuity for the two tests above — proves they observe the ERROR arm
-    // and not a breadcrumb that fires on every call.
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = AUM04_KEYS;
-    state.strategies = AUM04_STRATEGIES;
-    state.strategyKeys = AUM04_LINKS;
-    seedSeriesFor(["k-bybit", "k-okx"]);
-    const sentry = await import("./sentry-capture");
-    const captureSpy = vi
-      .spyOn(sentry, "captureToSentry")
-      .mockImplementation(async () => {});
-
-    const { getMyAllocationDashboard } = await import("./queries");
-    const result = await getMyAllocationDashboard("user-1");
-
-    // The healthy census: the same book as under a read failure (D-01).
-    expect(result.allocatorEligibleApiKeyIds).toEqual(AUM04_KEY_IDS);
-    expect(
-      captureSpy.mock.calls.some(
-        ([, opts]) =>
-          (opts as { tags?: Record<string, unknown> } | undefined)?.tags
-            ?.reason === "role_discriminator_read_failed",
-      ),
-    ).toBe(false);
-
-    captureSpy.mockRestore();
   });
 });
 
@@ -5946,236 +5825,6 @@ describe("getMyAllocationDashboard — a native account's Holdings row carries i
     const result = await getMyAllocationDashboard("user-1");
 
     expect(result.holdingsSummary[0].quantity_unit).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Phase 167.1.2.1 review 09 (WR-02, SFH F4). `historyReconstructFailed` may only
-// name a key the daily fan-out still qualifies, and "linked to a strategy" is
-// the fan-out's own test: ANY non-archived strategy of the owner, through
-// `strategies.api_key_id` or `strategy_keys`, whatever its capital mark. These
-// run the REAL reader against the owner-scoped table reads, so they pin the
-// wiring that the unit cases on derivePhase07Fields cannot see: which strategies
-// reach the link set (unfiltered by capital mark) and what a failed link read
-// does (the note names nothing).
-// ---------------------------------------------------------------------------
-describe("getMyAllocationDashboard — historyReconstructFailed names only a key the fan-out still qualifies (167.1.2.1 WR-02)", () => {
-  beforeEach(resetState);
-
-  const cappedKey = () => ({
-    ...aum04Key("k-capped", "bybit"),
-    history_reconstructed_at: null,
-    history_reconstruct_attempts: 5,
-  });
-
-  async function read() {
-    const { getMyAllocationDashboard } = await import("./queries");
-    return getMyAllocationDashboard("user-1");
-  }
-
-  it("a capped key with no strategy link raises it (the control)", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    expect((await read()).historyReconstructFailed).toBe(true);
-  });
-
-  it("a capped key behind a live strategy raises nothing, whatever the capital mark (own_capital is still a link)", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.strategies = [
-      {
-        id: "s-own",
-        user_id: "user-1",
-        api_key_id: "k-capped",
-        status: "private",
-        capital_ownership: "own_capital",
-      },
-    ];
-    expect((await read()).historyReconstructFailed).toBe(false);
-  });
-
-  it("a capped key behind a strategy_keys composite link raises nothing, even with own_capital on the strategy", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.strategies = [
-      {
-        id: "s-composite",
-        user_id: "user-1",
-        api_key_id: null,
-        status: "private",
-        capital_ownership: "own_capital",
-      },
-    ];
-    state.strategyKeys = [
-      { owner_id: "user-1", strategy_id: "s-composite", api_key_id: "k-capped" },
-    ];
-    expect((await read()).historyReconstructFailed).toBe(false);
-  });
-
-  it("a capped key behind an ARCHIVED strategy still raises it", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.strategies = [
-      {
-        id: "s-old",
-        user_id: "user-1",
-        api_key_id: "k-capped",
-        status: "archived",
-        capital_ownership: null,
-      },
-    ];
-    expect((await read()).historyReconstructFailed).toBe(true);
-  });
-
-  it.each(["strategy_keys", "strategies"])(
-    "an unreadable %s read raises nothing, never a note about a key that may be linked",
-    async (table) => {
-      state.portfolios = [P7_PORTFOLIO];
-      state.apiKeys = [cappedKey()];
-      state.tableErrors[table] = { message: "PGRST002 schema cache lookup failed (test)" };
-      vi.spyOn(console, "error").mockImplementation(() => {});
-      const sentry = await import("./sentry-capture");
-      vi.spyOn(sentry, "captureToSentry").mockImplementation(async () => {});
-      expect((await read()).historyReconstructFailed).toBe(false);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Phase 167.1.2.1 review 09 round 2 (WR-02, the in-flight half of SFH F4). The
-// fan-out counts an attempt at ENQUEUE, so the fifth attempt reads as capped
-// while its job is still pending, running or backing off, and the job may yet
-// succeed. The note waits on a job in flight, using the statuses the fan-out and
-// the Python hold wait on. These run the REAL reader against a seeded
-// compute_jobs table.
-// ---------------------------------------------------------------------------
-describe("getMyAllocationDashboard — historyReconstructFailed waits on a reconstruct in flight (167.1.2.1 WR-02 round 2)", () => {
-  beforeEach(resetState);
-
-  const cappedKey = () => ({
-    ...aum04Key("k-capped", "bybit"),
-    history_reconstructed_at: null,
-    history_reconstruct_attempts: 5,
-  });
-
-  const job = (status: string, over: Record<string, unknown> = {}) => ({
-    id: "j-1",
-    kind: "reconstruct_allocator_history",
-    status,
-    api_key_id: "k-capped",
-    ...over,
-  });
-
-  const computeJobReads = () =>
-    chainAudit.entries.filter((e) => e.table === "compute_jobs");
-
-  async function read() {
-    const { getMyAllocationDashboard } = await import("./queries");
-    return getMyAllocationDashboard("user-1");
-  }
-
-  it("a capped key with no job at all raises it (the control)", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    expect((await read()).historyReconstructFailed).toBe(true);
-    expect(computeJobReads()).toHaveLength(1);
-  });
-
-  // Hand-typed on purpose: these four are the statuses migration 20261021120000
-  // counts as in flight. The twin test pins the constant to the migration; this
-  // pins the behaviour to the words.
-  it.each(["pending", "running", "done_pending_children", "failed_retry"])(
-    "a capped key whose reconstruct is %s raises nothing",
-    async (status) => {
-      state.portfolios = [P7_PORTFOLIO];
-      state.apiKeys = [cappedKey()];
-      state.computeJobs = [job(status)];
-      expect((await read()).historyReconstructFailed).toBe(false);
-    },
-  );
-
-  it.each(["done", "failed_final"])(
-    "a capped key whose last reconstruct is %s (finished) still raises it",
-    async (status) => {
-      state.portfolios = [P7_PORTFOLIO];
-      state.apiKeys = [cappedKey()];
-      state.computeJobs = [job(status)];
-      expect((await read()).historyReconstructFailed).toBe(true);
-    },
-  );
-
-  it("an in-flight job of ANOTHER kind does not hold the note", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.computeJobs = [job("running", { kind: "poll_allocator_positions" })];
-    expect((await read()).historyReconstructFailed).toBe(true);
-  });
-
-  it("an in-flight reconstruct of a key the owner does not hold does not hold the note", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.computeJobs = [job("running", { api_key_id: "k-someone-else" })];
-    expect((await read()).historyReconstructFailed).toBe(true);
-  });
-
-  it("two capped keys, one in flight: the other is still named", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [
-      cappedKey(),
-      { ...cappedKey(), id: "k-other", venue_account_id: "acct-other" },
-    ];
-    state.computeJobs = [job("pending")];
-    expect((await read()).historyReconstructFailed).toBe(true);
-  });
-
-  it("no capped key means no compute_jobs read at all (the common dashboard pays nothing)", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    const healthy = cappedKey();
-    healthy.history_reconstruct_attempts = 1;
-    state.apiKeys = [healthy];
-    expect((await read()).historyReconstructFailed).toBe(false);
-    expect(computeJobReads()).toHaveLength(0);
-  });
-
-  it("the read asks only for the reconstruct kind, the four in-flight statuses and the capped key ids", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    await read();
-    const [entry] = computeJobReads();
-    expect(entry.select).toBe("api_key_id");
-    expect(entry.eqs).toContainEqual({
-      column: "kind",
-      value: "reconstruct_allocator_history",
-    });
-    expect(entry.ins).toContainEqual({
-      column: "status",
-      value: ["pending", "running", "done_pending_children", "failed_retry"],
-    });
-    expect(entry.ins).toContainEqual({
-      column: "api_key_id",
-      value: ["k-capped"],
-    });
-  });
-
-  it("an unreadable compute_jobs read raises nothing and is captured, never a note that may be false", async () => {
-    state.portfolios = [P7_PORTFOLIO];
-    state.apiKeys = [cappedKey()];
-    state.tableErrors.compute_jobs = { message: "42501 permission denied (test)" };
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    const sentry = await import("./sentry-capture");
-    const capture = vi
-      .spyOn(sentry, "captureToSentry")
-      .mockImplementation(async () => {});
-    expect((await read()).historyReconstructFailed).toBe(false);
-    expect(capture).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        tags: expect.objectContaining({
-          reason: "reconstruct_in_flight_read_failed",
-        }),
-        level: "warning",
-      }),
-    );
   });
 });
 

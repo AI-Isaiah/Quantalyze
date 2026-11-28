@@ -142,7 +142,6 @@ const PAYLOAD_P = {
   lastSyncAt: null,
   hasSyncing: false,
   equityDailyPoints: [],
-  equityCurveSource: "legacy",
   equityHistoryState: "rebuilding",
   equityDailyReturns: [],
   equityHistoryRebuildReason: "awaiting_derivation",

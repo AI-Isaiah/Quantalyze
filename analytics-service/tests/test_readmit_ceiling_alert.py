@@ -480,8 +480,6 @@ async def test_watchdog_loop_calls_readmit_reader(monkeypatch: pytest.MonkeyPatc
         return 0
 
     monkeypatch.setattr(main_worker, "watchdog_tick", _noop)
-    monkeypatch.setattr(main_worker, "report_orphaned_capped_reconstructs", _noop)
-    monkeypatch.setattr(main_worker, "sweep_expired_trade_reads", _noop)
     monkeypatch.setattr(main_worker, "page_readmit_exhaustions", _reader)
 
     task = asyncio.create_task(main_worker.watchdog_loop(interval=0.01))
@@ -498,20 +496,15 @@ async def test_watchdog_loop_survives_readmit_reader_error(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """One task cannot end the others: a reader that raises (a contract break) must not stop
-    the loop, and the next pass still runs the reader and the trade-read sweep."""
+    the loop, and the next pass still runs the reader."""
     import main_worker
 
     shutdown = asyncio.Event()
     monkeypatch.setattr(main_worker, "SHUTDOWN", shutdown)
     reader_calls = 0
-    sweep_calls = 0
 
     async def _noop() -> None:
         return None
-
-    async def _sweep() -> None:
-        nonlocal sweep_calls
-        sweep_calls += 1
 
     async def _reader() -> int:
         nonlocal reader_calls
@@ -522,8 +515,6 @@ async def test_watchdog_loop_survives_readmit_reader_error(
         return 0
 
     monkeypatch.setattr(main_worker, "watchdog_tick", _noop)
-    monkeypatch.setattr(main_worker, "report_orphaned_capped_reconstructs", _noop)
-    monkeypatch.setattr(main_worker, "sweep_expired_trade_reads", _sweep)
     monkeypatch.setattr(main_worker, "page_readmit_exhaustions", _reader)
     caplog.set_level(logging.ERROR)
 
@@ -534,7 +525,6 @@ async def test_watchdog_loop_survives_readmit_reader_error(
 
     assert task in done, "watchdog_loop hung"
     assert reader_calls >= 2, f"the reader ran {reader_calls} time(s); its failure stopped the loop"
-    assert sweep_calls >= 2
     assert task.exception() is None
     guard = [
         r for r in caplog.records if getattr(r, "event_type", None) == "readmit_ceiling_loop_guard"

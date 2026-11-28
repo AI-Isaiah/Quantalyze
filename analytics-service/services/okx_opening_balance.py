@@ -110,22 +110,6 @@ BILLS_ARCHIVE_PAGE_ROWS: Final[int] = 100
 #: answer. 500 pages is 50000 bills, far beyond any three-month account.
 BILLS_ARCHIVE_PAGE_CEILING: Final[int] = 500
 
-#: The agreement tolerance of ``opening_agrees`` (Phase 172 D-01 item 2): the larger of
-#: ``OPENING_TOLERANCE_USD`` and ``OPENING_TOLERANCE_REL`` times the anchor. The shape mirrors
-#: ``_BYBIT_UPNL_TOLERANCE_USD`` / ``_BYBIT_UPNL_TOLERANCE_REL`` in
-#: ``services/equity_reconstruction.py``: a USD floor for tiny accounts and a relative term
-#: that scales with the account. The relative value is 0.02 by founder decision
-#: D-08 (Phase 179, 2026-10-28, "Tighten to 2%"), taken against the 172-05 step 9b
-#: recommendation to keep 5%. Its basis is a4's SC-3 reading on a complete walk after the
-#: Phase 179 close fix (``opening_check=measured``, ``opening_residual_over_anchor=-0.0136``,
-#: ``bills_read=1490``; ``179-05-SUMMARY.md``), which sits inside it. It is a founder choice, not
-#: a measured calibration: ONE account is the only basis and a second OKX account is unmeasured
-#: (TODOS ``172-OKX-OPENING-TOLERANCE-ONE-ACCOUNT``). Before D-08 the value was 5%, Phase 172
-#: plan 03's choice (2026-10-27) made on a partial walk the oracle now refuses. A change is a
-#: founder decision recorded first.
-OPENING_TOLERANCE_USD: Final[float] = 1.0
-OPENING_TOLERANCE_REL: Final[float] = 0.02
-
 #: The relative bound of the close arm in ``close_agrees`` (Phase 179 D-07, founder 2026-10-28,
 #: "Trillionth bound only"; it supersedes the decimal-places half of D-06): the newest bill's
 #: ``bal`` and today's ``cashBal`` agree when they are equal or differ by no more than this
@@ -491,14 +475,3 @@ async def read_okx_opening(
             newest_usdt_bal=newest_usdt_bal,
             walked=tuple(bills),
         )
-
-
-def opening_agrees(anchor: float, replay_final: float, oracle_opening: float) -> bool:
-    """True when the opening the anchor implies is within tolerance of the bills' opening.
-
-    ``anchor - replay_final`` is the cash the replay started without (the offset the anchor
-    would spread); ``oracle_opening`` is what the venue's own running balances say the account
-    held at the start of the first written row. Agreement bounds the level error of that first
-    row, because the oracle values the opening at the first row's own close (plan 01).
-    """
-    return abs((anchor - replay_final) - oracle_opening) <= max(OPENING_TOLERANCE_USD, OPENING_TOLERANCE_REL * abs(anchor))

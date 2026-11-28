@@ -683,9 +683,11 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // `invalid_parameter_value` ("kind compute_analytics is retired (Phase
         // 106) — no enqueue path remains") before it reaches the behaviour this
         // arm pins. The registry still ADMITS the kind (45 historical rows FK
-        // it), which is why the sibling fan-in arms that seed children by direct
-        // INSERT are unaffected and are left alone — the reject is RPC-level
-        // only. `reconcile_strategy` is a live strategy-targeted kind, and being
+        // it), but the sibling fan-in arms that seed children by direct INSERT
+        // no longer rely on that: Phase 224 moved them to the live
+        // `compute_analytics_from_csv`, so the registry CHECK can drop the
+        // retired kind without breaking them. `reconcile_strategy` is a live
+        // strategy-targeted kind, and being
         // a DIFFERENT kind from the parent's it cannot trip
         // `compute_jobs_one_inflight_per_kind_strategy`. Nothing about the
         // assertion changed: the subject is that a row with parents starts in
@@ -775,7 +777,7 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // C: child waiting on both, in done_pending_children.
         const c = await insertComputeJob(admin, {
           strategy_id: strategyA,
-          kind: "compute_analytics",
+          kind: "compute_analytics_from_csv",
           status: "done_pending_children",
           attempts: 0,
           max_attempts: 3,

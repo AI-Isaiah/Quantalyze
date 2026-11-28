@@ -112,7 +112,6 @@ import main_worker_healthz  # top-level module (not in services/); stdlib-only, 
 from sentry_init import init_sentry
 from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
-from services import trade_read_store
 from services.readmit_ceiling_alert import page_readmit_exhaustions
 from services.job_worker import (
     DispatchOutcome,
@@ -120,7 +119,6 @@ from services.job_worker import (
     JobStatus,
     Priority,
     dispatch,
-    report_orphaned_capped_reconstructs,
 )
 
 logger = logging.getLogger("quantalyze.analytics.worker")
@@ -348,12 +346,6 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
     "compute_analytics_from_csv": "15 minutes",
     "poll_positions": "5 minutes",     # handler timeout = 3 minutes
     "compute_portfolio": "15 minutes", # handler timeout = 10 minutes
-    # Equity-history backfill is the longest-running kind in the system —
-    # without this override, the global 10-minute default reclaims the
-    # job 20+ minutes before the handler can fail-classify itself,
-    # reproducing the wizard-hang failure mode for allocator equity
-    # reconstruction. Caught by /review cross-PR audit, 2026-04-30.
-    "reconstruct_allocator_history": "35 minutes",  # handler timeout = 30 minutes
     # Phase 19 / BACKBONE-09 / MC-6 — process_key_long handler timeout is
     # 30 minutes (90-day OKX archive backfill). Watchdog threshold is set
     # to 40 minutes (≥ handler timeout + 30% slack = 39 minutes minimum).
@@ -1727,40 +1719,6 @@ async def dispatch_loop(worker_id: str, interval: float = 30.0) -> None:
     logger.info("dispatch_loop exiting (shutdown)")
 
 
-#: Phase 171 READCEILING: an expired trade-read store row is physically removed at most this long
-#: after its ``expires_at``, while any worker process runs.
-_TRADE_READ_SWEEP_INTERVAL_S: Final[float] = 3600.0
-#: The sweep's clock (a seam: tests drive it) and the instant this process last swept.
-_sweep_clock = time.monotonic
-_last_trade_read_sweep: float | None = None
-
-
-async def sweep_expired_trade_reads() -> None:
-    """Delete the trade-read store's expired rows, at most once per ``_TRADE_READ_SWEEP_INTERVAL_S``
-    per process (Phase 171 READCEILING, D-02's expiry).
-
-    A read that stalls keeps its windows on purpose, so a later job can resume from them. That
-    leaves a key whose rows nobody claims again (an abandoned or idle key) holding per-fill data
-    past its expiry, because the only other purges are a claim on the same key and the delete on
-    DONE. The recorded retention bound is therefore: a row is physically removed at most
-    ``_TRADE_READ_SWEEP_INTERVAL_S`` after its ``expires_at`` (7 days after its last write) while
-    any worker process runs, and earlier on DONE or with its key or account. It lives in the
-    watchdog loop because that is the existing recurring path of every worker process, the API's
-    included (the ``report_orphaned_capped_reconstructs`` precedent of Phase 167.1.2.1), and no
-    database-scheduled job is added.
-
-    The time is stamped BEFORE the purge so that a failing database is retried an hour later, not
-    on every watchdog tick. ``purge_expired`` is best effort and logs its own class-only warning.
-    """
-    global _last_trade_read_sweep
-    now = _sweep_clock()
-    last = _last_trade_read_sweep
-    if last is not None and now - last < _TRADE_READ_SWEEP_INTERVAL_S:
-        return
-    _last_trade_read_sweep = now
-    await trade_read_store.purge_expired(get_supabase())
-
-
 async def watchdog_loop(interval: float = 60.0) -> None:
     """Watchdog loop: reclaims stalled jobs every `interval` seconds."""
     while not SHUTDOWN.is_set():
@@ -1768,23 +1726,6 @@ async def watchdog_loop(interval: float = 60.0) -> None:
             await watchdog_tick()
         except Exception as exc:  # noqa: BLE001
             logger.error("watchdog_loop tick failed: %s", exc, exc_info=True)
-
-        # Phase 167.1.2.1 (silent-failure review F1): the D-09 capped-key event
-        # for a reconstruct job the pg_cron orphan sweep terminalized, which
-        # never returns through dispatch. Its own guard: it must not depend on
-        # the reclaim tick succeeding, and it must never stop the loop.
-        try:
-            await report_orphaned_capped_reconstructs()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("watchdog_loop orphan cap sweep failed: %s", exc, exc_info=True)
-
-        # Phase 171 READCEILING (D-02): kept trade-read rows do not outlive their expiry. Its own
-        # guard, after the reclaim and the orphan sweep: it must never stop the loop or the
-        # reclaim. The class name only is logged (a database error can quote a row).
-        try:
-            await sweep_expired_trade_reads()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("watchdog_loop trade read sweep failed: %s", type(exc).__name__)
 
         # Phase 227 HEAL-03: a strategy whose reconcile readmit hit its ceiling pages a human from
         # its durable row. The reader never raises and throttles itself; this guard is the loop's
