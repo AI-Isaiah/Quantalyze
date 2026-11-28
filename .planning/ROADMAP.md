@@ -910,7 +910,7 @@ Plans:
 - ⚠️ **Known limit (review WR-02, 2026-11-27):** a promoted smoothed headline is time-limited by venue mark retention; as marks age out a later refresh returns it to the named withhold on its own (WARNING log plus Sentry report). When that happens is unmeasured; a remedy needs a founder ruling.
 - ⭐ **FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim "Keep always-on (Recommended)" (recorded in `252-CONTEXT.md`):** options composites use smoothed mark-to-market regardless of `SMOOTHED_MTM_ENABLED`; this confirms the 2026-11-27 gap-planning decision.
 - ⭐ **FOUNDER DECISION 2026-11-28 (via the coordinator), verbatim "Fix inside 252 first" (recorded in `252-CONTEXT.md`):** the post-deploy re-stitch did not promote (the smoothed third crawl hit its bounded budget), so one more gap plan inside 252 builds the smoothed ledger from the cash pass's own crawl (key-mode precedent, Phase 185 `retain_raw_rows`), with no third crawl; then re-stitch, read PROD, close 252.
-**Plans:** 8/10 plans executed
+**Plans:** 10/10 plans executed
 
 Plans:
 - [x] 252-01-PLAN.md — tracer: one predicate `isOptionsCashWalletBook`, a named withhold cause in the headline verdict, the factsheet read path and the share card name the reason (SC-2 RED fixture)
