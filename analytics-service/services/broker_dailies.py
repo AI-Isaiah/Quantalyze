@@ -291,8 +291,11 @@ def combine_realized_and_funding(
     ``realized_reach_start`` (an ISO ``YYYY-MM-DD`` UTC day, or ``None``): the
     first day the REALIZED fetch could reach. Funding dated before it is dropped
     (see the D-02 note in the body). ``None`` -- the default -- drops nothing; it
-    is the right value whenever both streams were fetched over one window, which
-    is every caller today. Never derive it from the first realized record.
+    is the right value whenever both streams were fetched over one window (Bybit,
+    Binance). The OKX non-switched strategy/key derive (Phase 262) passes the bills
+    walk's real first day from ``job_worker._okx_bills_reach_day``, because OKX
+    funding reaches further back than the bills walk; the switched builder bounds
+    its USD-side funding by the same day. Never derive it from the first realized record.
 
     MT5-12 verdict: ``fill_derived_unproven``, ALWAYS — a CONSTANT, not a
     data-driven refinement. This path takes TWO independent input streams

@@ -6091,6 +6091,20 @@ def _switched_key_usd(
     )
 
 
+def _okx_bills_reach_day(now_utc: datetime) -> str:
+    """262 OKXREACHGUARD D-01: the first UTC day the OKX bills walk reaches, as an ISO day.
+
+    The walk starts at the UTC day of ``now`` minus ``OKX_BILLS_REACH_DAYS`` (read at call time
+    from ``services.exchange``). ``now_utc`` is a clock taken AFTER the bills fetch, so this is the
+    walk's real first day or a LATER one: across a UTC midnight it drops at most one extra day of
+    funding. If that day has no realized bill, the reconcile keeps its stored row. If it has one,
+    the day is written without its funding (a one-day funding delta). Erring late is still the right
+    direction: an early reach would rebuild a day the walk cannot see from funding alone.
+    ONE source for the non-switched derive's reach and the switched builder's ``bills_from_day``,
+    so the two can never drift."""
+    return (now_utc.date() - timedelta(days=exchange_module.OKX_BILLS_REACH_DAYS)).isoformat()
+
+
 def _ccxt_full_history_verdict(
     venue: str, realized: Any, funding: Any, now_utc: datetime
 ) -> bool:
@@ -10960,10 +10974,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # the holes its compose segments at.
                 span_unpriced_days=not is_key_mode,
                 # CR-02: the first UTC day the bills read covers; a persisted switch can be older.
-                bills_from_day=(
-                    _now_utc.date()
-                    - timedelta(days=exchange_module.OKX_BILLS_REACH_DAYS)
-                ).isoformat(),
+                bills_from_day=_okx_bills_reach_day(_now_utc),
                 # R2-02: the stored marks are the true USD levels on the mixed days (the held
                 # coin's price move is in no bill); the days a mark does not cover are withheld.
                 usd_marks=_usd_marks,
@@ -11044,6 +11055,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     full_history=_ccxt_full_history_verdict(
                         venue, realized, funding, _now_utc
                     ),
+                    # Phase 262 D-02: OKX funding reaches further back than the bills walk, so a
+                    # day older than the walk is a day the realized read never saw. Bybit and
+                    # Binance read both streams over one window and pass None.
+                    realized_reach_start=_okx_bills_reach_day(_now_utc) if venue == "okx" else None,
                 )
         except NavReconstructionError as exc:
             # A STRUCTURAL NAV/TWR reconstruction failure surfacing from the honest
@@ -12623,7 +12638,18 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     _span_named = _tiny_base_days_stored(meta, returns, _applied_marks, key_mode=is_key_mode)
     if _applied_marks is not None and _applied_marks.covered_from is not None:
         assert _applied_marks.terminal is not None  # marks exist, so a last mark does
-        _span_named = [*_span_named, _applied_marks.covered_from, _applied_marks.terminal[0]]
+        # 262 OKXREACHGUARD WR-01 / R2-01 / R2-02: on OKX, a `covered_from` on or before the bills
+        # reach is the first mark day, which has no return row once the reach starts the input at or
+        # after it. Naming it would delete the row an earlier derive stored there, so the span is
+        # named from the day after it (still covering the gap days the next mark's return owns,
+        # D-05). The clock is the derive's own seam (`_utc_now`, the one the marks apply reads).
+        _covered_from = _applied_marks.covered_from
+        if venue == "okx" and _covered_from <= _okx_bills_reach_day(_utc_now()):
+            _covered_from = min(
+                (date.fromisoformat(_covered_from) + timedelta(days=1)).isoformat(),
+                _applied_marks.terminal[0],
+            )
+        _span_named = [*_span_named, _covered_from, _applied_marks.terminal[0]]
     _span_start, _span_end = _reconcile_hull(
         (ts.date().isoformat() for ts in returns.index),
         _span_named,
