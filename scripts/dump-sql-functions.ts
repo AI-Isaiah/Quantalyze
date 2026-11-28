@@ -392,6 +392,18 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
+  // ⭐ 2026-11-28: the Phase 257 SEEDHOLD plan 02 row below is DELETED once the re-dump of
+  // supabase/schema/baseline.sql taken after 20261128120000_compute_job_seed_hold.sql applied to
+  // PROD turns it into `ratchet-stale`; the gate says so first, as it did for every earlier row.
+  {
+    name: "set_compute_job_seed_hold",
+    side: "snapshot-only",
+    capturedAt: "2026-11-28",
+    clearedBy:
+      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
+    reason:
+      "Phase 257 SEEDHOLD defines the fenced seed-hold merge RPC in migration 20261128120000_compute_job_seed_hold.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
+  },
   // ⭐ 2026-11-27: the two Phase 243 DBBACKSTOP plan 05 rows (`insert_api_key` and
   // `enforce_api_keys_user_id_immutable`, `snapshot-only`, captured 2026-11-27) are DELETED:
   // their clearing condition, a re-dump taken after
