@@ -54,6 +54,7 @@ The readers and writers that use the `strategy_analytics.unit_segments` column s
   - `test_okx_unit_switch_fetch.py`, `test_okx_unit_switch_derive.py`, `test_okx_unit_switch_key_mode.py`, `test_okx_unit_switch_readers.py`;
   - the `okx_unit_switch_derive_harness` fixture;
   - TS: `unit-segments.test.ts`, `queries.unit-switch.test.ts`, `unit-switch-readers.test.ts`, the chart, view, metrics, chip, table, OG and returns-route unit-switch tests.
+- `test_nav_marks_refusal_record.py`'s `allocator_equity_derived` fake answers `maybe_single`, because an OKX key-mode derive now reads its stored `key_inputs` row's `unit_segments` (the persisted switch) up front.
 - Every reader states its rule in a test that is RED on the pre-fix code or a neutered copy. PROOF-01 (byte backup, RED, `cp` restore, silent `cmp`, GREEN) is indexed in `256-10-SUMMARY.md`.
 
 ### Notes
