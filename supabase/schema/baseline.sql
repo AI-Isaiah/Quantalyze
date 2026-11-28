@@ -20726,9 +20726,153 @@ GRANT ALL ON TABLE "public"."key_permission_audit" TO "service_role";
 
 
 
-GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics" TO "anon";
+GRANT REFERENCES ON TABLE "public"."strategy_analytics" TO "anon";
 GRANT SELECT,INSERT,REFERENCES,DELETE,UPDATE ON TABLE "public"."strategy_analytics" TO "authenticated";
 GRANT ALL ON TABLE "public"."strategy_analytics" TO "service_role";
+
+
+
+GRANT SELECT("id") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("strategy_id") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computed_at") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computation_status") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computation_error") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("benchmark") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("cumulative_return") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("cagr") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("volatility") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("sharpe") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("sortino") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("calmar") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("max_drawdown") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("max_drawdown_duration_days") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("six_month_return") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("sparkline_returns") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("sparkline_drawdown") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("metrics_json") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("returns_series") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("drawdown_series") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("monthly_returns") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("daily_returns") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("rolling_metrics") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("return_quantiles") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("trade_metrics") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("data_quality_flags") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("volume_metrics") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("exposure_metrics") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computation_warned") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computing_started_at") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("series_completeness") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computation_error_source") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("computation_error_job_id") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("trades_fetched_at") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("series_provenance") ON TABLE "public"."strategy_analytics" TO "anon";
+
+
+
+GRANT SELECT("unit_segments") ON TABLE "public"."strategy_analytics" TO "anon";
 
 
 

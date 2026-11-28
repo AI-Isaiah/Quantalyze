@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.110.1] - 2026-11-27 — BASELINE: automated re-dump after the PROD apply of 9c5c414b
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46068622836`, after the PROD apply of merge `9c5c414b`: sha256 `ab1b1720…` → `89693c20…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 150 → 150, distinct function names 148 → 148, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127220000_strategy_analytics_anon_column_revoke.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-27` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.110.0 → 0.133.110.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=349 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 150 — MATCH 147, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46068622836` succeeded, and this entry was composed by the `redump-pr` job. Run `46068622836` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.133.110.0] - 2026-11-27 — Phase 243 DBBACKSTOP PR-B: every api_keys writer goes through insert_api_key, and anon loses metrics_json_by_basis
 
 ### Changed
