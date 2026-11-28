@@ -293,6 +293,51 @@ def _plan(
     )
 
 
+class TestOkxNoRequestAnswer:
+    @pytest.mark.asyncio
+    async def test_okx_51604_on_the_status_get_is_no_entry_and_applies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Why this matters: measured on PROD 2026-11-28, OKX answers the status GET for a quarter
+        it holds no request for with error 51604, never with an empty ``data`` list. Read as a
+        venue failure, the first calibrate died after three attempts without ever applying, so
+        no archive file could ever be requested. 51604 is "no entry": the job applies once per
+        quarter and defers. Any other venue error still propagates."""
+        world = _setup(monkeypatch)
+
+        def _no_request(_inst: Any, _params: dict[str, str]) -> Any:
+            raise ccxt.BadRequest(
+                'okx {"code":"51604","data":[],"msg":"Initiate a download request before '
+                'obtaining the hyperlink"}'
+            )
+
+        world.answers[STATUS] = _no_request
+        world.answers[APPLY] = fk.apply_answer("false", ts=fx.NOW_MS)
+        job = fk.job({"mode": "fills_calibrate"}, created_at_ms=fx.NOW_MS)
+
+        first = await dispatch(job)
+
+        assert first.outcome == DispatchOutcome.DEFERRED
+        assert world.calls_of(APPLY) == 2
+        assert [q["applies"] for q in world.last_result()["quarters"]] == [1, 1]
+
+    @pytest.mark.asyncio
+    async def test_other_venue_error_on_the_status_get_still_propagates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        world = _setup(monkeypatch)
+
+        def _other(_inst: Any, _params: dict[str, str]) -> Any:
+            raise ccxt.BadRequest('okx {"code":"50014","data":[],"msg":"Parameter year error"}')
+
+        world.answers[STATUS] = _other
+        job = fk.job({"mode": "fills_calibrate"}, created_at_ms=fx.NOW_MS)
+
+        await dispatch(job)
+
+        assert world.calls_of(APPLY) == 0
+
+
 class TestQuarterPlan:
     """Why these matter: the quarter plan decides which span of an account's history is read, and a
     span it silently drops is a hole in a track record nobody is told about. Every choice is derived
