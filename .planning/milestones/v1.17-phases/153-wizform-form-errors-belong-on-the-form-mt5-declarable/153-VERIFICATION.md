@@ -1,7 +1,25 @@
 ---
 phase: 153-wizform-form-errors-belong-on-the-form-mt5-declarable
 verified: 2026-08-13T02:05:00Z
-status: failed
+status: human_needed
+status_was: failed (2026-08-13 until 2026-11-28; the span verdict 5/6 below is kept unchanged as the historical record)
+re_verified: 2026-11-28
+re_verified_at_sha: 98178ff2bd
+re_verification_note: >-
+  Re-marked 2026-11-28 by founder decision ("Fix the old record first"), because `failed` is outside
+  the closed set `gsd-tools query audit-open` accepts. The one failed requirement, WIZFORM-02, was
+  closed after this report by the INSERTED Phase 153.7 (PR #683, squash c4555fd0f, v0.62.0.0;
+  `153.7-VERIFICATION.md` 9/9 must-haves verified, gaps []), which discharged all four `missing`
+  items: router-vocabulary dispositions (`VENUE_WIRE_CODE_TO_VERDICT` rows for MT5_GATEWAY_UNCONFIGURED
+  and MT5_GATEWAY_UNREACHABLE in src/lib/wizardErrors.ts), the population root widened to
+  analytics-service/** with the positional service_error callee family, the boundary decision
+  recorded as per-exclusion reasons, and KNOWN_CODELESS_FINALIZE_REJECTIONS = 0. The v1.17 milestone
+  audit re-derived the same four from source. Re-measured at origin/main 98178ff2b on 2026-11-28:
+  `npx vitest run src/lib/seam-venue-vocabulary.invariant.test.ts src/lib/wizardErrors.invariant.test.ts`
+  -> 2 files, 94 tests passed. So 6/6 requirements now hold in code. The status is human_needed, NOT
+  passed, because the human_verification items below (the gateway-fault card seen rendered) are
+  still unobserved: they are the same observation as 153.7's open items, owned by Phase 157
+  FOUNDER-CONFIRM (FCONF-03), which moved to v1.23 HARDEN on 2026-11-25.
 score: 5/6 requirements verified across the span (WIZFORM-02 FAILED — measured live on PROD 2026-08-12/13 and reproduced from HEAD)
 overrides_applied: 0
 retroactive: true

@@ -55,3 +55,13 @@ None. All five SUMMARY `## Threat Flags` sections state "None" or map to a regis
 - The T-223-08 region guard is not persisted as a test; the behavioural pin (cancelled walk through the real `dispatch`) is what keeps the property under CI.
 
 **threats_open:** 0
+
+## Security Audit 2026-11-28
+
+| Metric | Count |
+|---|---|
+| Threats found | 14 |
+| Closed | 14 |
+| Open | 0 |
+
+Re-run by `/gsd-secure-phase 223` at origin/main 98178ff2b (ASVS 1, block_on high): an independent gsd-security-auditor re-verified all 14 register rows at HEAD and agrees with the verdict above (SECURED, 0 open). The file was renamed from `SECURITY.md` to `223-SECURITY.md` in the same change, because the workflow and the milestone audit look for `*-SECURITY.md` and reported the phase as having none.

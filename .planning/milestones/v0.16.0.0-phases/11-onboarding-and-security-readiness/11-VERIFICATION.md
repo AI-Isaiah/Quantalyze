@@ -1,7 +1,9 @@
 ---
 phase: 11-onboarding-and-security-readiness
 verified: 2026-04-26T07:55:00Z
-status: resolved
+status: human_needed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `resolved` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `resolved` from 2026-04-27 until 2026-11-28; its resolution_rationale closes only 2 of its 4 human items (the milestone-wrap QA report); the other 2 were deferred to post-merge probes (the production /security indexability smoke and the PostHog ingest observation) and this report records no result for them, so it means human_needed, not passed. The verdict and body are unchanged.
 status_was: human_needed (until 2026-04-27)
 resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-11-onboarding-and-security-readiness-v01600--shipping
 resolution_rationale: "4 human-verification items resolved: 2 covered by 2026-04-27 milestone-wrap QA report (Real-LP /qa pass on /allocations + wizard + /security + /profile?tab=security passed all surfaces), 2 deferred-with-rationale to post-merge probes (BLOCK-3 user-action item via vars.E2E_TEST_DB_CONFIGURED gate + production /security indexability smoke + PostHog dashboard ingest observation). WR-02 race window retired 2026-04-27 via migration 085 stamp_first_bridge_surfaced RPC (commit 841da8a) — replaces deterministic-fallback mitigation with atomic Postgres-level stamp."

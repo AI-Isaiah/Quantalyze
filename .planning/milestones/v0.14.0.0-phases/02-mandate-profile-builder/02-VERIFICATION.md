@@ -1,7 +1,9 @@
 ---
 phase: 02-mandate-profile-builder
 verified: 2026-04-18T16:42:44Z
-status: resolved
+status: passed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `resolved` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `resolved` from 2026-04-27 until 2026-11-28; its human items were resolved by the founder-era UAT audit (see resolution_pointer and resolution_rationale; the evidence is de-facto production stability and downstream reuse, as that rationale says), and no gap is open, so it means passed. The verdict and body are unchanged.
 status_was: human_needed (until 2026-04-27)
 resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-02-mandate-profile-builder-v01400--shipped
 resolution_rationale: "3 human-verification items resolved de-facto via 9 days of production stability since 2026-04-18 + downstream-phase reuse of update_allocator_mandates RPC across Phases 03/04/06/08/09/10/11. Auto-save flow Playwright spec activation bundled with Phase 11 BLOCK-3. WR-02 rate-limit tolerance (5/min userActionLimiter) has logged zero rate-limit incidents in audit-events for mandate.update since shipping."
