@@ -2294,6 +2294,13 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     _binance_read = False
     # Round-2: the provisional bound write failed or answered orphan, so the fills read is skipped.
     _fills_read_skipped = False
+    # Phase 257 SEEDHOLD (`[255-BYBIT-DEADLINE-NO-PROGRESS]`): a Bybit read that stopped on its
+    # deadline hands back the windows it completed. `_bybit_read_through_ms` is the end of the last
+    # one (None: none completed). `_fills_persist_failed` is the persist arm's own marker, because
+    # `phase2_failed` is set by a failed read AND a failed persist.
+    _bybit_deadline_stop = False
+    _bybit_read_through_ms: int | None = None
+    _fills_persist_failed = False
     # Round-3 (IN-14): the provisional write answered orphan. The strategy-flags write is skipped
     # too (it is unfenced), as is the daily store (held through `phase1_read_refused`).
     _bound_orphaned = False
@@ -2767,6 +2774,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                 )
                 phase2_failed = True
                 phase2_error_message = str(e)[:200]
+                if isinstance(e, BybitTradeWindowIncomplete) and e.reason == "deadline":
+                    # Phase 257: the persist block below stores the completed windows' fills and
+                    # the epilogue bound becomes their end. The run stays flagged (`phase2_failed`).
+                    _bybit_deadline_stop = True
+                    raw_fills = list(e.completed_fills)
+                    _bybit_read_through_ms = e.read_through_ms
     except ccxt.RateLimitExceeded as exc:
         await _stamp_429(ctx.supabase, ctx.key_row, exc)
         # Audit-2026-05-07 red-team HIGH conf=8 — RateLimitExceeded can
@@ -2821,6 +2834,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             "binance_deadline_symbols",
         )
     )
+    if _bybit_read_through_ms is not None:
+        # Phase 257: a Bybit deadline stop's mark, exact to the millisecond like the Binance bound
+        # above, so the stamp filter keeps only persisted fills at or before the mark.
+        _read_through = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+            milliseconds=_bybit_read_through_ms
+        )
     if _fills_stopped and _read_through is None:
         # A stop record whose bound is unusable (T-250-05): hold, exactly like
         # any other incomplete read. Names the strategy and the bound's type
@@ -2859,7 +2878,14 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             (`binance_read_through_ms`), or the walk start minus 1 ms for a failed symbol, a
             raised or unpersisted read or a stop without a usable bound. OKX, Bybit and Deribit
             (Phase 255 NULLANCHOR): the walk start minus 1 ms for a raised or unpersisted read or
-            any truthy `sync_truncated_*` flag (a truncated read lost a span). None means the read
+            any truthy `sync_truncated_*` flag (a truncated read lost a span). Bybit deadline stop
+            (Phase 257 SEEDHOLD): the mark, the end of the last completed window, whose fills the
+            persist stored; with no completed window, the run's SEED (the column, else the reach
+            anchor). Holding at the seed is not creep: RPC R4 sets the bound to the passed instant
+            because `covers` (the walk start) is at or below the provisional seed, so passing the
+            seed leaves it unchanged while passing the walk start minus 1 ms lowered it by 1 h +
+            1 ms per refusal. A persist failure after the stop falls through to the walk start
+            minus 1 ms, because the completed windows' fills did not all land. None means the read
             was complete. Read once, in the epilogue, after the persist (`phase2_failed` can turn
             true in it)."""
             _throughs: list[int] = []
@@ -2872,6 +2898,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     or (_fills_stopped and _read_through is None)
                 ):
                     _throughs.append(_walk_start_ms - 1)
+            elif _bybit_deadline_stop and not _fills_persist_failed:
+                _throughs.append(
+                    _bybit_read_through_ms
+                    if _bybit_read_through_ms is not None
+                    else (fills_since_ms if fills_since_ms is not None else _reach_anchor_ms)
+                )
             elif phase2_failed or any(
                 key.startswith("sync_truncated_") and value
                 for key, value in exchange_dq_flags.items()
@@ -3006,6 +3038,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             )
             phase2_failed = True
             phase2_error_message = str(exc)[:200]
+            _fills_persist_failed = True
 
         # G12.A.6 amendment-detection observability (best-effort).
         amended_count = len(existing_pairs)
@@ -3053,10 +3086,16 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     #     cursor; never a partial maximum).
     # The stop record's derived state (`_fills_incomplete`, `_read_through`, `_fills_stopped`) is
     # computed above, before the fills persist, from the fetch's own flags.
+    # Phase 257: a Bybit deadline stop persisted its completed windows (`phase2_failed` stays True,
+    # the run stays flagged) and is stamp-eligible only when a window completed and every batch
+    # landed. The stamp is the newest persisted fill at or before the mark, via `_read_through`.
+    _bybit_partial_ok = (
+        _bybit_read_through_ms is not None and phase2_complete and not _fills_persist_failed
+    )
     advance_fetched_cursor = (
         bool(raw_fills)
         and phase2_complete
-        and not phase2_failed
+        and (not phase2_failed or _bybit_partial_ok)
         and not phase1_failed
         and not phase1_read_refused
         and not _fills_incomplete

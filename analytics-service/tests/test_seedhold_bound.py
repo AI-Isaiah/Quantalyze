@@ -46,8 +46,8 @@ metadata and keeps it) after a daily row lands; the walk start must stay at or b
 HOW IT WAS MEASURED. Every arm was run once UNMARKED on the unmodified code, that run was saved,
 and it is recorded verbatim in the 257-01 SUMMARY. The arms RED on unmodified code carry a strict
 expected-failure marker that accepts only an AssertionError: `RED_AT_HEAD_HOLD` (plan 04 removes it
-in its fix commit), `RED_AT_HEAD_BYBIT` (plan 03 removes it in its fix commit) and
-`RESIDUAL_DOUBLE_FAULT` (permanent). An arm GREEN at HEAD carries no marker and stays as a
+in its fix commit) and `RESIDUAL_DOUBLE_FAULT` (permanent). A third, `RED_AT_HEAD_BYBIT`, was removed
+with the seven Bybit deadline arms' fix (plan 03). An arm GREEN at HEAD carries no marker and stays as a
 regression pin. A strict marker reports an unexpected pass as a failure, so a fix landing without
 its marker's removal cannot go unnoticed. There is deliberately no NEUTER block here: plan 05 adds it.
 
@@ -123,11 +123,6 @@ RED_AT_HEAD_HOLD = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="RED on unmodified code (257-01 measurement); plan 04 removes this marker in its fix commit",
-)
-RED_AT_HEAD_BYBIT = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="RED on unmodified code (257-01 measurement); plan 03 removes this marker in its fix commit",
 )
 RESIDUAL_DOUBLE_FAULT = pytest.mark.xfail(
     strict=True,
@@ -698,8 +693,8 @@ class TestBybitDeadlineKeepsWhatItRead:
     @pytest.mark.parametrize(
         "case",
         [
-            pytest.param("two-windows", marks=RED_AT_HEAD_BYBIT, id="two-windows"),
-            pytest.param("first-window", marks=RED_AT_HEAD_BYBIT, id="first-window"),
+            pytest.param("two-windows", id="two-windows"),
+            pytest.param("first-window", id="first-window"),
         ],
     )
     async def test_the_refusal_carries_what_the_read_completed(
@@ -724,8 +719,8 @@ class TestBybitDeadlineKeepsWhatItRead:
     @pytest.mark.parametrize(
         "column",
         [
-            pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="stop-after-two-windows-set"),
-            pytest.param(None, marks=RED_AT_HEAD_BYBIT, id="stop-after-two-windows-null"),
+            pytest.param(CURSOR_AHEAD_TS, id="stop-after-two-windows-set"),
+            pytest.param(None, id="stop-after-two-windows-null"),
         ],
     )
     async def test_a_stop_after_two_windows_persists_them_and_advances(
@@ -769,8 +764,8 @@ class TestBybitDeadlineKeepsWhatItRead:
     @pytest.mark.parametrize(
         "column",
         [
-            pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="stop-inside-first-window-set"),
-            pytest.param(None, marks=RED_AT_HEAD_BYBIT, id="stop-inside-first-window-null"),
+            pytest.param(CURSOR_AHEAD_TS, id="stop-inside-first-window-set"),
+            pytest.param(None, id="stop-inside-first-window-null"),
         ],
     )
     async def test_a_stop_inside_the_first_window_holds_the_bound_at_the_seed(
@@ -807,7 +802,7 @@ class TestBybitDeadlineKeepsWhatItRead:
 
     @pytest.mark.parametrize(
         "column",
-        [pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="persist-fails-after-stop-set")],
+        [pytest.param(CURSOR_AHEAD_TS, id="persist-fails-after-stop-set")],
     )
     async def test_a_persist_failure_after_a_stop_keeps_the_walk_start_bound(
         self, monkeypatch: pytest.MonkeyPatch, column: str | None

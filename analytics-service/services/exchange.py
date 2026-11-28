@@ -909,6 +909,12 @@ class BybitTradeWindowIncomplete(RuntimeError):
     The text is static per reason, with no digit and no venue text: ``run_sync_trades_job`` stores
     ``str(e)[:200]``. It is not a ``PaginationCeilingExceeded``, so no existing handler for that
     class catches it by accident.
+
+    On a ``deadline`` refusal from ``_fetch_raw_trades_bybit``, ``completed_fills`` holds the fills
+    of the windows whose page loop ended naturally and ``read_through_ms`` the end of the last such
+    window (None when none completed). Every other reason and every other raiser leaves them empty,
+    and a caller that does not read them gets the same all-or-nothing refusal as before (Phase 257
+    SEEDHOLD, ``[255-BYBIT-DEADLINE-NO-PROGRESS]``).
     """
 
     _TEXTS: Final[dict[str, str]] = {
@@ -932,6 +938,8 @@ class BybitTradeWindowIncomplete(RuntimeError):
         ],
     ) -> None:
         self.reason = reason
+        self.completed_fills: list[dict[str, Any]] = []
+        self.read_through_ms: int | None = None
         super().__init__(self._TEXTS[reason])
 
 
@@ -3533,10 +3541,36 @@ async def _fetch_raw_trades_bybit(
 
     deadline = float("inf") if read_deadline_s is None else _monotonic() + read_deadline_s
 
+    # Phase 257 SEEDHOLD: what a deadline refusal carries. A window is complete only when its page
+    # loop ended naturally (an empty page or an empty cursor); ``window_rows`` is the in-flight
+    # window, which Bybit answers newest first, so a partial window holds its newest fills and
+    # misses its oldest and is never handed out. ``completed_through`` is the end of the last
+    # completed window.
+    window_rows: list[dict[str, Any]] = []
+    completed_rows: list[dict[str, Any]] = []
+    completed_through: list[int | None] = [None]
+
+    def _dedup_on_exec_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        # Windows do not overlap, so a repeated execId means the venue served a fill twice: keep
+        # the first. A fill with no execId has no identity to dedupe on, so it is always kept.
+        seen: set[str] = set()
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            exec_id = row.get("exchange_fill_id")
+            if exec_id:
+                if exec_id in seen:
+                    continue
+                seen.add(exec_id)
+            kept.append(row)
+        return kept
+
     async def _fetch_page(req: PageRequest) -> PageResult[dict[str, Any]]:
         if _monotonic() >= deadline:
             logger.warning("Bybit fills read passed its %ss budget; refusing the read", read_deadline_s)
-            raise BybitTradeWindowIncomplete("deadline")
+            refusal = BybitTradeWindowIncomplete("deadline")
+            refusal.completed_fills = _dedup_on_exec_id(completed_rows)
+            refusal.read_through_ms = completed_through[0]
+            raise refusal
         params: dict[str, str] = {
             "category": category,
             "limit": str(BYBIT_EXECUTION_PAGE_SIZE),
@@ -3680,6 +3714,13 @@ async def _fetch_raw_trades_bybit(
                 position_direction=None,
             )))
 
+        window_rows.extend(page_fills)
+        if not items or not next_cursor:
+            # The two natural ends ``walk_paginated`` breaks on (``stop_on_short_page`` is False,
+            # so a short page with a live cursor is NOT an end): the window is complete.
+            completed_rows.extend(window_rows)
+            window_rows.clear()
+            completed_through[0] = req.window_end
         return PageResult(
             rows=page_fills,
             next_cursor=next_cursor,
@@ -3715,18 +3756,7 @@ async def _fetch_raw_trades_bybit(
         _record_dq_flag("sync_truncated_bybit_pages", int(BYBIT_EXECUTION_WINDOW_PAGE_CAP))
         raise BybitTradeWindowIncomplete("page_cap") from None
 
-    # Windows do not overlap, so a repeated execId means the venue served a fill twice: keep the
-    # first. A fill with no execId has no identity to dedupe on, so it is always kept.
-    seen: set[str] = set()
-    fills: list[dict[str, Any]] = []
-    for row in walked.rows:
-        exec_id = row.get("exchange_fill_id")
-        if exec_id:
-            if exec_id in seen:
-                continue
-            seen.add(exec_id)
-        fills.append(row)
-    return fills
+    return _dedup_on_exec_id(walked.rows)
 
 
 def _normalize_fill(trade: dict[str, Any], exchange_id: str) -> FillRow | None:
