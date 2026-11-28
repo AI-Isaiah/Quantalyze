@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.116.1] - 2026-11-28 — records: Phase 256 OKXUNITSWITCH closed (verification passed after the SC-5 PROD read)
+
+### Changed
+- `256-VERIFICATION.md` is now passed at 7/7. SC-5 was read on PROD on 2026-11-28 after the 7 derives were enqueued through `enqueue_compute_job`, the nightly cron's own call (marker query first). All 7 (4 key mode, 3 strategy mode) ended `done`. 0 strategies still carry `read_refusal_kept_figures`. The switch is stored on all 3 strategies as BTC, last USD day 2026-11-20, first BTC day 2026-11-21, with `unit_segments` present. The 4 keys' inputs carry `unit_segments` and 0 carry `native_unit`. The census logs `coin=BTC coin_bills=11 coin_days=2`.
+- ROADMAP: Phase 256 ticked complete with its Progress row. STATE records the close.
+
+### Notes
+- Records only, no code. The chart-break visual UAT (screen, print preview, exported SVG) stays a founder item.
+- Not yet observed: the procedure's second read after a nightly derive. The first unattended confirmation is the 2026-11-29 nightly crons.
+- The headline moved from about 21.4 % to about 2.6 % cumulative. Since the first NAV mark the series matches the account's USD NAV marks exactly. The pre-mark history was re-anchored per R2-02. No old series survives to split the change exactly, so the split is recorded as an open question in VERIFICATION.
+- Finding (a candidate for Phase 261 UNITSWITCHEDGES, not added to its scope; that is a founder call): the three days with no NAV mark (11-24 to 11-26, when the derives failed) fold into the 11-27 row. That row carries a 4-day move booked as one daily return, and the three days are not named in `withheld_days` or `unpriced_days`.
+- No `TODOS.md` entry is opened or closed.
+
 ## [0.133.116.0] - 2026-11-28 — Phase 259 OKXARCHIVEFILLS: OKX fills older than fills-history's 3-month reach are read from OKX's quarterly bills archive
 
 Phase 255 NULLANCHOR's PROD re-read recovered OKX fills only back to about 2026-08-27, the reach of `GET /api/v5/trade/fills-history` ("the last 3 months"). The spans the old one-page pager dropped all predate 2026-08-19. Founder decision 2026-11-27: "Yea, get archive endpoint". OKX's per-fill archive ("Transaction details (in the past 2 years)", `trade/fills-archive`) was delisted on 2024-09-18, per the OKX v5 changelog. ccxt still maps it but marks it "not documented". The only documented source that reaches those spans is the quarterly `account/bills-history-archive` CSV ("since 2021", except the current quarter). Its trade bills carry `tradeId`, `ordId`, `instId`, `px`, `sz`, `fee`, `subType` and `fillTime`. Evidence: ROADMAP `### Phase 259`.
