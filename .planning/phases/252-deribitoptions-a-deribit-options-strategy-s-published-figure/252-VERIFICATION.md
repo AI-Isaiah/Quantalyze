@@ -222,3 +222,14 @@ Marker query first, named PRODUCTION; read-only except the two re-stitch enqueue
 | A | attempt 3 (last) | 12:55:26Z -> 13:12:56Z | 13:06:58Z (about 11.5 min) | same |
 
 No figure moved (the top-level scalars are byte-identical to the 2026-11-08 values) and the headline stays withheld, which is the designed fail-safe state. No `smoothed_mtm` key was stored, so the cause is `smoothed_basis_not_computed`. Timing: the stitch budget is 1200 s; the cash pass used about 690 s, leaving about 510 s, and the smoothed pass gets 0.7 of that (about 357 s). Both jobs ended about 358 s after their cash pass finished, which matches the bounded smoothed-pass timeout degrade. The worker log line naming the cause has been requested via the coordinator; this reading rests on timing until it arrives. G252-MTM-PROMOTION stays open.
+
+### Post-deploy PROD reading 2026-11-28 after gap plan 11 (v0.133.119.0, #1425, merge 6f746f2ee): smoothed basis computes, not promoted
+
+Marker query first, named PRODUCTION. Main CI on 6f746f2ee green; API `/health` reported it at 16:01Z; both re-stitch jobs (enqueued 16:02Z through `enqueue_compute_job`) ran on a worker host first seen after the merge, each on attempt 1 with no restart.
+
+| composite | job claimed -> done | by-basis keys | headline |
+|---|---|---|---|
+| A | 16:02:11Z -> 16:17:19Z (about 15 min) | `smoothed_mtm`, `cash_settlement` | cash, `unsmoothed_options_book`, no `headline_basis` |
+| B | 16:17:19Z -> 16:32:28Z (about 15 min) | `smoothed_mtm`, `cash_settlement` | same |
+
+The crawl reuse works: the smoothed basis now computes inside the stitch budget on both composites (it did not at v0.133.115.0). It did not promote, so the headline stays withheld and no top-level figure moved. Stored smoothed object (both rows, identical series): cumulative return 12713.74 (cash 16361.73), CAGR about 2.4e12 (cash about 5.1e12), max drawdown -0.408 (cash -0.494), Sharpe 8.76 (cash 9.26). The row still carries `twr_chain_broken`, `headline_since` 2025-12-16, `dust_nav_guard` and `tiny_base_guard`, and no pre-retention flag, so the not-promoted cause is most likely P4 (`smoothed_chain_broken`); the worker log line naming the cause was requested via the coordinator.
