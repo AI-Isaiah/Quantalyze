@@ -51,7 +51,7 @@ arms' fix (plan 03), and `RED_AT_HEAD_HOLD` with the seed-hold fix (plan 04, whi
 two first-sync hand-off C arms GREEN: only the two set-column C arms still fail, and keep the
 permanent marker). An arm GREEN at HEAD carries no marker and stays as a
 regression pin. A strict marker reports an unexpected pass as a failure, so a fix landing without
-its marker's removal cannot go unnoticed. There is deliberately no NEUTER block here: plan 05 adds it.
+its marker's removal cannot go unnoticed. The NEUTER block at the end of this docstring is plan 05's.
 
 Every instant is hand-typed with its ISO, never computed by the code under test:
 
@@ -66,6 +66,63 @@ Every instant is hand-typed with its ISO, never computed by the code under test:
         OKX     1776081600000 (2026-04-13T12:00:00Z, now minus 93 days)
         Bybit   1752580800000 (2025-07-15T12:00:00Z, now minus 365 days)
         Deribit 0             (1970-01-01T00:00:00Z)
+
+NEUTER (PROOF-01; each recorded verbatim in the 257-05 SUMMARY, restored with cp from a byte backup and checked with cmp).
+Test ids are shortened to their parameter: `Matrix[x]` is `TestSeedHoldMatrix::test_run2_walks_at_or_before_run1_walk_start[x]`,
+`HandOff[x]` is `TestSeedHoldHandOff::test_an_intervening_row_never_hides_run1_hold[x]`, `Retry[x]` is
+`TestSeedHoldRetry::test_a_retried_attempt_keeps_attempt_one_hold[x]`, `Mech::name` is `TestSeedHoldMechanism::name`,
+`Bybit[x]` is a `TestBybitDeadlineKeepsWhatItRead` arm with that parameter.
+  B1 in `services/exchange.py`, `refusal.completed_fills = _dedup_on_exec_id(completed_rows)` becomes
+     `refusal.completed_fills = []` (a deadline refusal carries no fills): Bybit[two-windows] and
+     Bybit[stop-after-two-windows-set] go RED.
+  B2 in `services/exchange.py`, `completed_through[0] = req.window_end` becomes `completed_through[0] = None`
+     (the completed window's end is never recorded): Bybit[two-windows] and Bybit[stop-after-two-windows-set] go RED.
+  B3 in `services/exchange.py`, `if not items or not next_cursor:` becomes `if True:` (a window counts complete
+     after any page; dropping only the cursor half bites nothing, because each window's empty page 2 still satisfies
+     `not items`): Bybit[stop-after-two-windows-set] goes RED (window 3's fills are persisted).
+  B4 in `services/job_worker.py`, `elif _bybit_deadline_stop and not _fills_persist_failed:` becomes `elif False:`
+     (the bound creeps by the overlap again): Bybit[stop-inside-first-window-set] and
+     Bybit[stop-after-two-windows-set] go RED.
+  B5 in `services/job_worker.py`, `and (not phase2_failed or _bybit_partial_ok)` becomes `and (not phase2_failed)`
+     (no stamp after a deadline stop): Bybit[stop-after-two-windows-set] goes RED.
+  B6 in `services/job_worker.py`, `_fills_persist_failed = True` becomes `pass` (a failed persist batch no longer
+     holds the bound at the walk start): Bybit[persist-fails-after-stop-set] goes RED.
+  B7 in `services/job_worker.py`, `phase2_failed = False` is added after `_bybit_read_through_ms = e.read_through_ms`
+     (a deadline stop reads as a clean run): Bybit[stop-after-two-windows-set] and
+     Bybit[stop-inside-first-window-set] go RED (on the missing flag upsert, as an IndexError out of `_stamped_flag`).
+  B8 in `services/exchange.py`, `BYBIT_SYNC_FILLS_READ_DEADLINE_S: float = 420.0` becomes `840.0`:
+     `test_the_bybit_sync_budget_leaves_the_persist_margin` and
+     `test_nullanchor_bound.py::TestBybitReadDeadline::test_the_bybit_read_gets_the_handler_budget_remaining[bybit-320.0]`
+     go RED.
+  H1 in `services/job_worker.py`, `_hold_owned = await db_execute(_write_seed_hold)` becomes `_hold_owned = True`
+     (the seed-hold RPC is never called): Matrix[okx-set-persistent], Matrix[bybit-first-persistent],
+     Matrix[binance-set-persistent] and Matrix[deribit-first-persistent] go RED.
+  H2 in `services/job_worker.py`, `if _hold_terms and min(_hold_terms) < fills_since_ms:` becomes `if False:`
+     (the mark never lowers the seed): the same four Matrix arms go RED.
+  H3 in `services/trade_resume.py`, `.eq("status", "done")` becomes `.in_("status", ["done", "failed_final"])`
+     (research V1: a failed row's mark is read, and a newer failed row hides the done row's): HandOff[okx-set-A]
+     and HandOff[bybit-first-A] go RED.
+  H4 (the SQL fence predicate in migration 20261128120000) is recorded in the 257-02 SUMMARY, not re-run here.
+  H5 in `services/job_worker.py`, `min(_reach_anchor_ms, _provisional_unread_ms)` becomes `_provisional_unread_ms`
+     (the fail-safe floor when the hold read failed): HandOff[okx-set-B], HandOff[bybit-set-B],
+     Mech::test_a_failed_hold_read_writes_the_reach_anchor[okx] and [bybit] go RED.
+  H6 in `services/job_worker.py`, `if isinstance(_own_meta, dict) and SEED_HOLD_KEY in _own_meta:` becomes
+     `if False:` (the claimed row's own mark is never read, with no side effect on `_hold_read_failed`):
+     Retry[okx-retry-rpc-up] and Retry[bybit-retry-rpc-down] go RED.
+  H7 in `services/job_worker.py`, the provisional write's `else:` (the line before `if not _bound_owned:`) gains a
+     copy of the seed-hold RPC call (a successful bound write also leaves a mark):
+     Mech::test_a_clean_run_writes_no_seed_hold[okx] goes RED.
+  P1 (the Phase 232 bootstrap anchor stamp) `elif (phase2_failed or _fills_incomplete) and fills_anchor_iso is not
+     None:` becomes `elif False:`, together with H1's edit: Matrix[okx-nullseed-persistent] and
+     Matrix[binance-nullseed-persistent] go RED.
+  P2 (the epilogue bound write) `if not await db_execute(lambda: _set_bound(_unread_from_ms, _covers_from_iso)):`
+     becomes `if not True:`, together with H1's edit: Matrix[okx-set-once], Matrix[bybit-first-once] and
+     Matrix[binance-set-once] go RED.
+  P3 (the Phase 250 CR-01 Binance reach anchor) `elif ctx.key_row.get("exchange") == "binance":` becomes
+     `elif False:`, together with H1's edit: Matrix[binance-first-persistent] goes RED.
+  WHY EACH P NEUTER PAIRS WITH H1. After plan 04 the seed-hold mark is a second protection for every pin family, so
+  removing a P mechanism alone leaves its arms GREEN by design (measured: P1, P2 and P3 alone all pass). That is
+  redundancy, not a missing bite; the pair shows the arm can fail when both protections are gone.
 """
 from __future__ import annotations
 
