@@ -134,6 +134,7 @@ from services.mt5_outage_alert import (
     note_recycle_file_versions,
     note_relaunch_debt_lease_busy,
     note_relaunch_debt_settled,
+    note_relaunch_debt_state,
     note_wedge_evidence,
 )
 from services.mt5_validation import (
@@ -1234,17 +1235,20 @@ def _stash_for_outage_alert(
         stash(ROLE_JOBS, value)
     except Exception as exc:  # noqa: BLE001 - the heal must never see this
         try:
-            logger.warning(
+            logger.error(
                 "mt5 session heal: the outage-alert evidence stash failed - the "
                 "recycle is unaffected (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "mt5 session heal: the outage-alert evidence stash failed, and the "
+                "failure could not be described"
+            )
 
 
 async def _page_for_outage_alert(
-    notify: Callable[..., Awaitable[None]], **kwargs: str
+    notify: Callable[..., Awaitable[None]], **kwargs: object
 ) -> None:
     """Await one of the relaunch-debt notifiers. CANNOT RAISE.
 
@@ -1257,13 +1261,16 @@ async def _page_for_outage_alert(
         await notify(**kwargs)
     except Exception as exc:  # noqa: BLE001 - the heal must never see this
         try:
-            logger.warning(
+            logger.error(
                 "mt5 session heal: the relaunch-debt alert failed - the heal is "
                 "unaffected (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "mt5 session heal: the relaunch-debt alert failed, and the failure "
+                "could not be described"
+            )
 
 
 def _capture_wedge_evidence(
@@ -2899,6 +2906,17 @@ async def heal_mt5_terminal_session(
                 if debt_owed_at_start
                 else "no relaunch debt, so the default"
             ),
+        )
+        # ⭐ Phase 245 ALERTPAGE (F4, ALRT-01) — the relaunch-debt page is ended by
+        # the LEVEL, at the top of every tick, so a debt paid anywhere else (the
+        # scrub path, the boot relaunch, a heal cancelled before its after-outcome
+        # check) still gets its one recovered notice. It runs after the starting
+        # line so that line stays the heal's first; the after-outcome settle below
+        # stays, so a debt THIS tick pays settles in this tick. At most one inline
+        # close (bounded by `ops_alert_open._OPEN_PAGE_TIMEOUT_S`) on the one
+        # settling tick, before the lease.
+        await _page_for_outage_alert(
+            note_relaunch_debt_state, debt_owed=debt_owed_at_start
         )
 
         budget_s = _relogin_budget_s()

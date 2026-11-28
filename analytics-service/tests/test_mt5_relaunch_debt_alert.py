@@ -50,6 +50,7 @@ from tests.test_mt5_relogin import (  # noqa: F401 - _reset_state is an autouse 
     _FAKE_PASSWORD,
     _FAKE_PORT,
     _WEDGED,
+    _capture_and_record_outcomes,
     _capture_outcomes,
     _heal_terminal_key,
     _install_client,
@@ -57,7 +58,9 @@ from tests.test_mt5_relogin import (  # noqa: F401 - _reset_state is an autouse 
     _records,
     _reset_state,
     _set_full_env,
+    sink,
 )
+from tests.test_mt5_outage_alert import _held_page_calls
 
 _CEILING_S = mt5_relogin._MT5_RELOGIN_LEASE_WAIT_CEILING_S
 _T0 = datetime(2026, 10, 14, 9, 0, 0, tzinfo=timezone.utc)
@@ -405,6 +408,96 @@ async def test_a_second_incident_after_a_recovery_starts_with_its_own_since(
 
     outage_sinces = [p.since for p in mt5_outage_pages if p.event == "outage"]
     assert outage_sinces == [_T0, _T0 + timedelta(hours=2)], mt5_outage_pages
+
+
+async def test_a_debt_paid_outside_the_heal_check_sends_one_recovered_at_the_next_tick(
+    monkeypatch: pytest.MonkeyPatch, mt5_outage_pages: list
+) -> None:
+    """ALRT-01 / F4. The heal's own after-outcome check only sees a debt THAT TICK paid.
+    A debt cleared anywhere else (the validation scrub path, the boot relaunch, a heal
+    the monitor cancelled before its check) left the page open for good and leaked its
+    `since` and tick count into the NEXT incident. The settle is decided from the level
+    at the top of every tick, so the first tick after the clear ends the page, once."""
+    real_lease = mt5_relogin.mt5_terminal_lease
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    _capture_outcomes(monkeypatch)
+    clock = _Clock(_T0)
+    monkeypatch.setattr(mt5_outage_alert, "_utcnow", clock)
+    key = _owe_relaunch_debt()
+    _busy_lease(monkeypatch)
+
+    await mt5_relogin.heal_mt5_terminal_session()  # tick 1: the debt page
+    assert [(p.event, p.cause) for p in mt5_outage_pages] == [
+        ("outage", "lease_busy_with_relaunch_debt")
+    ]
+    mt5_client.clear_mt5_relaunch_debt(key)  # paid somewhere that is not the heal check
+    monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", real_lease)
+
+    clock.advance(minutes=10)
+    await mt5_relogin.heal_mt5_terminal_session()  # tick 2
+    recovered = [p for p in mt5_outage_pages if p.event == "recovered"]
+    assert len(recovered) == 1, f"recovered pages: {len(recovered)}, expected 1"
+    assert recovered[0].source == _DEBT_SOURCE
+    assert recovered[0].since == _T0
+    assert "1 tick(s)" in recovered[0].detail, recovered[0].detail
+    # SFH-M3: the debt was cleared somewhere that is not a heal, so the notice must not
+    # say a heal paid it.
+    assert "the relaunch debt is no longer owed" in recovered[0].detail
+    assert "heal" not in recovered[0].detail, recovered[0].detail
+
+    for _ in range(2):  # ticks 3 and 4
+        clock.advance(minutes=10)
+        await mt5_relogin.heal_mt5_terminal_session()
+    assert len([p for p in mt5_outage_pages if p.event == "recovered"]) == 1
+
+    clock.advance(hours=1)  # the next debt episode
+    _owe_relaunch_debt()
+    _busy_lease(monkeypatch)
+    await mt5_relogin.heal_mt5_terminal_session()  # tick 5
+    second = [p for p in mt5_outage_pages if p.event == "outage"][-1]
+    assert second.since == clock.now, "the next episode inherited the old since"
+    assert "busy_ticks=1" in second.detail, second.detail
+
+
+async def test_a_held_debt_settle_is_not_duplicated_by_the_same_ticks_healthy_reading(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: object,
+    ops_alert_open_store: object,
+) -> None:
+    """The level-triggered settle holds the debt notice's outcome. The SAME tick's
+    healthy jobs reading then asks the durable record about the debt source, finds the
+    page still open (the held close has not landed) and used to send a second debt
+    notice saying the service restarted. `_capture_and_record_outcomes` keeps the real
+    recorder, because with `_capture_outcomes` that healthy reading never reaches the
+    tracker and this test would pass with no guard at all."""
+    real_lease = mt5_relogin.mt5_terminal_lease
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    _capture_and_record_outcomes(monkeypatch)
+    clock = _Clock(_T0)
+    monkeypatch.setattr(mt5_outage_alert, "_utcnow", clock)
+    key = _owe_relaunch_debt()
+    _busy_lease(monkeypatch)
+    await mt5_relogin.heal_mt5_terminal_session()  # tick 1: the debt page
+    mt5_client.clear_mt5_relaunch_debt(key)
+    monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", real_lease)
+    calls, held = _held_page_calls(monkeypatch)
+
+    clock.advance(minutes=10)
+    await mt5_relogin.heal_mt5_terminal_session()  # tick 2
+
+    assert "mt5_jobs_terminal" in mt5_outage_alert._DURABLE_CHECKED, (
+        "no healthy jobs reading reached the tracker in tick 2: this test cannot "
+        "see a duplicate"
+    )
+    debt_recovered = [c for c in calls if c[0] == _DEBT_SOURCE and c[1] == "recovered"]
+    assert len(debt_recovered) == 1, f"paged {len(debt_recovered)} times, expected 1"
+    assert not any("restarted" in c[2] for c in calls), calls
+
+    held.set_result(True)
+    await mt5_outage_alert._drain_recovery_tasks_for_tests()
+    assert _DEBT_SOURCE not in ops_alert_open_store.pages  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------- #

@@ -2876,25 +2876,6 @@ item is MEDIUM at confidence 5-6, survived the fix rounds, and is recorded rathe
 stopping rule. Each names an owner and a trigger and none is routed to a phase of its own. Most share one theme,
 the alert path's own failure modes.
 
-### 164.6.8-F3-SENTRY-HALF-NOOP — the Sentry half of a page can no-op silently, leaving the email as the only channel with no signal (booked 2026-10-14, SFH F3, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-02; tagged 2026-11-23)
-
-**Failure scenario.** `SENTRY_DSN` is unset or `before_send` drops the event: `capture_message` returns None, the
-code ignores it, and the page goes out on one hop (email) without any log that it is one hop. A 502 on the email
-then loses the page with nothing at ERROR.
-**Fix.** Log ERROR when the capture produced no event id, feed that into the window decision, and emit one ERROR at
-startup when the DSN is unset in production. Place: `analytics-service/services/ops_alert.py`.
-**Owner / Trigger:** the next phase touching `ops_alert.py`; or any page found to have reached nobody.
-
-### 164.6.8-F4-WR03-DEBT-PAGE-NEVER-ENDS — a relaunch debt paid outside the heal tick's check leaves the page open with stale state (booked 2026-10-14, SFH F4 and REVIEW WR-03, MEDIUM, confidence 5-6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-01; tagged 2026-11-23)
-
-**Failure scenario.** A debt-owed busy tick pages. The debt is later cleared by the validation scrub path, the boot
-relaunch, or a heal cancelled by the monitor's `wait_for` before the settle check. The next heal starts with
-`debt_owed_at_start == False`, so `note_relaunch_debt_settled` never runs, the founder's last message says the lease
-is busy with a relaunch debt, and the next debt episode's page carries the earlier incident's `since` and tick count.
-**Fix.** Decide the settled notice from `_DEBT.debt_paged and not mt5_relaunch_debt(terminal_key)` at the top of
-every tick, or call the settle from `clear_mt5_relaunch_debt`'s callers. Test: debt cleared between two ticks.
-**Owner / Trigger:** the next phase touching `mt5_relogin.py` or `mt5_outage_alert.py`; or a debt page with no end.
-
 ### 164.6.8-F5-READER-DELIVERY-UNOBSERVED — `ops_staleness_check()`'s own delivery failure is invisible (booked 2026-10-14, SFH F5, MEDIUM, confidence 6; acknowledged out of scope by D-03) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-05; tagged 2026-11-23)
 
 **Failure scenario.** `net.http_post` is asynchronous and the function never reads `net._http_response`. A rotated
@@ -2918,15 +2899,6 @@ consecutive read failures and page `mt5_terminal_scrub` / `reader_failed` at a s
 `analytics-service/services/mt5_validation_liveness.py`.
 **Owner / Trigger:** the next phase touching `mt5_validation_liveness.py`; or a scrub failure found unpaged.
 
-### 164.6.8-N2-OPEN-RECORD-FAILS-AT-WARNING — a failed open-page write is logged at WARNING, so the loss of restart recovery is invisible (booked 2026-10-14, SFH round 2 N2, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-04; tagged 2026-11-23)
-
-**Failure scenario.** Supabase is down through an incident: no `ops_alert_open` row exists, so a redeploy ends the
-incident silently and the founder's last message stays OUTAGE. The only trace is WARNING lines.
-**Fix.** Log ERROR from `record_open_page` when the write fails for a page that already went out, or count
-consecutive failures per source and raise to ERROR at 2-3. Keep the retry. Place:
-`analytics-service/services/ops_alert_open.py`.
-**Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
-
 ### 164.6.8-N3-SCRUB-SECOND-FAILURE-SUPPRESSED — a second failed scrub of the same cause inside an hour is marked paged and dropped (booked 2026-10-14, SFH round 2 N3, MEDIUM, confidence 6) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-06; tagged 2026-11-23)
 
 **Failure scenario.** Scrub row A `failed` pages at T; no `scrubbed` row follows; row B `failed` with the same cause
@@ -2935,16 +2907,6 @@ is never reported. The code delivers one page per cause per hour, not one per ro
 **Fix.** Key the window on the row identity for the scrub source, or have `_advance_scrub_state` use a `page` variant
 that skips the window. Test: outage A, outage B with no recovery, B captures.
 **Owner / Trigger:** fixed together with `164.6.8-F6-SCRUB-READER-NEWEST-ONLY`.
-
-### 164.6.8-WR05-ALERT-PATH-HANDLERS-AT-WARNING — the paging path's own failure handlers log below the Sentry event level (booked 2026-10-14, REVIEW WR-05, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-04; tagged 2026-11-23)
-
-**Failure scenario.** The tracker, debt, scrub-reader and probe handlers catch failures of the paging path and log
-at WARNING. A probe whose outer tick bound always bites never feeds `note_outage_reading`, so a validation terminal
-that always hangs that way never reaches the threshold and never pages, leaving a WARNING line every ten minutes
-that no rule sees.
-**Fix.** Log those arms at ERROR; feed the probe's outer `TimeoutError` to `note_outage_reading` as a
-`tick_deadline` reading. Places: `mt5_outage_alert.py`, `mt5_validation_liveness.py`, `mt5_session_monitor.py`.
-**Owner / Trigger:** as `164.6.8-F3-SENTRY-HALF-NOOP`.
 
 ### 164.6.8-WR06-CRON-SYNC-ERRORS-PAGE-ON-PER-KEY-FAULTS — the `two_consecutive_errors` arm pages on one flaky key and re-pages hourly with no recovery (booked 2026-10-14, REVIEW WR-06, MEDIUM, confidence 5) (owned by Phase 246 ALERTREADERS, v1.23; REQUIREMENTS.md ALRT-07; tagged 2026-11-23)
 
@@ -2957,47 +2919,6 @@ muted channel cannot report a real outage either.
 notice or a once-per-episode bound. Place: the `ops_staleness_check` reader (migration) and
 `analytics-service/routers/cron.py` `_cron_sync_heartbeat_row`. A migration change, so it needs a new stamp.
 **Owner / Trigger:** the first false `two_consecutive_errors` page after plan 09 registers the job.
-
-### 164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL — an outage is credited to Sentry although the rule's 60-minute action interval suppresses the notification (booked 2026-10-14, round-4 review WR-R4-01, MEDIUM, confidence 6) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-02; tagged 2026-11-23)
-
-**Failure scenario.** 10:00 the jobs terminal pages OUTAGE (Sentry notifies, email sent). 10:20 it recovers and the
-RECOVERED email is the founder's newest message. 10:40 it relapses with the same cause: the recovery dropped the
-window entry so the page is admitted, `capture_message` returns an id on the SAME Sentry issue last notified at
-10:00, and the rule's 60-minute action interval suppresses the notification. The email POST fails (a 502 blip). The
-outage is credited to Sentry, the window is kept, and for up to an hour the founder's inbox ends on RECOVERED while
-the terminal is down, with no ERROR logged that the page reached nobody.
-**Fix.** Credit Sentry for an outage only when its rule would notify, that is no notified capture of the same
-fingerprint inside the rule's action interval (a per-fingerprint last-credit timestamp in `ops_alert.py`, interval
-read from one named constant that cites the rule), or retry the email on a relapse regardless of the Sentry credit.
-**Owner / Trigger:** the next phase touching `ops_alert.py`; or a flapping terminal. Needs a relapse with the same
-cause inside 60 minutes plus one email failure.
-
-### 164.6.8-R4-SFH-F1-DUPLICATE-RECOVERY — a second healthy reading during the held recovery wait starts a duplicate recovery with false "restarted" wording (booked 2026-10-14, round-4 SFH F1, MEDIUM, confidence 5) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-01; tagged 2026-11-23)
-
-**Failure scenario.** A run ends on a healthy reading; `_send_recovered` sends the notice and holds the delivery wait
-in a task for up to 15 s. The next healthy reading for the same role finds no run, calls `_durable_recovery_request`,
-finds the source unchecked and the open record not yet closed, and builds a SECOND recovered request whose detail
-carries the default "after the analytics service restarted" text. No restart happened, and the founder can get two
-RECOVERED messages, one with false wording.
-**Fix.** Add the source to an in-flight set when the held task starts (removed in its `finally`), and have
-`_durable_recovery_request` return None while the source is in it. Place:
-`analytics-service/services/mt5_outage_alert.py`.
-**Owner / Trigger:** fixed together with `164.6.8-WR-R4-01-SENTRY-CREDIT-INSIDE-RULE-INTERVAL`.
-
-### 164.6.8-WR-D16-01-PROBE-BOUND-INLINE-CLOSE — a Sentry-credited recovery closes the open page inline, outside the probe tick's budget (booked 2026-10-15, plan 10 review WR-D16-01, MEDIUM, confidence 5) (owned by Phase 245 ALERTPAGE, v1.23; REQUIREMENTS.md ALRT-03; tagged 2026-11-23)
-
-**Failure scenario.** Before D-16 only the founder email could decide a recovered notice, so `_send_recovered` in
-`mt5_outage_alert.py` always closed the open page from a held task. Since D-16 a Sentry event id decides it before
-`page` returns, which is the normal case with the DSN set. The `delivery.done()` branch then runs
-`_finish_recovered` (and so `close_open_page`, bounded by `ops_alert_open._OPEN_PAGE_TIMEOUT_S`) inline on the
-monitor tick. `PROBE_TICK_BOUND_S` in `mt5_validation_liveness.py` budgets ONE open-page call and its comment still
-says the recovered wait runs in a held task. After a restart the tracker makes two calls (the read, then the close).
-With Supabase slow, the tick bound cancels the probe mid-close: the record is marked stale, the close is retried on
-the next tick, and the monitor logs a probe that did not finish. The pinning test checks only the old one-call sum.
-**Fix.** Either always run `_finish_recovered` from a held task in `_send_recovered`, or budget
-`2 * _OPEN_PAGE_TIMEOUT_S` in `PROBE_TICK_BOUND_S`, correct its comment and raise the pinning test's threshold.
-**Owner / Trigger:** the next phase touching `mt5_outage_alert.py` or the probe bound; or a "probe did not finish"
-log on a recovery tick.
 
 ### 164.6.8-SFH-D16-01-SENTRY-ID-IS-QUEUED-NOT-SENT — a credited recovery closes the one-shot record on a queued event (booked 2026-10-15, plan 10 SFH-D16-01, MEDIUM, confidence 4)
 

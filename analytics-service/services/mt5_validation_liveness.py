@@ -44,7 +44,9 @@ terminal held through every tick is not proven alive.
 
 CADENCE. The monitor loop is sequential (wait, then tick), so these two calls run
 after the jobs heal's own ``wait_for`` and stretch one tick by at most
-``PROBE_TICK_BOUND_S + READ_TICK_BOUND_S``. They do not enter
+``PROBE_TICK_BOUND_S + READ_TICK_BOUND_S``. ``PROBE_TICK_BOUND_S`` covers the lease
+release RPC and the two inline open-page calls of a credited post-restart recovery
+(Phase 245). They do not enter
 ``_MT5_SESSION_POLL_INTERVAL_FLOOR_S``: that floor protects the jobs heal's own
 abandon arm, which a call running AFTER the heal cannot pre-empt.
 
@@ -88,6 +90,10 @@ from services.mt5_relogin import (
     _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S,
     read_env_validation_gateway_endpoint,
 )
+from services.mt5_xlease import (
+    _MT5_XLEASE_MIN_ATTEMPT_S,
+    _MT5_XLEASE_RPC_TIMEOUT_S,
+)
 from services.mt5_session_episodes import (
     KIND_ALREADY_AUTHORIZED,
     KIND_BUDGET_ABANDONED,
@@ -121,16 +127,39 @@ _PROBE_THREAD_BOUND_S: Final[float] = (
     MT5_REQUEST_TIMEOUT_S + _MT5_RELOGIN_CONNECT_SLACK_S
 )
 
-#: The monitor tick's bound on the whole probe call: the bounded lease acquire, the
-#: thread bound, and the tracker's own inline work. ``page`` returns at once (a Sentry
-#: capture and a scheduled POST) and a recovered notice's wait for its outcome runs in
-#: a held task, so what the tracker awaits is ONE durable open-page read (a healthy
-#: reading) or ONE write (an outage reading), each bounded by
-#: ``ops_alert_open._OPEN_PAGE_TIMEOUT_S``.
+#: The most ``ops_alert_open`` calls the tracker awaits inline on ONE probe reading. A
+#: Sentry-credited recovery after a restart reads the record
+#: (``mt5_outage_alert._durable_recovery_request``) and then closes it inline
+#: (``_finish_recovered``, run from ``_send_recovered``'s ``delivery.done()`` branch
+#: since D-16). An outage reading writes once, and a normal recovery closes once.
+#: ``tests/test_mt5_validation_liveness.py`` MEASURES this count and fails when the
+#: probe makes more.
+_PROBE_TRACKER_OPEN_PAGE_CALLS: Final[int] = 2
+
+#: The monitor tick's bound on the whole probe call, as the sum of every bound the
+#: probe awaits, one term per line below:
+#:
+#: * ``_MT5_RELOGIN_LEASE_WAIT_DEFAULT_S``: the bounded lease acquire;
+#: * ``_MT5_XLEASE_MIN_ATTEMPT_S``: the acquire's documented one-time overshoot of
+#:   that bound (``mt5_xlease`` says it overshoots "by at most this much, once");
+#: * ``_PROBE_THREAD_BOUND_S``: the blocking probe in its thread;
+#: * ``_MT5_XLEASE_RPC_TIMEOUT_S``: the Phase 230 lease release RPC, which
+#:   ``mt5_terminal_lease`` awaits in its ``finally`` INSIDE the probe's ``async with``;
+#: * ``_PROBE_TRACKER_OPEN_PAGE_CALLS`` times ``ops_alert_open._OPEN_PAGE_TIMEOUT_S``:
+#:   the tracker's inline open-page calls. They are inline, not in a held task, because
+#:   a Sentry-credited recovered notice is decided at once (D-16), so
+#:   ``_send_recovered`` closes the record in its ``delivery.done()`` branch while the
+#:   probe is still awaiting it. ``page`` itself returns at once (a Sentry capture and a
+#:   scheduled POST).
+#:
+#: A bound below that sum cancels the probe mid-close and leaves the record open. A
+#: longer bound cannot overlap two ticks: the monitor loop is sequential.
 PROBE_TICK_BOUND_S: Final[float] = (
     _MT5_RELOGIN_LEASE_WAIT_DEFAULT_S
+    + _MT5_XLEASE_MIN_ATTEMPT_S
     + _PROBE_THREAD_BOUND_S
-    + ops_alert_open._OPEN_PAGE_TIMEOUT_S
+    + _MT5_XLEASE_RPC_TIMEOUT_S
+    + _PROBE_TRACKER_OPEN_PAGE_CALLS * ops_alert_open._OPEN_PAGE_TIMEOUT_S
 )
 
 
@@ -195,13 +224,21 @@ async def probe_validation_terminal(*, poll_interval_s: float) -> None:
                 # Phase 230 round 1 (SF-M1): a busy SUBCLASS, so it must come first. The
                 # lease database could not be asked, which is not "the terminal is in
                 # use" - the probe failed to run, and it is counted as such.
+                # Phase 245 ALERTPAGE (ALRT-04): said aloud at ERROR, as the heal's own
+                # arm does. Closed literal and the class name only: no host, port,
+                # login or server.
+                logger.error(
+                    "mt5 validation liveness: the terminal lease database could not "
+                    "be asked (Mt5TerminalLeaseUnavailableError), so the probe did "
+                    "not run and is counted as probe_failed"
+                )
                 kind, code = KIND_PROBE_FAILED, None
             except Mt5TerminalBusyError:
                 kind, code = KIND_BUSY_SKIP, None
             except asyncio.TimeoutError:
                 kind, code = KIND_BUDGET_ABANDONED, None
             except Exception as exc:  # noqa: BLE001 - a failed probe is a reading
-                logger.warning(
+                logger.error(
                     "mt5 validation liveness: the probe raised and is counted as "
                     "not measured (exc_class=%s)",
                     type(exc).__name__,
@@ -223,13 +260,13 @@ async def probe_validation_terminal(*, poll_interval_s: float) -> None:
         )
     except Exception as exc:  # noqa: BLE001 - the control; see the module docstring
         try:
-            logger.warning(
+            logger.error(
                 "mt5 validation liveness: the probe did not complete - the "
                 "monitor tick continues (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "mt5 validation liveness: the probe did not complete, and the "
                 "failure could not be described"
             )

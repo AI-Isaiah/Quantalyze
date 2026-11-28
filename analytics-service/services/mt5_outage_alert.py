@@ -130,6 +130,11 @@ class _Run:
     #: four times an hour. The run pages, and recovers, under this one cause.
     page_cause: str | None = None
     paged: bool = False
+    #: A channel has had one of this run's OUTAGE pages (its delivery outcome was
+    #: True). False for a run whose outage was captured but throttled by the rule and
+    #: never delivered, so its recovered notice must not call itself a re-send of an
+    #: outage the founder never saw (review WR-02 (b)).
+    outage_delivered: bool = False
     #: The FIRST pre-recycle fragment of the run (``build=... connected=...``).
     evidence: str | None = None
     #: The LATEST bridge-side file versions, read by the recycle itself AFTER the
@@ -156,6 +161,10 @@ class _DebtRun:
     since: datetime | None = None
     busy_ticks: int = 0
     debt_paged: bool = False
+    #: As ``_Run.outage_delivered``: a channel has had one of this debt page's outage
+    #: pages, so its recovered notice does not call itself a re-send of one the founder
+    #: never saw (review SFH-R2-M2).
+    outage_delivered: bool = False
     #: As ``_Run.recorded``: the durable open-page record has landed.
     recorded: bool = False
 
@@ -171,12 +180,27 @@ _DURABLE_CHECKED: set[str] = set()
 #: Strong references to the held recovery tasks (CPython keeps only a weak one).
 _RECOVERY_TASKS: set[asyncio.Task[None]] = set()
 
+#: Sources whose recovered notice has been SENT and whose delivery outcome is not yet
+#: decided. While a source is here no durable re-send may be built for it: its record
+#: is open only because the held close has not happened yet, and reading it as "a page
+#: a previous process left open" sends a second RECOVERED whose text falsely says the
+#: service restarted (review R4-SFH-F1). One entry per source, so a second held task for
+#: the same source shares it; that needs a full new run to page AND recover inside the
+#: held wait, which a tick cadence does not reach (a documented neighbouring race, not
+#: fixed here).
+_RECOVERED_IN_FLIGHT: set[str] = set()
+
 #: Why a source's recovered notice is owed AGAIN by THIS process, so the re-send says
 #: so. A source absent here that has an open record is a page a PREVIOUS process left
 #: open: only that case may say the service restarted (review WR-R3-02).
 _REASON_RESTART: Final[str] = "after the analytics service restarted while a page was open"
 _REASON_UNDELIVERED: Final[str] = (
     "after the recovered notice for this page reached no channel, so this is a re-send"
+)
+_REASON_OUTAGE_UNDELIVERED: Final[str] = (
+    "after no channel confirmed the outage page for this incident and none "
+    "confirmed its recovered notice either, so this may be the first notice of the "
+    "incident that arrived rather than a re-send"
 )
 _REASON_CLOSE_FAILED: Final[str] = (
     "after the recovered notice for this page was sent but its open-page record "
@@ -192,10 +216,17 @@ def _reset_outage_state_for_tests() -> None:
         _RUNS.clear()
         _DEBT = _DebtRun()
         _DURABLE_CHECKED.clear()
+        _RECOVERED_IN_FLIGHT.clear()
         _RESEND_REASON.clear()
     for task in list(_RECOVERY_TASKS):
         task.cancel()
     _RECOVERY_TASKS.clear()
+
+
+def _release_in_flight(source: str) -> None:
+    """Take ``source`` out of ``_RECOVERED_IN_FLIGHT``. Safe to call twice."""
+    with _LOCK:
+        _RECOVERED_IN_FLIGHT.discard(source)
 
 
 async def _drain_recovery_tasks_for_tests() -> None:
@@ -291,6 +322,7 @@ def _advance_run(
                 "event": "recovered",
                 "since": run.since,
                 "detail": _recovered_detail(role, run, kind, now),
+                "outage_delivered": run.outage_delivered,
             }
 
         run = _RUNS.setdefault(role, _Run())
@@ -351,14 +383,19 @@ async def _durable_recovery_request(
     so "could not look" is retried on the next healthy reading rather than being
     mistaken for "nothing is open" (review WR-01). The caller is the never-raises
     tracker; this catches its own read failure so the other source still runs.
+
+    A source whose recovered notice is still held (``_RECOVERED_IN_FLIGHT``) owes
+    nothing: its record is open only until the held close lands, and building a
+    notice from it would be a duplicate that claims a restart (review R4-SFH-F1). It
+    is NOT marked checked, so a notice that stays undelivered is still found later.
     """
     with _LOCK:
-        if source in _DURABLE_CHECKED:
+        if source in _DURABLE_CHECKED or source in _RECOVERED_IN_FLIGHT:
             return None
     try:
         found = await ops_alert_open.read_open_page(source)
     except Exception as exc:  # noqa: BLE001 - retried on the next healthy reading
-        logger.warning(
+        logger.error(
             "mt5 outage alert: the open-page record could not be read; the "
             "restart recovery is retried on the next healthy reading "
             "(exc_class=%s)",
@@ -391,7 +428,9 @@ def _mark_run_recorded(role: str) -> None:
             run.recorded = True
 
 
-async def _finish_recovered(source: str, delivery: object) -> None:
+async def _finish_recovered(
+    source: str, delivery: object, outage_delivered: bool = True
+) -> None:
     """Close the durable record IF a channel has the recovered notice. Never raises.
 
     The held half of ``_send_recovered``. A recovered notice is one-shot: the run (or
@@ -402,6 +441,9 @@ async def _finish_recovered(source: str, delivery: object) -> None:
     the source is left UNMARKED, so the next measured healthy reading finds the record
     and sends the notice again. That holds on every way out that did not close the
     record, a cancelled wait included (review WR-R3-03).
+
+    ``outage_delivered`` is False when the run's outage page itself reached no channel;
+    the re-send then says so (review WR-02 (b)) and keeps saying so on later re-sends.
     """
     closed = False
     delivered = False
@@ -418,26 +460,36 @@ async def _finish_recovered(source: str, delivery: object) -> None:
         closed = await ops_alert_open.close_open_page(source)
     except Exception as exc:  # noqa: BLE001 - a held task must not die with an unretrieved error
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: closing the open-page record failed - it is "
                 "retried on the next healthy reading (source=%s exc_class=%s)",
                 source,
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            pass
+            logger.error(
+                "mt5 outage alert: closing the open-page record failed, and the "
+                "failure could not be described"
+            )
     finally:
         if not closed:
             ops_alert_open.mark_open_page_stale(source)
         with _LOCK:
+            _RECOVERED_IN_FLIGHT.discard(source)
             if closed:
                 _DURABLE_CHECKED.add(source)
                 _RESEND_REASON.pop(source, None)
             else:
                 _DURABLE_CHECKED.discard(source)
-                _RESEND_REASON[source] = (
-                    _REASON_CLOSE_FAILED if delivered else _REASON_UNDELIVERED
-                )
+                if delivered:
+                    _RESEND_REASON[source] = _REASON_CLOSE_FAILED
+                elif (
+                    not outage_delivered
+                    or _RESEND_REASON.get(source) == _REASON_OUTAGE_UNDELIVERED
+                ):
+                    _RESEND_REASON[source] = _REASON_OUTAGE_UNDELIVERED
+                else:
+                    _RESEND_REASON[source] = _REASON_UNDELIVERED
 
 
 async def _send_recovered(
@@ -445,6 +497,7 @@ async def _send_recovered(
     cause: str,
     since: datetime | None,
     detail: str,
+    outage_delivered: bool = True,
 ) -> None:
     """Send ONE RECOVERED notice, then close the durable record IF a channel has it.
 
@@ -455,26 +508,61 @@ async def _send_recovered(
     row and from the heal after its work, both inside bounds that cancel, and a slow
     founder email must never cost the reading that ends the episode (review
     R3-SFH-01). An outcome that is already decided is acted on inline.
+
+    The source enters ``_RECOVERED_IN_FLIGHT`` the moment ``page`` returns, before the
+    task exists or the inline close is awaited, and leaves it in three places: the
+    ``finally`` of ``_finish_recovered``, a done-callback on the held task (a task
+    cancelled before its first step never runs that ``finally``), and this method's
+    own ``finally`` when nothing was scheduled.
     """
     scheduled = False
     try:
         delivery = await ops_alert.page(
             source, cause, event="recovered", since=since, detail=detail
         )
+        with _LOCK:
+            _RECOVERED_IN_FLIGHT.add(source)
         if isinstance(delivery, asyncio.Future) and not delivery.done():
             task = asyncio.get_running_loop().create_task(
-                _finish_recovered(source, delivery)
+                _finish_recovered(source, delivery, outage_delivered)
             )
             _RECOVERY_TASKS.add(task)
             task.add_done_callback(_RECOVERY_TASKS.discard)
+            task.add_done_callback(lambda _task: _release_in_flight(source))
             scheduled = True
         else:
             scheduled = True
-            await _finish_recovered(source, delivery)
+            await _finish_recovered(source, delivery, outage_delivered)
     finally:
         if not scheduled:
             with _LOCK:
                 _DURABLE_CHECKED.discard(source)
+                _RECOVERED_IN_FLIGHT.discard(source)
+
+
+def _note_outage_delivery(run: _Run | _DebtRun | None, delivery: object) -> None:
+    """Remember on a run (or the debt state) that one of its outage pages reached a
+    channel.
+
+    Read straight off an outcome that is already decided; an open one marks the run
+    when it settles. The run is captured by the caller, so a late settle cannot mark
+    the NEXT episode's run. Never raises into the caller: a stub or a broken future is
+    "no".
+    """
+    if run is None or not isinstance(delivery, asyncio.Future):
+        return
+
+    def _mark(outcome: "asyncio.Future[bool]") -> None:
+        if not outcome.cancelled() and outcome.exception() is None and (
+            outcome.result() is True
+        ):
+            with _LOCK:
+                run.outage_delivered = True
+
+    if delivery.done():
+        _mark(delivery)
+    else:
+        delivery.add_done_callback(_mark)
 
 
 async def _send_request(role: str | None, request: dict[str, Any]) -> None:
@@ -486,16 +574,24 @@ async def _send_request(role: str | None, request: dict[str, Any]) -> None:
     """
     if request["event"] == "recovered":
         await _send_recovered(
-            request["source"], request["cause"], request["since"], request["detail"]
+            request["source"],
+            request["cause"],
+            request["since"],
+            request["detail"],
+            request.get("outage_delivered", True),
         )
         return
-    await ops_alert.page(
+    delivery = await ops_alert.page(
         request["source"],
         request["cause"],
         event=request["event"],
         since=request["since"],
         detail=request["detail"],
     )
+    if role is not None:
+        with _LOCK:
+            run = _RUNS.get(role)
+        _note_outage_delivery(run, delivery)
     if request.get("needs_record") and role is not None:
         if await ops_alert_open.record_open_page(
             request["source"], request["cause"], request["since"]
@@ -542,13 +638,13 @@ async def note_outage_reading(
                     await _send_request(None, debt_request)
     except Exception as exc:  # noqa: BLE001 - an alert must never replace the reading
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the outage tracker failed - the reading is "
                 "recorded as usual (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the outage tracker failed, and the failure "
                 "could not be described"
             )
@@ -569,13 +665,13 @@ def note_wedge_evidence(role: str, fragment: str) -> None:
                 run.evidence = fragment
     except Exception as exc:  # noqa: BLE001 - the heal must never see this
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the wedge evidence could not be stashed "
                 "(exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the wedge evidence could not be stashed, "
                 "and the failure could not be described"
             )
@@ -592,13 +688,13 @@ def note_recycle_file_versions(role: str, file_versions: str) -> None:
             _RUNS.setdefault(role, _Run()).file_versions = file_versions
     except Exception as exc:  # noqa: BLE001 - the heal must never see this
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the recycle file versions could not be "
                 "stashed (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the recycle file versions could not be "
                 "stashed, and the failure could not be described"
             )
@@ -626,13 +722,15 @@ async def note_relaunch_debt_lease_busy(*, detail: str) -> None:
             since = _DEBT.since
             busy_ticks = _DEBT.busy_ticks
             needs_record = not _DEBT.recorded
-        await ops_alert.page(
+            debt_run = _DEBT
+        delivery = await ops_alert.page(
             SOURCE_RELAUNCH_DEBT,
             CAUSE_DEBT_LEASE_BUSY,
             event="outage",
             since=since,
             detail=f"{detail} busy_ticks={busy_ticks}",
         )
+        _note_outage_delivery(debt_run, delivery)
         if needs_record and await ops_alert_open.record_open_page(
             SOURCE_RELAUNCH_DEBT, CAUSE_DEBT_LEASE_BUSY, since
         ):
@@ -640,20 +738,20 @@ async def note_relaunch_debt_lease_busy(*, detail: str) -> None:
                 _DEBT.recorded = True
     except Exception as exc:  # noqa: BLE001 - an alert must never replace the heal
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the relaunch-debt page failed - the heal is "
                 "unaffected (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the relaunch-debt page failed, and the failure "
                 "could not be described"
             )
 
 
 async def note_relaunch_debt_settled() -> None:
-    """A heal paid the relaunch debt. Send ONE recovered notice if a page was sent.
+    """The relaunch debt is no longer owed: send ONE recovered notice if a page was sent.
 
     Plan 07 (D-06). A debt paid with no prior page (the debt was cleared on the
     first tick it was seen) sends nothing. The state is cleared BEFORE the page
@@ -666,9 +764,11 @@ async def note_relaunch_debt_settled() -> None:
             paged = run.debt_paged
             since = run.since
             busy_ticks = run.busy_ticks
+            outage_delivered = run.outage_delivered
             run.since = None
             run.busy_ticks = 0
             run.debt_paged = False
+            run.outage_delivered = False
             run.recorded = False
         if not paged:
             # No page from THIS process; one the previous process left open is
@@ -685,22 +785,63 @@ async def note_relaunch_debt_settled() -> None:
             _RECOVERED_PREFIX + CAUSE_DEBT_LEASE_BUSY,
             since,
             (
-                "terminal=jobs recovered: a heal won the terminal lease and "
-                f"paid the relaunch debt after {busy_ticks} tick(s) that could "
+                "terminal=jobs recovered: the relaunch debt is no longer owed "
+                f"after {busy_ticks} tick(s) that could "
                 f"not get it, since="
                 f"{since.isoformat(timespec='seconds') if since else 'unknown'} "
                 f"duration_min={minutes if minutes is not None else 'unknown'}"
             ),
+            outage_delivered,
         )
     except Exception as exc:  # noqa: BLE001 - an alert must never replace the heal
         try:
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the relaunch-debt recovered notice failed - "
                 "the heal is unaffected (exc_class=%s)",
                 type(exc).__name__,
             )
         except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
-            logger.warning(
+            logger.error(
                 "mt5 outage alert: the relaunch-debt recovered notice failed, and "
                 "the failure could not be described"
+            )
+
+
+async def note_relaunch_debt_state(*, debt_owed: bool) -> None:
+    """End a relaunch-debt page whose debt is no longer owed. Never raises.
+
+    Phase 245 ALERTPAGE (F4, ALRT-01). ``note_relaunch_debt_settled`` used to run only
+    from the heal's own after-outcome check, which sees a debt THAT TICK paid. A debt
+    cleared anywhere else (the validation scrub path, the boot relaunch, or a heal that
+    the monitor cancelled or that returned before its after-outcome check) left the
+    page open with a stale ``since`` and tick count that the next incident inherited.
+
+    The rule is level-triggered: the heal calls this at the top of EVERY tick with the
+    debt it just read, and the settle runs only when a debt page from THIS process is
+    open and the debt is no longer owed. Nothing hooks ``clear_mt5_relaunch_debt``'s
+    callers. It never calls the settle unconditionally, because the settle's
+    nothing-paged branch reads the durable open-page record, which would put a sink
+    round trip on every idle tick.
+
+    ``note_relaunch_debt_settled`` clears ``since``, ``busy_ticks``, ``debt_paged`` and
+    ``recorded`` before it pages, so the next debt episode starts clean: its own
+    ``since`` and ``busy_ticks=1``. The limit: a debt paid and owed again between two
+    ticks is never observed unowed, so it reads as one episode.
+    """
+    try:
+        with _LOCK:
+            settle = _DEBT.debt_paged and not debt_owed
+        if settle:
+            await note_relaunch_debt_settled()
+    except Exception as exc:  # noqa: BLE001 - an alert must never replace the heal
+        try:
+            logger.error(
+                "mt5 outage alert: the relaunch-debt level check failed - the heal "
+                "is unaffected (exc_class=%s)",
+                type(exc).__name__,
+            )
+        except BaseException:  # noqa: BLE001 - IN-06 shape, no await inside
+            logger.error(
+                "mt5 outage alert: the relaunch-debt level check failed, and the "
+                "failure could not be described"
             )

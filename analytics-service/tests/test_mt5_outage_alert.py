@@ -23,6 +23,7 @@ See the plan 04 SUMMARY.
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import logging
 import sys
@@ -1002,6 +1003,100 @@ def _unsettled_page(monkeypatch: pytest.MonkeyPatch) -> Any:
     return pending
 
 
+def _held_page_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[tuple[str, str, str]], asyncio.Future[bool]]:
+    """Replace the tracker's ``page`` with one that RECORDS every call and returns one
+    never-settling delivery outcome, so a test can count the pages sent while a
+    recovered notice's outcome is still held. ``_unsettled_page`` holds the outcome
+    too, but records nothing, so it cannot see a duplicate. Returns
+    ``(calls, outcome)``; each call is ``(source, event, detail)``. Resolve the
+    outcome to let the held task finish."""
+    calls: list[tuple[str, str, str]] = []
+    held: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+
+    async def _held(
+        source: str,
+        cause: str,
+        *,
+        event: str = "outage",
+        since: datetime | None = None,
+        detail: str = "",
+        extra_tags: Any = None,
+    ) -> asyncio.Future[bool]:
+        calls.append((source, event, detail))
+        return held
+
+    monkeypatch.setattr(mt5_outage_alert.ops_alert, "page", _held)
+    return calls, held
+
+
+async def test_a_second_healthy_reading_during_the_held_wait_sends_no_second_recovered(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review R4-SFH-F1 (ALRT-01). A recovered notice whose delivery outcome is still
+    held leaves the durable record open until the held task closes it. A second
+    measured healthy reading in that window used to read that record, take it for a
+    page a PREVIOUS process left open, and send a SECOND recovered notice whose text
+    says the service restarted. Both halves are wrong: the founder is paged twice for
+    one recovery and told something false. The held source must be skipped."""
+    await _fault_until_paged()
+    calls, held = _held_page_calls(monkeypatch)
+
+    for _ in range(3):
+        clock.advance(minutes=1)
+        await _observe(_AUTHORIZED)
+
+    recovered = [c for c in calls if c[0] == _JOBS_SOURCE and c[1] == "recovered"]
+    assert len(recovered) == 1, f"paged {len(recovered)} times, expected 1"
+    assert not any("restarted" in c[2] for c in calls), calls
+
+    held.set_result(True)
+    await mt5_outage_alert._drain_recovery_tasks_for_tests()
+
+    assert _JOBS_SOURCE not in ops_alert_open_store.pages
+    assert mt5_outage_alert._RECOVERED_IN_FLIGHT == set()
+    before = len(calls)
+    await _observe(_AUTHORIZED)
+    assert len(calls) == before, "a closed record was recovered again"
+
+
+async def test_a_held_recovery_cancelled_before_it_starts_leaves_no_source_in_flight(
+    sink: Any,
+    ops_alert_open_store: Any,
+    mt5_outage_pages: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task cancelled before its first step never runs its body, so a ``finally``
+    inside ``_finish_recovered`` cannot release the in-flight entry (RESEARCH
+    Pitfall 1). A leaked entry would silence every later recovery of that source for
+    the life of the process, so the re-send of a notice whose record stayed open could
+    never happen. The release must come from the task's done-callback."""
+    _seed_open_page(ops_alert_open_store, _JOBS_SOURCE)
+    original_page = mt5_outage_alert.ops_alert.page
+    _calls, _held = _held_page_calls(monkeypatch)
+
+    await mt5_outage_alert._send_recovered(
+        _JOBS_SOURCE, "recovered_from_ipc_fault", _BEFORE_RESTART, "terminal=jobs recovered"
+    )
+    [task] = list(mt5_outage_alert._RECOVERY_TASKS)
+    task.cancel()  # no await since the task was created: its body never starts
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert mt5_outage_alert._RECOVERED_IN_FLIGHT == set(), (
+        "in-flight entry leaked: the re-send can never happen"
+    )
+
+    monkeypatch.setattr(mt5_outage_alert.ops_alert, "page", original_page)
+    await _observe(_AUTHORIZED)
+
+    resent = [p for p in mt5_outage_pages if p.event == "recovered"]
+    assert len(resent) == 1, "re-send did not happen"
+
+
 async def test_a_healthy_reading_is_recorded_while_its_recovered_notice_is_still_unsettled(
     sink: Any, ops_alert_open_store: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1072,6 +1167,37 @@ async def test_the_relaunch_debt_settle_is_not_held_behind_its_recovered_notice(
     assert ops_alert_open_store.pages == {}
 
 
+async def test_the_level_triggered_settle_acts_only_on_a_paged_debt_that_is_no_longer_owed(
+    ops_alert_open_store: Any, mt5_outage_pages: list[Any]
+) -> None:
+    """The heal calls ``note_relaunch_debt_state`` at the top of EVERY tick. A debt
+    page is ended by the level, "paged here and no longer owed", never by hooking
+    whoever cleared the debt. Called unconditionally, ``note_relaunch_debt_settled``
+    reads the durable open-page record whenever nothing was paged here, which would put
+    a sink round trip on every idle tick (RESEARCH Pitfall 2); and settling while the
+    debt is still owed would send an all-clear over a live incident."""
+    # (a) nothing paged, nothing owed: no page, and no durable read on an idle tick.
+    await mt5_outage_alert.note_relaunch_debt_state(debt_owed=False)
+    assert mt5_outage_pages == []
+    assert ops_alert_open_store.read_calls == 0, "an idle tick read the durable record"
+
+    # (b) a debt page is open and the debt is still owed: nothing moves.
+    await mt5_outage_alert.note_relaunch_debt_lease_busy(detail="d")
+    sent = len(mt5_outage_pages)
+    busy_ticks = mt5_outage_alert._DEBT.busy_ticks
+    await mt5_outage_alert.note_relaunch_debt_state(debt_owed=True)
+    assert len(mt5_outage_pages) == sent
+    assert mt5_outage_alert._DEBT.debt_paged is True
+    assert mt5_outage_alert._DEBT.busy_ticks == busy_ticks
+
+    # (c) the same page, debt no longer owed: exactly one recovered, state reset.
+    await mt5_outage_alert.note_relaunch_debt_state(debt_owed=False)
+    recovered = [p for p in mt5_outage_pages if p.event == "recovered"]
+    assert len(recovered) == 1, f"recovered pages: {len(recovered)}, expected 1"
+    debt = mt5_outage_alert._DEBT
+    assert (debt.since, debt.busy_ticks, debt.debt_paged) == (None, 0, False)
+
+
 async def test_a_relaunch_debt_recovered_notice_that_reached_no_channel_is_sent_again(
     sink: Any, ops_alert_open_store: Any, mt5_outage_pages: list[Any]
 ) -> None:
@@ -1091,6 +1217,33 @@ async def test_a_relaunch_debt_recovered_notice_that_reached_no_channel_is_sent_
 
     assert [p.event for p in mt5_outage_pages] == ["outage", "recovered", "recovered"]
     assert mt5_outage_pages[-1].source == _DEBT_SOURCE
+    assert ops_alert_open_store.pages == {}
+    # The control for the undelivered-outage test below: the debt page's outage WAS
+    # delivered, so a recovered notice that reached nothing is a plain re-send.
+    assert "this is a re-send" in mt5_outage_pages[-1].detail, mt5_outage_pages[-1].detail
+
+
+async def test_a_relaunch_debt_recovered_notice_for_an_undelivered_outage_does_not_claim_to_be_a_re_send(
+    sink: Any, ops_alert_open_store: Any, mt5_outage_pages: list[Any]
+) -> None:
+    """SFH-R2-M2. The debt path used to discard its outage page's outcome and send its
+    recovered notice as if the outage had been delivered, so a re-send told a founder
+    who never saw the outage page that this was a re-send. Its outage page reaches no
+    channel here, the recovered notice reaches none either, and the next healthy
+    reading's re-send must say that no channel confirmed the outage."""
+    mt5_outage_alert.ops_alert.page.delivers = False
+    await mt5_outage_alert.note_relaunch_debt_lease_busy(detail="d")
+    await mt5_outage_alert.note_relaunch_debt_settled()
+
+    mt5_outage_alert.ops_alert.page.delivers = True
+    await _observe(_AUTHORIZED)
+
+    recovered = [p for p in mt5_outage_pages if p.event == "recovered"]
+    assert len(recovered) == 2, [p.detail for p in recovered]
+    resend = recovered[-1]
+    assert resend.source == _DEBT_SOURCE
+    assert "no channel confirmed the outage page for this incident" in resend.detail
+    assert "this is a re-send" not in resend.detail, resend.detail
     assert ops_alert_open_store.pages == {}
 
 
@@ -1150,6 +1303,107 @@ async def test_a_failed_close_is_retried_by_the_next_healthy_reading_without_a_s
         ops_alert._reset_ops_alert_for_tests()
 
 
+async def test_a_recovered_notice_inside_the_rule_interval_is_held_and_a_second_healthy_reading_adds_no_duplicate(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase 245 Pitfall 3 (ALRT-01 x ALRT-02), through the REAL channel.
+
+    With the credit tied to the Sentry rule's action interval, a recovered notice
+    whose fingerprint was credited inside the last interval is NOT credited, so
+    ``page`` returns an undecided outcome and ``_send_recovered`` holds the close in a
+    task. The plan 01 guard (``_RECOVERED_IN_FLIGHT``) is what stops a second healthy
+    reading from reading the still-open record, taking it for a previous process's
+    page, and sending a duplicate whose text says the service restarted.
+
+    The pin counts ``page`` CALLS, not captures or emails: through the real channel a
+    second recovered inside ``OPS_ALERT_WINDOW_S`` is swallowed by the window and joins
+    the held outcome, so the duplicate leaves no capture or email to count. Its visible
+    harm is a second page call carrying the false wording, a second held task and a
+    spurious close failure.
+
+    The SEED stands in for an earlier episode whose recovered notice was credited but
+    whose record close failed. A first episode that closed cleanly would add the source
+    to ``_DURABLE_CHECKED``, which on its own stops the second durable read, so a test
+    built on it could never fail."""
+    import types
+    from unittest.mock import MagicMock
+
+    spy = MagicMock()
+    spy.capture_message.return_value = "synthetic-event-id"
+    scope_cm = MagicMock()
+    scope_cm.__exit__.return_value = False
+    spy.new_scope.return_value = scope_cm
+    ops_clock = types.SimpleNamespace(now=1000.0)
+    ops_clock.monotonic = lambda: ops_clock.now  # type: ignore[attr-defined]
+    gate = asyncio.Event()
+    emails: list[str] = []
+
+    async def _post(payload: dict[str, Any]) -> bool:
+        emails.append(payload["event"])
+        await gate.wait()
+        return False  # the 502 under D-15
+
+    real_page = ops_alert.page
+    calls: list[tuple[str, str, str]] = []
+
+    async def _counting_page(
+        source: str, cause: str, *, event: str = "outage", **kwargs: Any
+    ) -> Any:
+        calls.append((source, event, str(kwargs.get("detail", ""))))
+        return await real_page(source, cause, event=event, **kwargs)
+
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "time", ops_clock)
+    monkeypatch.setattr(ops_alert, "_post_founder_email", _post)
+    monkeypatch.setattr(mt5_outage_alert, "ops_alert", ops_alert)
+    monkeypatch.setattr(ops_alert, "page", _counting_page)
+    ops_alert._reset_ops_alert_for_tests()
+    try:
+        # SEED: credited, so this recovered fingerprint is inside the rule interval.
+        seeded = await real_page(
+            _JOBS_SOURCE, "recovered_from_ipc_fault", event="recovered"
+        )
+        assert await ops_alert.await_delivery(seeded) is True
+
+        await _fault_until_paged()
+        ops_clock.now += 600
+        clock.advance(minutes=10)
+        await _observe(_AUTHORIZED)
+        assert len(mt5_outage_alert._RECOVERY_TASKS) == 1, "the recovered close was not held"
+        assert _JOBS_SOURCE in mt5_outage_alert._RECOVERED_IN_FLIGHT
+
+        ops_clock.now += 60
+        clock.advance(minutes=1)
+        await _observe(_AUTHORIZED)
+
+        recovered = [c for c in calls if c[0] == _JOBS_SOURCE and c[1] == "recovered"]
+        assert len(recovered) == 1, f"paged {len(recovered)} times, expected 1"
+        assert not any("restarted" in c[2] for c in calls), calls
+
+        gate.set()
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+
+        assert _JOBS_SOURCE in ops_alert_open_store.pages, "closed over an undelivered notice"
+        assert ops_alert_open_store.stale == {_JOBS_SOURCE}
+        assert mt5_outage_alert._RECOVERED_IN_FLIGHT == set()
+
+        await _observe(_AUTHORIZED)
+        resent = [c for c in calls if c[0] == _JOBS_SOURCE and c[1] == "recovered"]
+        assert len(resent) == 2, f"paged {len(resent)} times, expected 2"
+        assert "reached no channel" in resent[-1][2], resent[-1][2]
+        assert "restarted" not in resent[-1][2], resent[-1][2]
+        gate.set()
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+    finally:
+        gate.set()
+        ops_alert._reset_ops_alert_for_tests()
+
+
 async def test_a_new_incident_does_not_inherit_the_cause_or_since_of_a_row_left_open(
     sink: Any,
     clock: _Clock,
@@ -1189,6 +1443,59 @@ async def test_a_new_incident_does_not_inherit_the_cause_or_since_of_a_row_left_
         assert recovered.cause == "recovered_from_dark"
         assert recovered.since == second_start
         assert recovered.since != first_start
+        assert [r["status"] for r in cron.rows] == ["ok", "ok"]
+    finally:
+        ops_alert_open._STALE_SOURCES.clear()
+
+
+async def test_a_relapse_inside_the_hour_opens_and_closes_one_row_per_episode(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    mt5_outage_pages: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ALRT-01, the relapse case: outage, recovered, outage inside the hour, recovered
+    is TWO of each, not one run that swallows the second. Counted over the REAL
+    open-page functions on a fake `cron_runs`, because a page count alone cannot see a
+    row that was never closed (the next incident would inherit it) or a second row that
+    was never opened (the second outage would have no memory across a redeploy)."""
+    from tests.test_mt5_relogin import _FakeCronRuns as _CronRuns
+
+    cron = _CronRuns()
+    monkeypatch.setattr(ops_alert_open, "get_supabase", lambda: cron)
+    for name, real in _REAL_OPEN_PAGE_FUNCTIONS.items():
+        monkeypatch.setattr(ops_alert_open, name, real)
+    ops_alert_open._STALE_SOURCES.clear()
+    try:
+        await _fault_until_paged()  # episode 1
+        clock.advance(minutes=10)
+        await _observe(_AUTHORIZED)
+
+        clock.advance(minutes=10)  # inside the hour
+        second_start = clock.now
+        for _ in range(_THRESHOLD):  # episode 2
+            await _observe(_DARK)
+        clock.advance(minutes=10)
+        for _ in range(3):
+            await _observe(_AUTHORIZED)
+
+        jobs_pages = [
+            (p.event, p.cause) for p in mt5_outage_pages if p.source == _JOBS_SOURCE
+        ]
+        assert jobs_pages == [
+            ("outage", "ipc_fault"),
+            ("recovered", "recovered_from_ipc_fault"),
+            ("outage", "dark"),
+            ("recovered", "recovered_from_dark"),
+        ], jobs_pages
+        second_outage = [
+            p for p in mt5_outage_pages if p.source == _JOBS_SOURCE and p.event == "outage"
+        ][-1]
+        assert second_outage.since == second_start
+        assert len(cron.rows) == 2, f"opened {len(cron.rows)} rows, expected 2"
+        running = [r for r in cron.rows if r["status"] == "running"]
+        assert not running, f"{len(running)} rows left running"
         assert [r["status"] for r in cron.rows] == ["ok", "ok"]
     finally:
         ops_alert_open._STALE_SOURCES.clear()
@@ -1302,6 +1609,7 @@ _TRACKER_ENTRY_POINTS = (
     mt5_outage_alert.note_outage_reading,
     mt5_outage_alert.note_wedge_evidence,
     mt5_outage_alert.note_recycle_file_versions,
+    mt5_outage_alert.note_relaunch_debt_state,
 )
 
 
@@ -1546,3 +1854,209 @@ async def test_the_real_escalation_stashes_its_pre_recycle_evidence_and_the_page
     detail = mt5_outage_pages[0].detail
     assert "build=6182" in detail
     assert _FAKE_SERVER not in detail
+
+
+# --------------------------------------------------------------------------- #
+# Phase 245 round-1 review WR-02 - a same-cause relapse inside the Sentry rule's
+# interval: the limit is stated and pinned (a), and the recovered wording does not
+# call the notice a re-send of an outage the founder never saw (b)
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_recovered_notice_for_an_undelivered_outage_does_not_claim_to_be_a_re_send(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    mt5_outage_pages: list[Any],
+) -> None:
+    """WR-02 (b). "This is a re-send" tells the founder a notice they already saw is
+    arriving again. When the OUTAGE page itself reached no channel there was nothing to
+    re-send, and the text has to say that. The wording survives a second failed
+    attempt, because the second send is built from the durable record and not from the
+    run."""
+    mt5_outage_alert.ops_alert.page.delivers = False
+    await _fault_until_paged()  # the outage page reaches no channel
+    await _observe(_AUTHORIZED)  # the recovered notice reaches none either
+    clock.advance(minutes=25)
+
+    await _observe(_AUTHORIZED)  # the first re-send, also undelivered
+    clock.advance(minutes=10)
+    mt5_outage_alert.ops_alert.page.delivers = True
+    await _observe(_AUTHORIZED)  # the second re-send is delivered
+
+    resends = [p for p in mt5_outage_pages if p.event == "recovered"][1:]
+    assert len(resends) == 2, [p.detail for p in resends]
+    for resend in resends:
+        assert "no channel confirmed the outage page for this incident" in resend.detail
+        assert "may be the first notice of the incident that arrived" in resend.detail
+        assert "reached no channel" not in resend.detail, resend.detail
+        assert "this is a re-send" not in resend.detail, resend.detail
+
+
+class _MonoClock:
+    """The monotonic clock ``ops_alert`` reads, driven together with the wall clock."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+async def test_a_same_cause_relapse_inside_the_rule_interval_is_never_paged_and_recovers_late(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WR-02 (a), through the REAL channel with the founder email answering 502.
+
+    THE LIMIT, stated in ``ops_alert``'s module docstring: a same-cause relapse that
+    opens AND ends inside the rule interval is never paged as an outage, because the
+    live rule throttles its capture and the email is down. Its recovered notice
+    arrives once the interval has passed. The SC1 relapse pin uses a stub that delivers
+    every page and a different cause for episode two, so it cannot see this.
+
+    Asserted on what the founder gets: the credited stamps are the channel's record of
+    which captures could notify.
+    """
+    from unittest.mock import MagicMock
+
+    mono = _MonoClock()
+    spy = MagicMock()
+    spy.capture_message.side_effect = lambda *a, **k: f"event-{spy.capture_message.call_count}"
+    details: dict[str, list[str]] = {"outage": [], "recovered": []}
+
+    async def _post(payload: dict[str, Any]) -> bool:
+        details[payload["event"]].append(payload["detail"])
+        return False  # the 502
+
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "time", mono)
+    monkeypatch.setattr(ops_alert, "_post_founder_email", _post)
+    monkeypatch.setattr(mt5_outage_alert, "ops_alert", ops_alert)
+    ops_alert._reset_ops_alert_for_tests()
+    outage_key = (_JOBS_SOURCE, "ipc_fault", "outage")
+    recovered_key = (_JOBS_SOURCE, "recovered_from_ipc_fault", "recovered")
+
+    async def _tick(reading: tuple[str, int | None]) -> None:
+        await _observe(reading)
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+
+    def _advance(seconds: float) -> None:
+        mono.now += seconds
+        clock.advance(seconds=seconds)
+
+    try:
+        for _ in range(_THRESHOLD):  # episode 1 pages, credited
+            await _tick(_IPC_FAULT)
+        t_outage_1 = ops_alert._sentry_credited_at[outage_key]
+        _advance(_CADENCE_S)
+        await _tick(_AUTHORIZED)  # episode 1's recovered notice, credited
+        t_recovered_1 = ops_alert._sentry_credited_at[recovered_key]
+
+        _advance(_CADENCE_S)
+        for _ in range(_THRESHOLD):  # episode 2: the same wedge, same cause
+            await _tick(_IPC_FAULT)
+        _advance(_CADENCE_S)
+        await _tick(_AUTHORIZED)  # episode 2 ends inside the interval
+
+        outage_captures = [
+            c for c in spy.capture_message.call_args_list if "[outage]" in c.args[0]
+        ]
+        assert len(outage_captures) == 2, "episode 2's outage was captured once"
+        assert ops_alert._sentry_credited_at[outage_key] == t_outage_1, (
+            "episode 2's outage was credited: the founder was told a throttled "
+            "capture reached them"
+        )
+        assert len(details["outage"]) == 2
+
+        # Held, undelivered, and re-sent on every healthy reading until the interval
+        # (plus the credit margin) has passed since the first recovered credit.
+        deadline = (
+            t_recovered_1
+            + ops_alert.SENTRY_RULE_ACTION_INTERVAL_S
+            + ops_alert._SENTRY_CREDIT_MARGIN_S
+        )
+        assert ops_alert._sentry_credited_at[recovered_key] == t_recovered_1
+        while ops_alert._sentry_credited_at[recovered_key] == t_recovered_1:
+            assert mono.now < deadline + 2 * _CADENCE_S, "the recovered never credited"
+            _advance(_CADENCE_S)
+            await _tick(_AUTHORIZED)
+        late = ops_alert._sentry_credited_at[recovered_key]
+        assert late >= deadline, "credited inside the interval plus margin"
+        assert late - _CADENCE_S < deadline, "credited later than the first chance"
+
+        # What the founder reads: the late recovered notice describes an outage they
+        # were never paged on, and does not call itself a re-send of one they saw.
+        assert len(details["recovered"]) >= 3
+        for detail in details["recovered"][1:]:
+            assert "this is a re-send" not in detail, detail
+        assert (
+            "no channel confirmed the outage page for this incident"
+            in details["recovered"][-1]
+        )
+        assert ops_alert_open_store.pages == {}, "the late recovery left its record open"
+    finally:
+        ops_alert._reset_ops_alert_for_tests()
+
+
+async def test_a_fresh_process_with_an_open_record_recovers_once_and_closes_on_the_first_healthy_reading(
+    sink: Any,
+    clock: _Clock,
+    ops_alert_open_store: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR-R2-01, through the REAL channel with the founder email answering 502 (D-15).
+
+    A deploy ends an MT5 incident: the previous process paged the outage and left its
+    durable record open, and this process has an empty credit map and a young clock.
+    Its first healthy reading (the boot heal makes that one early) must send exactly
+    ONE recovered capture, credited, and close the record on that reading.
+
+    The round-1 stand-in treated a fingerprint with no credit stamp in a young process
+    as "Sentry may be throttling", so the capture went uncredited, the record stayed
+    open and every later reading re-captured. Sentry notifies each uncredited capture
+    once its own throttle lapses, so the founder got RECOVERED twice about an hour
+    apart, the second worded as a re-send, and under back-to-back deploys the record
+    never closed. Counted on captures and on the record, not on a stub's outcome."""
+    from unittest.mock import MagicMock
+
+    mono = _MonoClock()  # now=1000.0: the process is seconds old
+    spy = MagicMock()
+    spy.capture_message.side_effect = lambda *a, **k: f"event-{spy.capture_message.call_count}"
+
+    async def _post(payload: dict[str, Any]) -> bool:
+        return False  # the 502
+
+    monkeypatch.setattr(ops_alert, "sentry_sdk", spy)
+    monkeypatch.setattr(ops_alert, "time", mono)
+    monkeypatch.setattr(ops_alert, "_post_founder_email", _post)
+    monkeypatch.setattr(mt5_outage_alert, "ops_alert", ops_alert)
+    ops_alert._reset_ops_alert_for_tests()
+    try:
+        _seed_open_page(ops_alert_open_store, _JOBS_SOURCE, "ipc_fault")
+        assert ops_alert._sentry_credited_at == {}, "the process is not fresh"
+
+        await _observe(_AUTHORIZED)  # the first healthy reading of the new process
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+
+        recovered = [
+            c for c in spy.capture_message.call_args_list if "[recovered]" in c.args[0]
+        ]
+        assert len(recovered) == 1, f"captured recovered {len(recovered)} times, expected 1"
+        assert ops_alert_open_store.pages == {}, "the record stayed open past the reading"
+
+        mono.now += _CADENCE_S
+        clock.advance(seconds=_CADENCE_S)
+        await _observe(_AUTHORIZED)
+        await ops_alert._drain_ops_alert_tasks_for_tests()
+        await mt5_outage_alert._drain_recovery_tasks_for_tests()
+        recovered = [
+            c for c in spy.capture_message.call_args_list if "[recovered]" in c.args[0]
+        ]
+        assert len(recovered) == 1, "a later reading re-sent a closed incident"
+    finally:
+        ops_alert._reset_ops_alert_for_tests()
