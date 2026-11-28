@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.133.114.2] - 2026-11-28 — records: Phase 256 OKXUNITSWITCH shipped; verification human_needed until the post-deploy read; Phase 261 UNITSWITCHEDGES booked
+
+This is a records PR. It changes no source, test, workflow or migration file.
+
+### Changed
+- **The Phase 256 OKXUNITSWITCH directory lands on `main` with its records.** It carries:
+  - CONTEXT, with every founder ruling of 2026-11-27 verbatim;
+  - DISCUSSION-LOG, RESEARCH, UI-SPEC, PATTERNS, VALIDATION and COVERAGE;
+  - the ten PLANs and their SUMMARYs;
+  - REVIEW (three rounds plus the security follow-up) and REVIEW-FIX;
+  - SECURITY (SECURED, 0 open);
+  - VERIFICATION (`human_needed`).
+- **Phase 256 stays open.** VERIFICATION is `human_needed` for two items, so the phase is not closed with `phase complete`:
+  - SC-5, the post-deploy PROD read: the 7 nightly derives end `done`, the 3 strategies unfreeze, and the stored switch reads last USD day 2026-11-20, first BTC day 2026-11-21. The read is due after the next nightly derive, marker query first.
+  - The visual UAT of the chart break.
+- **ROADMAP:**
+  - Phase 256 lists its ten plans, ticked.
+  - The Progress row records both ships: PR-1 v0.133.108.0 (#1402) and PR-2 v0.133.112.0 (#1411).
+  - The section carries the founder rulings of 2026-11-27:
+    - "Whole record in USD (Recommended)", "One chart, marked switch (Recommended)", "USD, BTC part converted (Recommended)";
+    - "Move switch to coin majority", then "≥95% coin and stays (Recommended)";
+    - "<50% for 7 days (Recommended)";
+    - "Book a follow-up phase (Recommended)".
+- **SC-6 lineage.** `232-CONTEXT.md` and the ROADMAP "Cause." bullet carry the dated corrections: the buy days by bill timestamp are 2026-11-14 and 2026-11-20, and the derived switch is now Nov 20 / Nov 21 under the 95% rule.
+- **STATE.** Last activity and Roadmap Evolution carry the ship and the booking.
+
+### Added
+- **Phase 261 UNITSWITCHEDGES, booked in v1.23 HARDEN** by founder ruling "Book a follow-up phase (Recommended)". It holds the five Phase 256 round-3 survivors:
+  - R3-02: re-pointing a switched strategy to a new key on the same account;
+  - R3-04: a first mark that falls on a mixed day;
+  - R3-05: a deposit before the first mark;
+  - R3-07: keys with no mark before the coin;
+  - SF3-01: mixed-day withholding after the coin bills age out, for keys without marks.
+  `/gsd-phase` add put it under v1.22, so it was moved into v1.23 by hand, as 254 to 258 were.
+
+### Notes
+- The column COMMENT on `strategy_analytics.unit_segments` does not yet name `key_binding` or `withheld_days`. Changing it needs a migration, so it is left for Phase 261.
 ## [0.133.114.1] - 2026-11-28 — BASELINE: automated re-dump after the PROD apply of 416a2efb
 
 ### Changed

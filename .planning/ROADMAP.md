@@ -1002,6 +1002,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 - [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
 - [x] **Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval** - Booked 2026-11-27 by founder ruling ("Push to main directly") as a CI-only phase: `supabase-migrate.yml`'s re-dump stops opening a bot PR that waits on a human approval and pushes its one commit to `main`; overrides 164.9.5 AUTOREDUMP's D-13 and D-23 (completed 2026-11-28)
+- [ ] **Phase 261: UNITSWITCHEDGES — the edge shapes OKXUNITSWITCH routed: a re-pointed key, a first mark on a mixed day, a pre-mark deposit, keys with no early mark, and bills ageing out** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Book a follow-up phase (Recommended)") from 256 OKXUNITSWITCH review round 3 survivors R3-02, R3-04, R3-05, R3-07 and SF3-01
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1319,10 +1320,14 @@ Plans:
 **Goal:** An OKX account whose P&L was in USDT and which then moves into a coin is reported in USD up to the switch and in that coin after it, on every surface, and the derives that fail today end `done` and unfreeze the strategies they hold. No reader supports a series that changes unit today: the native-unit machinery (`services/account_unit.py`, `api_key_nav_marks.native_unit`, the BTCUSDVIEW USD view in `services/native_to_usd.py`, `benchmark.read_btc_closes`) gives one unit per key for its whole history.
 - **Founder ruling 2026-11-27 (AskUserQuestion), verbatim: "USD before 11-15, BTC after".** It picked option C of four (A: stay in USD and convert each BTC bill at the day's close; B: BTC for the whole history; C: USD before the switch and the coin after; D: keep the refusal). The date 11-15 is the founder's reading of this one account, and the phase derives it from data.
 - **What is failing (measured read-only on PROD 2026-11-27, no ids recorded here).** One OKX account, stored as 4 keys, has ended 7 derive jobs `failed_final` every night since 2026-11-24 (4 key-mode and 3 strategy-mode), `error_kind=permanent`, `realized read incomplete (daily_pnl_non_usd_okx)`. Its 3 strategies are frozen at their last good figures (`read_refusal_kept_figures`). Every night from 11-16 to 11-24 those jobs ended `done`.
-- **Cause.** Phase 232-03's VREAD-06 refusal, in the OKX branch of `fetch_daily_pnl` in `analytics-service/services/exchange.py`, trips on 11 bills with `ccy=BTC` and a non-zero `pnl + fee` (the census read `{'BTC': 11}` of about 1300 bills; every other bill is USDT or zero). They are most likely the fees, charged in BTC, on the spot BTC-USDT buys of 11-15 and 11-21. That is inferred from holdings and dates, not proven from a raw bill, because no bill is stored. 232-CONTEXT Q3 recorded this exact case as a known refusal.
+- **Cause.** Phase 232-03's VREAD-06 refusal, in the OKX branch of `fetch_daily_pnl` in `analytics-service/services/exchange.py`, trips on 11 bills with `ccy=BTC` and a non-zero `pnl + fee` (the census read `{'BTC': 11}` of about 1300 bills; every other bill is USDT or zero). They are most likely the fees, charged in BTC, on the spot BTC-USDT buys of 11-15 and 11-21. That is inferred from holdings and dates, not proven from a raw bill, because no bill is stored. 232-CONTEXT Q3 recorded this exact case as a known refusal. ⛔ **CORRECTED 2026-11-27 (Phase 256 research):** the buy days by UTC bill timestamp are 2026-11-14 and 2026-11-20; 2026-11-15 and 2026-11-21 are the holdings asof labels, which describe the end of the previous UTC day. The derived switch is: last USD return day 2026-11-14, first BTC return day 2026-11-15, which is the founder's "USD before 11-15, BTC after". The "11-15 and 11-21" wording above is kept as lineage; `232-CONTEXT.md` carries the same correction. ⛔ CORRECTED 2026-11-27 (founder rulings on review findings CR-01 and R2-01, "≥95% coin and stays (Recommended)"): the switch is now the first day the coin is at least 95% of account value and stays so, so the derived switch is last USD return day 2026-11-20, first BTC return day 2026-11-21. The 11-14/11-15 reading in this sentence is kept as lineage.
 - **History.** A USDT-margined ETHUSDT swap from May to 11-12, an all-USDT account on 11-13 and 11-14, then spot BTC buys. About 99.7% of its value is BTC today.
 - **The part this phase reverses.** 232-03's VREAD-06 refuses any non-stable `ccy` by name with no price source. For a coin the account has switched into, this phase books the bills in that coin's segment instead of refusing. Other coins that appear with no switch still refuse by name.
 - **Not the fix.** Re-reporting the key in BTC for its whole history (option B), converting each BTC bill to USD at a daily close while keeping one USD series (option A), or raising or removing the refusal. The founder chose a two-unit series.
+- **Founder answers 2026-11-27 (AskUserQuestion, during discuss), verbatim option labels:** headline KPIs "Whole record in USD (Recommended)" (full history in USD, the BTC segment converted at each day's BTCUSDVIEW close, passing the total-record KPI gate, with a note naming the switch); charts "One chart, marked switch (Recommended)"; composites, allocator books and the USD view "USD, BTC part converted (Recommended)" (consistent with 164.6.6.2 D-13/D-15); copy "In USD to 14 Nov, in BTC from 15 Nov" wherever the unit appears, built from the derived switch date. Recorded in `256-CONTEXT.md`.
+- **Founder ruling 2026-11-27 on review finding CR-01, verbatim: "Move switch to coin majority".** The switch day is the first day the coin is the clear majority and stays so (2026-11-21 for this account, not 11-15). Mixed days before it are reported in USD, with transition fee bills valued at their day's close; an account with no persistent majority yet refuses by name. The copy dates come from the computed switch day. This supersedes the 11-15 reading for this account. Recorded in `256-CONTEXT.md`.
+- **Founder ruling 2026-11-27 on review finding R2-01, verbatim choice: "≥95% coin and stays (Recommended)".** It supersedes the "coin majority" wording above: the switch day is the first day the coin is at least 95% of account value and stays so (11-21 for this account, since a plain majority would give 11-15 on the measured 75% BTC). 11-15 to 11-20 are USD days at true values, and the copy reads "In USD to Nov 20, 2026, in BTC from Nov 21, 2026". Recorded in `256-CONTEXT.md`.
+- **Founder rulings 2026-11-27 after review round 3, verbatim choices:** R3-03 "<50% for 7 days (Recommended)" (95% decides only when the switch happens; a switch back needs 7 consecutive days under 50%), and the survivors "Book a follow-up phase (Recommended)" (R3-01, SF3-02, SF3-03, R3-06 fixed before ship; R3-02, R3-04, R3-05, R3-07, SF3-01 booked as one v1.23 follow-up phase). Recorded in `256-CONTEXT.md`.
 **Requirements**: TBD
 **Depends on:** nothing hard. It re-bases on whichever of 229 and 233 (the S1 derive writer and its key-mode exits), 235 and 236 merged last, and on Phase 232's `daily_pnl_non_usd_okx` seam. Research first: the raw OKX bills for the account (read through the venue API docs as well as the stored rows, per the standing OKX rule), which settles whether the 11 bills are the spot fees.
 **Success Criteria** (what must be TRUE):
@@ -1333,10 +1338,19 @@ Plans:
 5. The 7 nightly failures end `done` after the fix is deployed and the account's 3 strategies unfreeze, read from PROD with the marker query first and no ids written into tracked text. `read_refusal_kept_figures` clears, and the next nightly derive confirms it.
 6. The reversal of part of 232-03's VREAD-06 is recorded with its reason, in `232-CONTEXT.md` and here in the ROADMAP, per the deviation policy.
 7. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. A migration, if the design needs one, passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 0 plans
+**Plans:** 10/10 plans complete
 
 Plans:
-- [ ] TBD — plans not listed yet
+- [x] 256-01-PLAN.md — SWITCH: pure `derive_unit_switch` (date from bills and holdings, named refusals) and the per-day P&L split at the switch
+- [x] 256-02-PLAN.md — MIGRATION: nullable jsonb `strategy_analytics.unit_segments` with an object CHECK, SQL test, migration lane review; ships alone first
+- [x] 256-03-PLAN.md — FETCH: optional `unit_switch` resolver on the OKX bills read, coin side channel, live ccy share; every other caller keeps refusing
+- [x] 256-04-PLAN.md — SERIES: two-segment builder (coin reconstructed in BTC, converted at the daily close) giving one whole-history USD headline
+- [x] 256-05-PLAN.md — PRESENT-TEXT: parser and composer, payload fields, masthead switch sentence, KPI note, cache bump
+- [x] 256-06-PLAN.md — DERIVE-STRATEGY: strategy-mode derive ends done with the USD headline, `unit_switch` flag and `unit_segments`; runner carry
+- [x] 256-07-PLAN.md — PRESENT-CHART: one cumulative chart with two native segments and a real break; leverage held at 1x
+- [x] 256-08-PLAN.md — PRESENT-LIST: list chip, OG note, returns API fields, pins for unchanged TS readers
+- [x] 256-09-PLAN.md — DERIVE-KEY: key-mode derive ends done, key_inputs in USD with additive `unit_segments`; RED-on-main tests for every Python reader
+- [x] 256-10-PLAN.md — CLOSE: SC-6 date correction in 232-CONTEXT and the ROADMAP, PROOF-01 index, two-PR ship order, post-deploy SC-5 PROD read
 
 ### Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read
 
@@ -1379,6 +1393,26 @@ Plans:
 - [x] 258-02-PLAN.md — delete the bot-branch and PR machinery by symbol, the redump-dump no-op notice, and the text the bot writes names redump-push (D-11, D-12, D-24 retired)
 - [x] 258-03-PLAN.md — dated lineage notes in the workflow, BASELINE.md and two comments, then the phase gate on the merged tree (SC-5, SC-6)
 
+### Phase 261: UNITSWITCHEDGES — the edge shapes OKXUNITSWITCH routed: a re-pointed key, a first mark on a mixed day, a pre-mark deposit, keys with no early mark, and bills ageing out
+
+**Goal:** The five unit-switch survivors of Phase 256 OKXUNITSWITCH review round 3 (`256-REVIEW.md` round 3) are fixed. None affects the founder's switched OKX account at Phase 256's ship:
+- **R3-02:** a switched strategy re-pointed to a new key on the same OKX account (OKX has no in-place key rotation) keeps its stored switch instead of refusing (`ambiguous_boundary` / `bills_precede_majority_beyond_tolerance`) or, once the coin bills leave the 93-day window, silently losing it. The stored record binds to the exchange account, not the key.
+- **R3-04:** a first NAV mark that falls on a mixed (USD-segment) day is not read as 0%.
+- **R3-05:** a deposit made before the first mark does not skew every earlier USD return.
+- **R3-07:** keys with no mark before the coin either fix or name the rescale of earlier USD returns (flagged, and named in key mode).
+- **SF3-01:** the mixed-day withholding survives the coin bills ageing out of the bills window for keys without marks (persist the mixed-from day in the stored record).
+- **Founder ruling 2026-11-27 (AskUserQuestion), verbatim: "Book a follow-up phase (Recommended)".** Booked with `/gsd-phase` add and placed in v1.23 HARDEN by hand, as 254 to 257 were.
+**Requirements**: none mapped (routed review survivors from Phase 256)
+**Depends on:** Phase 256 OKXUNITSWITCH (its unit-switch seam, `unit_segments` record and marks-anchored USD run are what this phase corrects)
+**Success Criteria** (what must be TRUE):
+1. Each of R3-02, R3-04, R3-05, R3-07 and SF3-01 has a test RED on the Phase 256 code and GREEN after the fix.
+2. The founder's switched account's figures do not move (a pinned regression arm on the measured shape).
+3. PROOF-01: each gate above goes RED on pre-fix code or a neutered copy with its named arm first, is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD — plans not listed yet
+
 ### Progress (HARDEN)
 
 | Phase | Plans Complete | Status | Completed |
@@ -1397,9 +1431,10 @@ Plans:
 | 249. TESTLANES | 0/? | Planned for v1.23 | - |
 | 254. OPENINGDEPOSIT | 1/1 | Complete (shipped v0.133.109.0, #1407; verification passed 4/4, SECURITY 8/8 closed; the one PROD book's `out_of_window_flow` clears on its next daily derive) | 2026-11-27 |
 | 255. NULLANCHOR | 3/3 | Complete (shipped v0.133.104.0, #1395; verification passed, SC-3 met at ship; SECURITY 0 open; founder rulings 2026-11-27: "Re-read now (Recommended)" for the OKX backfill, "Fix both in a follow-up (Recommended)" for 257 SEEDHOLD) | 2026-11-27 |
-| 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
+| 256. OKXUNITSWITCH | 10/10 | Shipped (PR-1 v0.133.108.0, #1402 at f7c80fb7, migration applied to TEST and PROD, re-dump #1406; PR-2 v0.133.112.0, #1411 at 647c595d); verification human_needed (SC-5 post-deploy PROD read after the next nightly derive, visual UAT of the chart break); SECURED, 0 open | - |
 | 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
 | 258. REDUMPDIRECT | 3/3 | Complete (shipped v0.133.111.0, #1408 at 66a4016e; verification passed 6/6, SECURED; the live direct push is proven by the first migration merge after it) | 2026-11-28 |
+| 261. UNITSWITCHEDGES | 0/? | Planned for v1.23 | - |
 
 ---
 
