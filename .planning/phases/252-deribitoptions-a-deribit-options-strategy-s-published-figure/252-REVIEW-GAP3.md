@@ -135,3 +135,53 @@ Must-have truth 2 is therefore proven on its extraction axis only. Behaviour ris
 _Reviewed: 2026-11-28_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
+
+---
+
+## Round 2 (2026-11-28): WR-01 fix verification and final MEDIUM+ verdict
+
+**Fix under review:** commit `636dce4d5` (`git diff b75a79df6..HEAD -- . ':!.planning'`: `services/job_worker.py` +21/−4, `tests/test_stitch_composite_job.py` +115), report `252-REVIEW-FIX-GAP3.md`.
+**Final scope:** `git diff 00e61bf13..HEAD -- . ':!.planning'` (`deribit_ingest.py`, `job_worker.py`, four test files). The only change since round 1 is the fix commit, so the round-1 findings above carry over unchanged except WR-01.
+
+**Round-2 counts:** critical 0, warning 0 open (WR-01 fixed), info 6 (IN-01 to IN-05 from round 1, plus IN-06 below), necessity 1 (IN-03).
+
+### WR-01: FIXED (verified in source, not taken from the fix report)
+
+- **Cash side, ordering.** In the non-reuse branch of `_reconstruct_deribit`, `_settled_at_read = _last_settled_option_mark_day()` (`job_worker.py:14663`) runs AFTER `fetch_deribit_native_account_state` returns and BEFORE `build_deribit_native_ledger` crawls. So a settlement during the crawl is also caught, and the state-read-to-day-read gap is a synchronous step with no await. The entry stored at `:14676` is the three-tuple. `_settled_at_read` is bound whenever `retain_cash_crawl` is true, which is the only case that stores it, so there is no unbound-local path.
+- **Reuse side.** `:14633` compares the current settled day with the stored one and, on a mismatch, releases the popped report's rows and raises `DeribitTransientReadError` before `build_deribit_options_basis_ledger` is awaited.
+- **The exception reaches the right arm.** `DeribitTransientReadError(RuntimeError)` (`deribit_ingest.py:134`) is not in `_PERMANENT_LEDGER_ERRORS` (`job_worker.py:14183`). In `_reconstruct_all`'s Deribit arm it falls to the generic `except Exception`, which returns a `DispatchResult` only for `is_geo_blocked` and otherwise re-raises. The message contains none of the `_GEO_BLOCK_MARKERS` and no word-boundary `451`, so it re-raises. Step 6b's `except (DeribitTransientReadError, ccxt.NetworkError)` then re-raises on an earlier attempt (whole-job retry) and degrades on the last (`smoothed_result = None`, cash headline plus `unsmoothed_options_book`). The 6b `finally` releases every other member's retained rows on both paths.
+- **The residual window is the single-pass one, as the fix report says.** From the guard, `build_deribit_options_basis_ledger` → `_assemble_deribit_native_ledger` → `txn_rows_to_native_daily` (synchronous) → `_build_smoothed_option_mtm` → `last_settled = _last_settled_option_mark_day()` (`deribit_ingest.py:2573`). There is no `await` on that chain before the clock read. The only possible yield is the `asyncio.wait_for` task start. That is the window a fresh single-pass build always had.
+- **The tests bite.** The patch target `services.deribit_ingest._last_settled_option_mark_day` is effective because `run_stitch_composite_job` imports the name inside the function body, at call time. In the straddle helper the day advances inside member 1's cash crawl, so member 1 stores `2026-11-26` and the reuse sees `2026-11-27`. Without the guard the options stub would run and `options_bases == []` would fail. That matches the fixer's recorded neuter (2 red, mirror green). The mirror test pins that an unchanged day still promotes with both members built.
+- **Gates re-run by me** from `analytics-service/` with `.venv/bin/python`:
+  - `pytest tests/test_stitch_composite_job.py tests/test_stitch_composite.py tests/test_composite_headline_parity.py tests/test_nav_marks_composite_allocated.py tests/test_deribit_options_basis_ledger.py tests/test_stamp_io_exhaustive.py -q -p no:cacheprovider`: `330 passed, 117 warnings`.
+  - `mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: `Success: no issues found in 151 source files`.
+  - I did not repeat the neuter, because this review does not edit source. The fixer's PROOF-01 is recorded in `252-REVIEW-FIX-GAP3.md`.
+
+### No new MEDIUM+ from the fix
+
+Checked and clean:
+- the 6b promotion, divergence and degraded-member arms are untouched;
+- `_release_cash_crawl` unpacks the three-tuple, so every release path still runs;
+- the publish-status source scan still passes;
+- no new log line;
+- the new exception message carries no member id, amount or key id.
+
+### IN-06 (LOW, new in round 2): the straddle guard also fires for members whose smoothed assembly does not read the clock
+
+**File:** `analytics-service/services/job_worker.py:14633` (the guard), compared with `analytics-service/services/deribit_ingest.py` (`_assemble_deribit_native_ledger`: the `_build_smoothed_option_mtm` branch runs only when `deribit_raw_rows_have_option_activity(raw_rows)`)
+
+**Issue:** The settled-day cap only affects a member whose retained rows have option activity. The guard runs for every Deribit member on the smoothed pass, including a perp-only or spot-only member in a composite where some other member is option-active.
+- For such a member, a straddle now forces a whole-job retry on an earlier attempt, and a degrade of the smoothed headline on the last.
+- At plan-11 HEAD before the fix, and before plan 11, the same straddle built normally.
+
+It is the safe direction: a retry or a named withhold, never a wrong number. The user sees it only when the straddle lands on the final attempt, so I record it as LOW.
+
+**Fix (if ever taken):** gate the guard on `_cash_report.has_option_activity`. The cash assembly sets that flag from the same rows (`deribit_ingest.py:2724`), and the smoothed branch tests those rows too.
+
+### Final verdict on `git diff 00e61bf13..HEAD -- . ':!.planning'`
+
+**No open MEDIUM or higher.** WR-01 is fixed and verified. The remaining items, IN-01 to IN-06, are LOW or Info and are recorded here only, per the TODOS rule. Status for the gate: **clean at MEDIUM+**.
+
+_Round 2 reviewed: 2026-11-28_
+_Reviewer: Claude (gsd-code-reviewer)_
+_Depth: standard_
