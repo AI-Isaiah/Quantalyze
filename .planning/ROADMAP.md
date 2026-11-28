@@ -1001,7 +1001,7 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [x] **Phase 255: NULLANCHOR — an OKX, Bybit or Deribit fills read that fails after the daily store never leaves a span the next run skips** - Booked 2026-11-26 by founder ruling ("Keep it on, fix records") from 253 BINANCECURSOR's routed `[253-NULL-COLUMN-ANCHOR-ALL-VENUES]`, live today because `USE_RAW_TRADE_INGESTION` is on in PROD (completed 2026-11-27)
 - [ ] **Phase 256: OKXUNITSWITCH — an OKX account that moves from USDT into a coin is reported in USD up to the switch and in that coin after it, on every surface, and its frozen derives recover** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "USD before 11-15, BTC after") from the diagnosed `okx-non-usd-native` debug session: one OKX account, stored as 4 keys, moved from USDT into spot BTC and its 7 nightly derives fail by `daily_pnl_non_usd_okx`; reverses part of 232-03's VREAD-06
 - [ ] **Phase 257: SEEDHOLD — a down re-read bound cannot move a strategy's seed past an unrecorded span, and a Bybit fills read that hits its deadline records what it read** - Booked 2026-11-27 by founder ruling (AskUserQuestion, "Fix both in a follow-up (Recommended)") from 255 NULLANCHOR's two routed survivors, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]` and `[255-BYBIT-DEADLINE-NO-PROGRESS]`
-- [ ] **Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval** - Booked 2026-11-27 by founder ruling ("Push to main directly") as a CI-only phase: `supabase-migrate.yml`'s re-dump stops opening a bot PR that waits on a human approval and pushes its one commit to `main`; overrides 164.9.5 AUTOREDUMP's D-13 and D-23
+- [x] **Phase 258: REDUMPDIRECT — after a PROD migration apply, the baseline re-dump commits straight to main with no PR and no approval** - Booked 2026-11-27 by founder ruling ("Push to main directly") as a CI-only phase: `supabase-migrate.yml`'s re-dump stops opening a bot PR that waits on a human approval and pushes its one commit to `main`; overrides 164.9.5 AUTOREDUMP's D-13 and D-23 (completed 2026-11-28)
 
 ### Phase 155.2: LIVEPARITY — on a trading day, our MT5 numbers match the terminal's and the broker's within 1%
 
@@ -1372,7 +1372,7 @@ Plans:
 4. The wiring tests that pin today's `redump-pr` job (`src/__tests__/baseline-redump-wiring.test.ts`, `src/__tests__/critical-regressions.test.ts`, `src/__tests__/supabase-migrate-test-first.test.ts`) pin the single push refspec to `main` instead, and each new pin goes RED under a neutered copy and GREEN once restored from a byte backup (PROOF-01).
 5. `258-CONTEXT.md` states what a GITHUB_TOKEN push to `main` means: it starts no workflow, so the bot commit carries no CI run, and the Railway API service, which waits for CI, deploys a commit with no checks. The choice made about that is stated and deliberate.
 6. No skip-CI token appears in any commit message, PR body or prose. No AI attribution lines. Nothing under `.planning/` is on the ship branch.
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 258-01-PLAN.md — tracer: the `--compose-and-push` mode, `PUSH_ARGV` and the `redump-push` job with the wiring pins retargeted; then the bounded re-compose retry (SC-1 to SC-4)
@@ -1399,7 +1399,7 @@ Plans:
 | 255. NULLANCHOR | 3/3 | Complete (shipped v0.133.104.0, #1395; verification passed, SC-3 met at ship; SECURITY 0 open; founder rulings 2026-11-27: "Re-read now (Recommended)" for the OKX backfill, "Fix both in a follow-up (Recommended)" for 257 SEEDHOLD) | 2026-11-27 |
 | 256. OKXUNITSWITCH | 0/? | Planned for v1.23 | - |
 | 257. SEEDHOLD | 0/? | Planned for v1.23 | - |
-| 258. REDUMPDIRECT | 0/? | Planned for v1.23 | - |
+| 258. REDUMPDIRECT | 3/3 | Complete (shipped v0.133.111.0, #1408 at 66a4016e; verification passed 6/6, SECURED; the live direct push is proven by the first migration merge after it) | 2026-11-28 |
 
 ---
 
