@@ -267,6 +267,7 @@ async def _run_job(
     balance_error: BaseException | None = None,
     exchange: str = "okx",
     strategy_id: str = STRATEGY_ID,
+    expect_outcome: DispatchOutcome = DispatchOutcome.DONE,
 ) -> _Outcome:
     """Drive the REAL `run_sync_trades_job`. `fills_flags` is what the fills
     read's DQ drain returns (the daily drain returns nothing);
@@ -335,7 +336,9 @@ async def _run_job(
         for p in reversed(patches):
             p.stop()
 
-    assert result.outcome == DispatchOutcome.DONE
+    assert result.outcome == expect_outcome, (
+        f"the job ended {result.outcome}, expected {expect_outcome} ({result.error_message})"
+    )
     return _Outcome(result, fetch_raw)
 
 

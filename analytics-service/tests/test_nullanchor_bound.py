@@ -827,7 +827,11 @@ class TestBybitReadDeadline:
     @pytest.mark.parametrize(
         ("venue", "want_s"),
         [
-            ("bybit", BINANCE_SYNC_FILLS_READ_DEADLINE_S - 100.0),  # Phase 1 used 100 s
+            # INTENT CHANGE 2026-11-28 (Phase 257 SEEDHOLD plan 03): the Bybit read has its own
+            # budget, BYBIT_SYNC_FILLS_READ_DEADLINE_S = 420 s, so the persist that now follows a
+            # deadline stop fits the 900 s handler; 420 - 100 = 320. The remaining-budget
+            # behaviour this test pins is unchanged.
+            ("bybit", 320.0),  # Phase 1 used 100 s
             ("binance", BINANCE_SYNC_FILLS_READ_DEADLINE_S),  # the founder-ruled fixed budget
         ],
     )

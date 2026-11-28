@@ -392,18 +392,22 @@ export interface NameSetRatchetRow {
  * migration or PROD moved; adding a row records that you looked away.
  */
 export const NAME_SET_RATCHET: readonly NameSetRatchetRow[] = [
-  // ⭐ 2026-11-27: one Phase 243 DBBACKSTOP plan 10 row. The fence function lives in
-  // 20261127220100_api_keys_insert_fence.sql, which lands before supabase/schema/baseline.sql
-  // knows it, so the migration snapshot has the name and the baseline does not.
+  // ⭐ 2026-11-28: the Phase 257 SEEDHOLD plan 02 row below is DELETED once the re-dump of
+  // supabase/schema/baseline.sql taken after 20261128120000_compute_job_seed_hold.sql applied to
+  // PROD turns it into `ratchet-stale`; the gate says so first, as it did for every earlier row.
   {
-    name: "enforce_api_keys_insert_writer_fence",
+    name: "set_compute_job_seed_hold",
     side: "snapshot-only",
-    capturedAt: "2026-11-27",
+    capturedAt: "2026-11-28",
     clearedBy:
-      "a re-dump of supabase/schema/baseline.sql taken after 20261127220100_api_keys_insert_fence.sql applies to PROD",
+      "a re-dump of supabase/schema/baseline.sql taken after its migration applied to PROD",
     reason:
-      "Phase 243 DBBACKSTOP plan 10 added the api_keys insert fence function in 20261127220100_api_keys_insert_fence.sql; the committed baseline predates that migration.",
+      "Phase 257 SEEDHOLD defines the fenced seed-hold merge RPC in migration 20261128120000_compute_job_seed_hold.sql, which is not on PROD yet, so the function is in the generated snapshots and not in supabase/schema/baseline.sql.",
   },
+  // ⭐ 2026-11-28: the Phase 243 DBBACKSTOP plan 10 row (`enforce_api_keys_insert_writer_fence`,
+  // `snapshot-only`, captured 2026-11-27) is DELETED: the re-dump taken after
+  // 20261127220100_api_keys_insert_fence.sql applied to PROD landed on main, and the gate then
+  // reported it `ratchet-stale` (deleted in the Phase 257 SEEDHOLD merge of origin/main).
   // ⭐ 2026-11-27: the two Phase 243 DBBACKSTOP plan 05 rows (`insert_api_key` and
   // `enforce_api_keys_user_id_immutable`, `snapshot-only`, captured 2026-11-27) are DELETED:
   // their clearing condition, a re-dump taken after

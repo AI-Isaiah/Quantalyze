@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 from services.db import rows
 
@@ -179,3 +179,86 @@ def load_strategy_fills_reread_bound(
             strategy_id,
         )
         return None, f"{strategy_id}: {type(exc).__name__}: {exc}"
+
+
+#: The `compute_jobs.metadata` key the seed-hold mark lives under. Cross-language contract with
+#: migration 20261128120000 (`set_compute_job_seed_hold`): the RPC writes this key and
+#: `load_strategy_seed_hold` reads it. Pinned against the generated snapshot
+#: `supabase/schema/functions/set_compute_job_seed_hold.sql` by the parity test in
+#: `tests/test_seedhold_bound.py`.
+SEED_HOLD_KEY: Final[str] = "seed_hold_ms"
+
+
+def parse_seed_hold(value: object) -> int | None:
+    """The seed-hold mark as a non-negative int (epoch ms), or `None` when absent or invalid.
+
+    `type(value) is int` excludes `bool` (a JSON `true` is an int subclass in Python), the
+    `binance_sync_flags._valid` idiom. A negative or non-integer value is not a mark."""
+    if type(value) is int and value >= 0:
+        return value
+    return None
+
+
+def load_strategy_seed_hold(
+    supabase: Any, strategy_id: str
+) -> tuple[int | None, str | None, bool]:
+    """The seed-hold mark on this strategy's latest finished `sync_trades` job. Returns `(mark, error, malformed)`.
+
+    Phase 257 SEEDHOLD, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`. Founder ruling 2026-11-28
+    (AskUserQuestion), verbatim choice: "Job's private record (Recommended)". A run whose
+    provisional `set_strategy_fills_reread_bound` write raised writes its seed into its OWN
+    `compute_jobs.metadata` (`set_compute_job_seed_hold`); the next run reads that mark here and
+    lowers its seed to it, so a daily row another writer stored meanwhile cannot move the seed
+    past the span the failed run never read.
+
+    Only a `done` row is read (research V3), never `failed_final`: a newer `failed_final` row that
+    died before its seed block carries no mark and would hide an earlier one. The mark clears by
+    recency (the next `done` row carries none) and by the 30-day `done` reaper.
+
+    `(mark, None, False)` for a valid mark, `(None, None, False)` for no row or no key, and
+    `(None, "<strategy>: malformed seed_hold_ms (<type>)", True)` for a present but invalid value
+    (logged at ERROR). Any read error returns `(None, "<strategy>: <ExcClass>: <exc>", False)`.
+
+    NEVER RAISES, like its siblings, but the two error shapes are NOT alike (review WR-R2-01). A
+    READ ERROR means an earlier mark may be hidden and a retry can still see it, so the caller fails
+    its attempt as transient before it writes a bound or stores anything. A MALFORMED mark is
+    persistent (nothing newer supersedes it until a run ends `done`), so the caller lowers its seed
+    to the reach anchor: one over-fetching run, never a skipped span, and the clean `done` row that
+    run leaves replaces the bad one."""
+    try:
+        result = (
+            supabase.table("compute_jobs")
+            .select("metadata")
+            .eq("strategy_id", strategy_id)
+            .eq("kind", "sync_trades")
+            .eq("status", "done")
+            # Review WR-02: `claimed_at` (stamped on every claim, retries included) tracks
+            # which row ran last; `created_at` would let a newer row that finished mark-less
+            # hide the mark an older row's retry wrote.
+            .order("claimed_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        found = rows(result)
+        if not found:
+            return None, None, False
+        metadata = found[0].get("metadata")
+        if not isinstance(metadata, dict) or SEED_HOLD_KEY not in metadata:
+            return None, None, False
+        raw = metadata[SEED_HOLD_KEY]
+        mark = parse_seed_hold(raw)
+        if mark is None:
+            logger.error(
+                "seed-hold mark on the latest done sync_trades job of strategy %s is malformed "
+                "(%s); ignoring it and treating this read as failed",
+                strategy_id, type(raw).__name__,
+            )
+            return None, f"{strategy_id}: malformed {SEED_HOLD_KEY} ({type(raw).__name__})", True
+        return mark, None, False
+    except Exception as exc:
+        logger.exception(
+            "seed-hold read failed for strategy %s; the caller fails this attempt as transient "
+            "so no later `done` row hides an earlier mark",
+            strategy_id,
+        )
+        return None, f"{strategy_id}: {type(exc).__name__}: {exc}", False
