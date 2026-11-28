@@ -1,7 +1,9 @@
 ---
 phase: 06
 slug: allocator-api-ingestion
-status: verified
+status: passed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `verified` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `verified` from 2026-04-20 until 2026-11-28; overall_score 10/10, every must-have and its human-needed checklist ticked, and its own closing line reads "code complete, tests green, SC1 + SC3 + visual /qa all closed end-to-end", so it means passed. The verdict and body are unchanged.
 verified_at: 2026-04-20
 overall_score: 10/10
 ---

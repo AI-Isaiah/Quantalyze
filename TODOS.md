@@ -286,7 +286,7 @@ founder can take.
   - **Fix direction:** move symbol lists to an owner-only home (as `allocator_equity_derived` does for per-key read markers) and keep booleans or counts on the public row; update the quiet-prefix reader.
   - **Gate:** an anon PostgREST read of a published strategy's `data_quality_flags` returns no symbol string.
 
-- [ ] **`[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` The first-hop enqueue sweep's sentence still says "contact support", a channel that does not exist** (logged 2026-11-25, Phase 222 ALERTTRUTH ship; user-facing; owner: the next phase that writes a migration touching `first_hop_enqueue_sweep` or analytics error copy)
+- [ ] **`[222-FIRST-HOP-SWEEP-CONTACT-SUPPORT]` The first-hop enqueue sweep's sentence still says "contact support", a channel that does not exist** (logged 2026-11-25, Phase 222 ALERTTRUTH ship; user-facing; owner: ⭐ **Phase 224 DEADLEFTOVERS (v1.23 HARDEN), fixed early in v1.23** — founder decision 2026-11-28 at the v1.22 pre-audit, "Debt, fix early v1.23 (Recommended)" for INT-01; it was: the next phase that writes a migration touching `first_hop_enqueue_sweep` or analytics error copy)
   - **What:** `supabase/migrations/20261124120400_first_hop_enqueue_sweep.sql` writes "Analytics has not started for this strategy: its first sync was never queued, and the automatic retry did not complete. Retry the sync, or contact support if this persists." Phase 222 moved every `computation_error_copy` arm and five Python sentences to the contact form, and the founder kept this sweep out of that migration (222 CONTEXT, OQ3).
   - **Fix direction:** a migration that re-bases the sweep on its latest definition and names the contact form, with the same wording as the `computation_error_copy` arms.
   - **Gate:** a SQL gate that reads the sweep's body and fails on "contact support", shown RED before the fix.
@@ -1230,7 +1230,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
 
 - [ ] **[233-STRATEGY-FRESHNESS-UNWATCHED] — strategy-mode return series have no freshness check, because they store no flow, anchor or terminal day to compare with (logged 2026-11-24, Phase 233).**
   Phase 233's `freshness` prober arm judges key-mode series only. Its comparison side (`key_inputs` flows, `realized_terminal_day`, `nav_mark`) is written only by the key-mode derive epilogue. Strategy mode stores `data_quality_flags.tiny_base_days` but no flow, anchor or terminal day, so a strategy series that stops while its inputs move is not paged. A data-integrity monitoring gap.
-  **Owner / Trigger:** unrouted; the next milestone's planning, or sooner if a strategy series is found stale. **Closed when:** a strategy-mode comparison with a founder-ruled rule exists, or the founder rules the gap accepted.
+  **Owner / Trigger:** ⭐ **Phase 246 ALERTREADERS (v1.23 HARDEN)** — founder decision 2026-11-28 at the v1.22 pre-audit, "Own it in v1.23 (Recommended)". It was: unrouted; the next milestone's planning, or sooner if a strategy series is found stale. **Closed when:** a strategy-mode comparison with a founder-ruled rule exists, or the founder rules the gap accepted.
 
 - [ ] **[187-BINANCEINCOME-NEXT-MILESTONE] — Binance futures realized P&L and funding never reach the derive, because the income call uses a method name the pinned ccxt does not have (retired from v1.20 2026-11-03).**
   The founder moved Phase 187 BINANCEINCOME out of v1.20 on 2026-11-03: "put binance into todos". Not planned, nothing shipped.

@@ -1,7 +1,9 @@
 ---
 phase: 10-scenario-builder-and-what-if
 verified: 2026-04-26T10:06:35Z
-status: resolved
+status: passed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `resolved` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `resolved` from 2026-04-27 until 2026-11-28; 5/5 criteria and 9/9 requirements verified and its 6 browser flows resolved by the 2026-04-27 milestone-wrap QA report and tests (resolution_pointer), so it means passed. The verdict and body are unchanged.
 status_was: human_needed (until 2026-04-27)
 resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-10-scenario-builder-and-what-if-v01500--shipped
 resolution_rationale: "6 SCENARIO browser-flow scenarios resolved by 2026-04-27 milestone-wrap QA report (.gstack/qa-reports/qa-report-quantalyze-v0.15-v0.16-milestone-wrap-2026-04-27.md) + component/route tests + ISSUE-001 retroactive fix (commit 1c4c561 nulls KPIs when cumulative wealth flips sign). Cross-tenant draft isolation covered by useScenarioState.test.ts T_USE12 storage shape pin."

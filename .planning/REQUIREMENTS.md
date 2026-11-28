@@ -125,9 +125,9 @@ Rulings still open are marked **(founder ruling at plan time)** on the requireme
 
 - [x] **FACT-01**: A withheld factsheet prints no whole-record reading beside rail figures that read as dashes. The three deferred D6 items are a founder ruling at plan time. (covers: 164.6.6.3.3-WITHHELD-RESIDUE)
 - [x] **FACT-02**: During a re-run, every surface that shows a strategy's figures (share card, tear sheet, PDFs, returns API, recommendations, portfolios, composer) shows the same state as the factsheet: it stays published, with a quiet Updating line (Phase 190). A census test lists every reader of the recompute verdict. (covers: 190-RERUN-SURFACES-NOT-HOLDING)
-- [ ] **FACT-03**: A never-computed analytics row never reads "Analytics last computed", and freshness checks never take its insert time as a compute time. Whether this uses a nullable `computed_at` (which reverses CONTEXT R-04) or a separate marker is a founder ruling at plan time. (covers: 166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT)
+- [x] **FACT-03**: A never-computed analytics row never reads "Analytics last computed", and freshness checks never take its insert time as a compute time. Whether this uses a nullable `computed_at` (which reverses CONTEXT R-04) or a separate marker is a founder ruling at plan time. (covers: 166.5-COMPUTED-AT-NEVER-COMPUTED-DEFAULT)
 - [x] **FACT-04**: The owner's private factsheet shows the data source of their own key-backed strategy, never "Data source —". (covers: 164.6.6.2.1-OWNER-TRUST-TIER-UNPUBLISHED)
-- [ ] **FACT-05**: For a failed, stalled or never-started row, the /strategies note never tells the owner to wait. (covers: 170.1-STRATEGIES-NOTE-WAIT-WORDING)
+- [x] **FACT-05**: For a failed, stalled or never-started row, the /strategies note never tells the owner to wait. (covers: 170.1-STRATEGIES-NOTE-WAIT-WORDING)
 
 ### User-facing: cached state matches the truth (SURFACECACHE)
 
@@ -350,9 +350,9 @@ The roadmapper fills the empty Phase cells. Status cells stay a bare `Pending`, 
 | FIG-05 | Phase 236 | Complete |
 | FACT-01 | Phase 237 | Complete |
 | FACT-02 | Phase 237 | Complete |
-| FACT-03 | Phase 238 | Shipped (#1363), human verification pending |
+| FACT-03 | Phase 238 | Complete |
 | FACT-04 | Phase 237 | Complete |
-| FACT-05 | Phase 238 | Shipped (#1331), phase verification pending |
+| FACT-05 | Phase 238 | Complete |
 | CACHE-01 | Phase 237 | Complete |
 | CACHE-02 | Phase 239 | Complete |
 | CACHE-03 | Phase 237 | Complete |

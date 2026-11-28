@@ -1,7 +1,9 @@
 ---
 phase: 01-outcome-tracker
 verified: 2026-04-18T10:55:00Z
-status: resolved
+status: passed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `resolved` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `resolved` from 2026-04-27 until 2026-11-28; its human items were resolved by the founder-era UAT audit (see resolution_pointer and resolution_rationale; the evidence is de-facto downstream reuse, as that rationale says), and no gap is open, so it means passed. The verdict and body are unchanged.
 status_was: human_needed (until 2026-04-27)
 resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-01-outcome-tracker-v01400--shipped
 resolution_rationale: "5 human-verification items resolved de-facto via 9 days of downstream Phase 09 + Phase 10 work that reuses BridgeOutcomeBanner, AllocatedForm, RejectedForm, Dismiss flow against real holdings. Phase 09 human UAT (passed 2026-04-21) implicitly exercised the same surfaces. The HAS_SEEDED_SUPABASE Playwright spec activation is bundled with the Phase 11 BLOCK-3 GitHub secrets unblock (deferred user-action item)."

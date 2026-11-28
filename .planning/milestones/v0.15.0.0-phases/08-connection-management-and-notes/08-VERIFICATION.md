@@ -1,7 +1,9 @@
 ---
 phase: 08-connection-management-and-notes
 verified: 2026-04-21T11:30:00Z
-status: resolved
+status: passed
+status_relabelled: >-
+  Re-marked 2026-11-28 by founder ruling ("Re-mark truthfully (Recommended)"): `resolved` is outside the closed set `gsd-tools query audit-open` accepts (passed | gaps_found | human_needed). The report was `resolved` from 2026-04-27 until 2026-11-28; 5/5 truths verified and its 3 human items covered by tests and the 2026-04-27 milestone-wrap QA report (resolution_pointer), so it means passed. The verdict and body are unchanged.
 status_was: human_needed (until 2026-04-27)
 resolution_pointer: ../UAT-AUDIT-2026-04-27.md#phase-08-connection-management-and-notes-v01500--shipped
 resolution_rationale: "3 human-verification items covered by tests + 2026-04-27 milestone-wrap QA report. (1) Cross-allocator strategy-note privacy: covered by user-notes-rls.test.ts live-DB regression. (2) OutcomesWidget lazy-fetch race: cancelled-flag pattern verified by code review. (3) Disconnect modal cascade semantics: covered by disconnect/route.test.ts both-paths assertion. QA report explicitly cleared all three (.gstack/qa-reports/qa-report-quantalyze-v0.15-v0.16-milestone-wrap-2026-04-27.md)."
