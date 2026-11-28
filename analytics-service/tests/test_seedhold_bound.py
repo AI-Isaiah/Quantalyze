@@ -30,8 +30,8 @@ exactly: the row must be `running` and carry a non-NULL, equal claim token.
 
 HAND-OFF SHAPES (RESEARCH "C4 hand-off measurement"; OKX and Bybit, set column and first sync).
   A  a newer `failed_final` row with no mark lands after run 1.
-  B  an intervening run finishes `done` with the bound RPC still down and its `compute_jobs` read
-     failing.
+  B  an intervening run whose bound RPC is still down and whose `compute_jobs` read fails. It ends
+     FAILED/transient (review WR-R2-01, 2026-11-28; it used to end `done`), so it hides no mark.
   C  the same intervening run, but the seed-hold write ALSO fails: the named double-fault
      residual. On a set column it stays RED after the fix (the intervening `done` row carries no
      mark and a set column takes no anchor), so those two arms carry a permanent strict marker.
@@ -103,9 +103,15 @@ Test ids are shortened to their parameter: `Matrix[x]` is `TestSeedHoldMatrix::t
      (research V1: a failed row's mark is read, and a newer failed row hides the done row's): HandOff[okx-set-A]
      and HandOff[bybit-first-A] go RED.
   H4 (the SQL fence predicate in migration 20261128120000) is recorded in the 257-02 SUMMARY, not re-run here.
-  H5 in `services/job_worker.py`, `min(_reach_anchor_ms, _provisional_unread_ms)` becomes `_provisional_unread_ms`
-     (the fail-safe floor when the hold read failed): HandOff[okx-set-B], HandOff[bybit-set-B],
-     Mech::test_a_failed_hold_read_writes_the_reach_anchor[okx] and [bybit] go RED.
+  H5 in `services/job_worker.py`, `_hold_terms.append(_reach_anchor_ms)` becomes `pass` (the fail-safe floor when a
+     stored mark is malformed). RE-POINTED 2026-11-28 (Phase 257 review WR-R2-01): it named
+     `min(_reach_anchor_ms, _provisional_unread_ms)`, an expression review WR-01 had already removed, and the
+     floor now applies to a malformed mark only. Mech::test_a_failed_hold_read_writes_the_reach_anchor[okx] and
+     [bybit] and Mech::test_a_malformed_stored_hold_is_ignored[string], [bool] and [negative] go RED.
+  H8 in `services/job_worker.py`, `if _hold_err is not None and not _hold_malformed:` becomes `if False:` (a hold read
+     ERROR no longer fails the attempt; added by review WR-R2-01): HandOff[okx-set-B], [okx-set-D], [okx-first-B],
+     [okx-first-D] and the four bybit twins, and Mech::test_a_hold_read_error_fails_the_attempt_and_moves_nothing[okx]
+     and [bybit] go RED.
   H6 in `services/job_worker.py`, `if isinstance(_own_meta, dict) and SEED_HOLD_KEY in _own_meta:` becomes
      `if False:` (the claimed row's own mark is never read, with no side effect on `_hold_read_failed`):
      Retry[okx-retry-rpc-up] and Retry[bybit-retry-rpc-down] go RED.
@@ -140,6 +146,7 @@ import pytest
 from services import exchange as ex
 from services import job_worker as jw
 from services import trade_resume as tr
+from services.job_worker import DispatchOutcome
 from services.job_worker import run_sync_trades_job as _real_run_sync_trades_job
 from tests._binance_fills import RereadBounds, column_after_advance
 from tests.test_binancefills_cursor import _persisted_fills, _two_run_walk_start_ms
@@ -567,10 +574,16 @@ class TestSeedHoldHandOff:
             # An intervening real run. B: the bound RPC still down and its `compute_jobs` read
             # fails. C: the bound RPC still down and its seed-hold write fails (the named double
             # fault). D (review WR-01): the bound RPC has RECOVERED and its `compute_jobs` read
-            # fails once, so it writes no mark of its own and its clean epilogue would clear the
-            # bound: the seed itself must drop to the reach anchor.
+            # fails once, so it could write no mark of its own and its clean epilogue would clear
+            # the bound.
+            # INTENT CHANGE 2026-11-28 (Phase 257 review WR-R2-01): B and D used to end `done`
+            # (D by flooring the seed at the reach). A read error now fails the attempt as
+            # transient before anything is written: a `done` row without the mark is what hides
+            # run 1's mark. The row ends `failed_retry`, which the `done`-only reader skips, and
+            # run 2 walks from run 1's walk start on its own.
             bounds.fail_next = 0 if shape == "D" else PERSISTENT
-            if shape in ("B", "D"):
+            read_blip = shape in ("B", "D")
+            if read_blip:
                 jobs.read_error = RuntimeError("compute_jobs read blip")
             else:
                 jobs.rpc_error = RuntimeError("seed hold write failed")
@@ -578,11 +591,19 @@ class TestSeedHoldHandOff:
                 mid = await _run(
                     venue=venue, jobs=jobs, bounds=bounds, flags=flags, rows=carried_rows,
                     column=carried_column, job_id="job-mid", token="tok-mid",
+                    expect_outcome=DispatchOutcome.FAILED if read_blip else DispatchOutcome.DONE,
                 )
             finally:
                 jobs.read_error = None
                 jobs.rpc_error = None
-            jobs.finish("job-mid", "done")
+            if read_blip:
+                assert mid.out is not None and mid.out.result.error_kind == "transient", (
+                    f"SEEDHOLD-HOLD-READ: {label}: a hold read error must fail the attempt as "
+                    f"transient, got error_kind {mid.out.result.error_kind if mid.out else None!r}"
+                )
+                jobs.finish("job-mid", "failed_retry")
+            else:
+                jobs.finish("job-mid", "done")
             carried_column = mid.column_after
 
         bounds.fail_next = 0  # the RPC recovers
@@ -591,19 +612,10 @@ class TestSeedHoldHandOff:
             rows=[*carried_rows, *_persisted_fills(r1.rec, STRATEGY_ID)],
             column=carried_column, job_id="job-run2", token="tok-run2",
         )
-        if shape == "D":
-            # D: the intervening run is itself a full run, so it may read the span and clear the
-            # bound honestly; run 2 then rightly walks on. The invariant is that the span gets
-            # read by SOME run: the intervening one or run 2. Before the WR-01 fix neither walked back.
-            assert mid.out is not None and r2.out is not None
-            walk = min(_two_run_walk_start_ms(mid.out), _two_run_walk_start_ms(r2.out))
-            assert walk <= _run1_walk_ms(venue, state), (
-                f"SEEDHOLD-WALK-START: {label}: neither the intervening run nor run 2 walked "
-                f"from at or before run 1's walk start {_run1_walk_ms(venue, state)} "
-                f"(earliest walk start {walk}): run 1's unread span is skipped"
-            )
-        else:
-            _verdict(label, r2.out, _run1_walk_ms(venue, state))
+        # Every shape, D included (review WR-R2-01): run 2 itself walks at or before run 1's walk
+        # start. D used to assert "some run did", because the intervening run floored its seed at
+        # the reach and read the span itself; that run now fails before it reads anything.
+        _verdict(label, r2.out, _run1_walk_ms(venue, state))
 
 
 # ---- the retry arms: a re-claimed attempt keeps attempt 1's hold --------------------------------
@@ -805,10 +817,15 @@ class TestSeedHoldMechanism:
 
     @pytest.mark.parametrize("venue", ["okx", "bybit"])
     async def test_a_failed_hold_read_writes_the_reach_anchor(self, venue: str) -> None:
-        # The read failed, so an earlier mark may be hidden: the write carries min(reach, seed).
+        # INTENT CHANGE 2026-11-28 (Phase 257 review WR-R2-01): this arm used to make the READ
+        # fail (`jobs.read_error`) and assert the write carried the reach anchor. A read error now
+        # fails the attempt as transient and writes nothing (see
+        # `test_a_hold_read_error_fails_the_attempt_and_moves_nothing`), so the arm is adapted to
+        # the case that keeps the floor: a stored mark that is MALFORMED cannot be read, an
+        # earlier mark may be hidden behind it, and the write carries the reach anchor.
         rows, column = _rows_and_column("set")
         jobs = JobsStore()
-        jobs.read_error = RuntimeError("compute_jobs read blip")
+        jobs.add_row("job-old", "done", {SEED_HOLD_KEY_NAME: "abc"})
         await _run(
             venue=venue, jobs=jobs, bounds=FlakyBounds(PERSISTENT), flags={}, rows=rows,
             column=column, job_id="job-fr", token="tok-fr", daily_trades=DAILY_TRADES_RUN1,
@@ -820,6 +837,55 @@ class TestSeedHoldMechanism:
             f"{REACH_ANCHOR_MS[venue]}, wrote {call['p_floor_ms']}"
         )
         assert call["p_job_id"] == "job-fr" and call["p_claim_token"] == "tok-fr"
+
+    @pytest.mark.parametrize("venue", ["okx", "bybit"])
+    async def test_a_hold_read_error_fails_the_attempt_and_moves_nothing(self, venue: str) -> None:
+        # Review WR-R2-01: one read error on a healthy set-column strategy (the bound RPC works)
+        # must not floor its seed at the reach, move its bound or store a daily row. The attempt
+        # fails transient before any write; the retry reads the mark and seeds exactly as a run
+        # with no blip would.
+        rows, column = _rows_and_column("set")
+        bounds, jobs, flags = FlakyBounds(0), JobsStore(), {}
+        jobs.read_error = RuntimeError("compute_jobs read blip")
+        try:
+            blip = await _run(
+                venue=venue, jobs=jobs, bounds=bounds, flags=flags, rows=rows, column=column,
+                job_id="job-blip", token="tok-blip", daily_trades=DAILY_TRADES_RUN1,
+                expect_outcome=DispatchOutcome.FAILED,
+            )
+        finally:
+            jobs.read_error = None
+        assert blip.out is not None
+        assert blip.out.result.error_kind == "transient", (
+            f"SEEDHOLD-HOLD-READ: {venue}: error_kind {blip.out.result.error_kind!r}, want 'transient'"
+        )
+        assert blip.out.fetch_raw.call_count == 0, (
+            f"SEEDHOLD-HOLD-READ: {venue}: the failed attempt read fills"
+        )
+        assert bounds.calls == [] and bounds.rows == {}, (
+            f"SEEDHOLD-HOLD-READ: {venue}: the failed attempt wrote a re-read bound: {bounds.calls}"
+        )
+        assert "sync_trades" not in _rpc_names(blip.sb), (
+            f"SEEDHOLD-HOLD-READ: {venue}: the failed attempt stored its daily rows"
+        )
+        assert jobs.rpc_calls == [] and blip.stamp is None, (
+            f"SEEDHOLD-HOLD-READ: {venue}: the failed attempt wrote a seed-hold mark or advanced "
+            "the cursor"
+        )
+
+        # The retry (the same row, re-claimed) reads the mark and seeds as an unblipped run does.
+        jobs.finish("job-blip", "failed_retry")
+        jobs.reclaim("job-blip", "tok-retry")
+        retry = await _run(
+            venue=venue, jobs=jobs, bounds=bounds, flags=flags, rows=rows, column=column,
+            job_id="job-blip", token="tok-retry", start=False, daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert retry.out is not None
+        assert retry.out.fetch_raw.call_args.kwargs["since_ms"] == SET_SEED_MS, (
+            f"SEEDHOLD-HOLD-READ: {venue}: after one blip the retry must seed at {SET_SEED_MS}, "
+            f"not at the reach anchor {REACH_ANCHOR_MS[venue]}"
+        )
+        assert bounds.rows == {}, f"SEEDHOLD-HOLD-READ: {venue}: the retry left a bound: {bounds.rows}"
 
     @pytest.mark.parametrize(
         "state,want_ms",

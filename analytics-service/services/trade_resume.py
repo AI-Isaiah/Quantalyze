@@ -201,8 +201,8 @@ def parse_seed_hold(value: object) -> int | None:
 
 def load_strategy_seed_hold(
     supabase: Any, strategy_id: str
-) -> tuple[int | None, str | None]:
-    """The seed-hold mark on this strategy's latest finished `sync_trades` job. Returns `(mark, error)`.
+) -> tuple[int | None, str | None, bool]:
+    """The seed-hold mark on this strategy's latest finished `sync_trades` job. Returns `(mark, error, malformed)`.
 
     Phase 257 SEEDHOLD, `[253-CRON-MOVES-SEED-WHILE-BOUND-RPC-DOWN]`. Founder ruling 2026-11-28
     (AskUserQuestion), verbatim choice: "Job's private record (Recommended)". A run whose
@@ -215,13 +215,16 @@ def load_strategy_seed_hold(
     died before its seed block carries no mark and would hide an earlier one. The mark clears by
     recency (the next `done` row carries none) and by the 30-day `done` reaper.
 
-    `(mark, None)` for a valid mark, `(None, None)` for no row or no key, and
-    `(None, "<strategy>: malformed seed_hold_ms (<type>)")` for a present but invalid value (logged
-    at ERROR). Any read error returns `(None, "<strategy>: <ExcClass>: <exc>")`.
+    `(mark, None, False)` for a valid mark, `(None, None, False)` for no row or no key, and
+    `(None, "<strategy>: malformed seed_hold_ms (<type>)", True)` for a present but invalid value
+    (logged at ERROR). Any read error returns `(None, "<strategy>: <ExcClass>: <exc>", False)`.
 
-    ⚠️ FAIL OPEN, NEVER RAISES, like its siblings. The caller treats an error return as "this run
-    could not see the mark", and its own seed-hold write then carries min(reach anchor, seed)
-    instead of the seed: an over-fetch, never a skipped span."""
+    NEVER RAISES, like its siblings, but the two error shapes are NOT alike (review WR-R2-01). A
+    READ ERROR means an earlier mark may be hidden and a retry can still see it, so the caller fails
+    its attempt as transient before it writes a bound or stores anything. A MALFORMED mark is
+    persistent (nothing newer supersedes it until a run ends `done`), so the caller lowers its seed
+    to the reach anchor: one over-fetching run, never a skipped span, and the clean `done` row that
+    run leaves replaces the bad one."""
     try:
         result = (
             supabase.table("compute_jobs")
@@ -238,10 +241,10 @@ def load_strategy_seed_hold(
         )
         found = rows(result)
         if not found:
-            return None, None
+            return None, None, False
         metadata = found[0].get("metadata")
         if not isinstance(metadata, dict) or SEED_HOLD_KEY not in metadata:
-            return None, None
+            return None, None, False
         raw = metadata[SEED_HOLD_KEY]
         mark = parse_seed_hold(raw)
         if mark is None:
@@ -250,12 +253,12 @@ def load_strategy_seed_hold(
                 "(%s); ignoring it and treating this read as failed",
                 strategy_id, type(raw).__name__,
             )
-            return None, f"{strategy_id}: malformed {SEED_HOLD_KEY} ({type(raw).__name__})"
-        return mark, None
+            return None, f"{strategy_id}: malformed {SEED_HOLD_KEY} ({type(raw).__name__})", True
+        return mark, None, False
     except Exception as exc:
         logger.exception(
-            "seed-hold read failed for strategy %s — failing OPEN to no hold term for this "
-            "fills read",
+            "seed-hold read failed for strategy %s; the caller fails this attempt as transient "
+            "so no later `done` row hides an earlier mark",
             strategy_id,
         )
-        return None, f"{strategy_id}: {type(exc).__name__}: {exc}"
+        return None, f"{strategy_id}: {type(exc).__name__}: {exc}", False

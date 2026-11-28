@@ -2307,8 +2307,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     _binance_read = False
     # Round-2: the provisional bound write failed or answered orphan, so the fills read is skipped.
     _fills_read_skipped = False
-    # Phase 257 SEEDHOLD: the seed-hold mark could not be read (the read failed, or a stored mark is
-    # malformed). The run's own seed-hold write then carries min(reach anchor, seed), never the seed.
+    # Phase 257 SEEDHOLD: a stored seed-hold mark is MALFORMED (a read ERROR fails the attempt as
+    # transient instead, review WR-R2-01). The run's seed, and so its bound row and its seed-hold
+    # write, then drops to the reach anchor, never stays at the seed.
     _hold_read_failed = False
     # Phase 257 SEEDHOLD (`[255-BYBIT-DEADLINE-NO-PROGRESS]`): a Bybit read that stopped on its
     # deadline hands back the windows it completed. `_bybit_read_through_ms` is the end of the last
@@ -2554,9 +2555,28 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                     # a planner addition to research V3). A `None` seed walks from the reach, which
                     # covers every hold.
                     if fills_since_ms is not None:
-                        _hold_ms, _hold_err = await db_execute(
+                        _hold_ms, _hold_err, _hold_malformed = await db_execute(
                             lambda: load_strategy_seed_hold(ctx.supabase, strategy_id)
                         )
+                        if _hold_err is not None and not _hold_malformed:
+                            # Review WR-R2-01: a read ERROR hides an earlier mark, and a `done`
+                            # row without it would bury that mark for good. Flooring the seed at
+                            # the reach instead would turn one blip into a full-reach re-read that
+                            # never converges where the reach cannot be read to the end. Fail the
+                            # attempt before the provisional bound write and the Phase-1 daily
+                            # store: nothing has been written, the row ends `failed_retry` (never
+                            # `done`), and the retry re-reads the mark. The `finally` closes the
+                            # exchange. Names the strategy only; the reader logged the exception.
+                            logger.error(
+                                "sync_trades: the seed-hold read failed for strategy %s; failing "
+                                "this attempt as transient so no `done` row hides an earlier mark",
+                                strategy_id,
+                            )
+                            return DispatchResult(
+                                outcome=DispatchOutcome.FAILED,
+                                error_kind="transient",
+                                error_message="sync_trades: the seed-hold read failed",
+                            )
                         _hold_read_failed = _hold_err is not None
                         _own_meta = job.get("metadata")
                         _own_hold_ms: int | None = None
@@ -2574,10 +2594,11 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             t for t in (_hold_ms, _own_hold_ms) if t is not None
                         ]
                         if _hold_read_failed and _reach_anchor_ms is not None:
-                            # Review WR-01: an earlier mark may be hidden (a read blip or a
-                            # malformed mark), and a clean epilogue would then clear the bound
-                            # and bury it for good. Put the floor on the SEED, so the
-                            # provisional bound row records it whether or not the RPC works.
+                            # Review WR-01: an earlier mark may be hidden (a malformed mark;
+                            # a read error returned above), and a clean epilogue would then
+                            # clear the bound and bury it for good. Put the floor on the SEED,
+                            # so the provisional bound row records it whether or not the RPC
+                            # works.
                             _hold_terms.append(_reach_anchor_ms)
                         if _hold_terms and min(_hold_terms) < fills_since_ms:
                             fills_since_ms = min(_hold_terms)
@@ -2660,9 +2681,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                             f"re-read bound write failed ({type(exc).__name__})"
                         )
                         # Phase 257 SEEDHOLD: the bound is unrecorded, so leave the seed on the
-                        # job's own row. Fail-safe (research V3): when the hold read failed, an
-                        # earlier mark may be hidden, so the seed itself was lowered to the reach
-                        # anchor above (review WR-01; an over-fetch, never a skipped span).
+                        # job's own row. Fail-safe (research V3): when a stored mark is
+                        # malformed, an earlier mark may be hidden, so the seed itself was lowered to
+                        # the reach anchor above (review WR-01; an over-fetch, never a skipped span).
                         # Best-effort: a raise (22023 on a bad floor, 23514 on the metadata
                         # size cap, a blip) is the double-fault residual; a False answer is an
                         # orphan claim token. Neither changes the job outcome. The claim token
