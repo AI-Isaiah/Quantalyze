@@ -153,7 +153,6 @@ const STUB_PROPS = {
   lastSyncAt: null,
   hasSyncing: false,
   equityDailyPoints: [],
-  equityCurveSource: "legacy",
   equityHistoryState: "rebuilding",
   equityDailyReturns: [],
   equityHistoryRebuildReason: null,

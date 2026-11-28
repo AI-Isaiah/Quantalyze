@@ -159,36 +159,24 @@ describe("SEC-005: api_keys column projection", () => {
     expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
   });
 
-  // Phase 167.1.2.1 plan 06 (D-04, D-09). Migration 20261014120000 GRANTs SELECT
-  // on the per-key reconstruct marker and the attempt count to authenticated.
-  // The Overview's "history could not be rebuilt" note is computed from both,
-  // so a column missing here means a key the fan-out gave up on can never be
-  // named: the list reads undefined and the note stays silent. The second half
-  // pins the other direction (T-167.1.2.1-22): the allowlist names no column
-  // the migration did not GRANT, since a projection past the grant is a 42501
-  // on every key read.
-  it("projects the reconstruct marker and the attempt count, both granted by the migration", () => {
+  // Phase 224 (DEAD-04). The two per-key reconstruct columns
+  // (history_reconstructed_at, history_reconstruct_attempts) were dropped by the
+  // Phase 224 migration, once the Overview's "history could not be rebuilt" note
+  // that read them was deleted. A PostgREST select that names a dropped column
+  // fails the WHOLE owner key list, not just that column, so the owner projection
+  // must never name them again. This ships ahead of the drop (PR-1 before PR-2).
+  it("projects no api_keys column that the Phase 224 migration drops", () => {
     const cols = API_KEY_USER_COLUMNS.split(", ");
-    expect(cols).toContain("history_reconstructed_at");
-    expect(cols).toContain("history_reconstruct_attempts");
-    expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
-    const migration = readFileSync(
-      resolve(
-        SRC_ROOT,
-        "..",
-        "supabase/migrations/20261014120000_api_keys_history_reconstruct_marker.sql",
-      ),
-      "utf8",
-    );
-    const grant = migration.match(
-      /GRANT SELECT \(([^)]*)\)\s+ON public\.api_keys TO authenticated;/,
-    );
-    expect(grant).not.toBeNull();
-    const granted = grant![1].split(",").map((c) => c.trim());
-    expect(granted.sort()).toEqual([
-      "history_reconstruct_attempts",
+    for (const dropped of [
       "history_reconstructed_at",
-    ]);
+      "history_reconstruct_attempts",
+    ]) {
+      expect(
+        cols,
+        `${dropped} is dropped by the Phase 224 migration: a select of a dropped column fails the whole owner key list`,
+      ).not.toContain(dropped);
+    }
+    expect(API_KEY_USER_COLUMNS).toBe(API_KEY_USER_COLUMNS_ARR.join(", "));
   });
 
   // Phase 225 plan 15 (CONN-03). Plan 01's migration 20261123180000 added

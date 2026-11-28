@@ -18,7 +18,7 @@ import {
 //
 // Composite-key shapes live in the sibling module keys.ts.
 // Python mirror to land separately as B8b: analytics-service/services/closed_sets.py
-// (TRADE_SIDES, STABLECOINS, perp_quote).
+// (TRADE_SIDES, STABLECOINS).
 //
 // This module imports ONLY zod, a type from ./types, and the zero-import leaf
 // ./figure-conventions. Do not import from constants.ts / utils.ts /

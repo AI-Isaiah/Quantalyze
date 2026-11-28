@@ -14,14 +14,12 @@ Paths (RESEARCH "The path inventory"): 1 history spot, 2 history perp, 3 CoinGec
 
 from __future__ import annotations
 
-import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 
 from services.price_rule import (
-    close_on_or_before,
     is_stable_value,
     usable_price,
 )
@@ -62,20 +60,6 @@ def test_is_stable_value_covers_stablecoins_and_the_split_suffixes() -> None:
         assert is_stable_value(asset) is True
     for asset in ("BTC", "ETH", "PYUSDETH", ""):
         assert is_stable_value(asset) is False
-
-
-def test_close_on_or_before_returns_close_and_age_or_none() -> None:
-    days = ["2026-03-01", "2026-03-03"]
-    closes = [100.0, 120.0]
-    assert close_on_or_before(days, closes, "2026-03-03") == (120.0, 0)
-    assert close_on_or_before(days, closes, "2026-03-02") == (100.0, 1)
-    assert close_on_or_before(days, closes, "2026-03-10") == (120.0, 7)
-    assert close_on_or_before(days, closes, "2026-03-11") is None  # age 8
-    assert close_on_or_before(days, closes, "2026-02-28") is None  # nothing on or before
-    assert close_on_or_before([], [], "2026-03-01") is None
-    # max_gap_days is honoured (N = 0 is the BRIDGERETURNS shape: exact day only)
-    assert close_on_or_before(days, closes, "2026-03-02", max_gap_days=0) is None
-    assert not math.isnan(close_on_or_before(days, closes, "2026-03-03", max_gap_days=0)[0])  # type: ignore[index]
 
 
 # ---------------------------------------------------------------------------
@@ -472,13 +456,11 @@ def test_price_rule_holding_marks_gap() -> None:
 
 def test_dust_floor_share_is_the_recorded_decision() -> None:
     """D-06 (founder 2026-10-27, AskUserQuestion "0.1%, unsizable left out"): the floor is
-    0.001 of the account's USD level and an unsizable gap is LEFT OUT, not held. Both typed
-    from plan 10's SUMMARY (`dust-floor-share: 0.001`, `unsizable: left-out`); the PROD
-    census behind them found no unpriced balance at all, so the floor is precautionary."""
+    0.001 of the account's USD level. Typed from plan 10's SUMMARY (`dust-floor-share: 0.001`);
+    the PROD census behind it found no unpriced balance at all, so the floor is precautionary."""
     from services import price_rule
 
     assert price_rule.DUST_FLOOR_SHARE == 0.001
-    assert price_rule.UNSIZABLE_GAP_HOLDS is False
 
 
 def test_gap_disposition_boundaries() -> None:
@@ -493,16 +475,3 @@ def test_gap_disposition_boundaries() -> None:
     assert gap_disposition(50.0, 0.0) == "hold"
     assert gap_disposition(50.0, -5.0) == "hold"
     assert gap_disposition(None, 10000.0) == "unsizable"
-
-
-def test_gap_holds_the_day(monkeypatch: pytest.MonkeyPatch) -> None:
-    """F2: a sizable gap holds, a dust gap does not, and an unsizable gap follows the ONE
-    recorded flag, read at call time so a test (or a later founder decision) can flip it."""
-    from services import price_rule
-
-    assert price_rule.gap_holds_the_day("hold") is True
-    assert price_rule.gap_holds_the_day("dust") is False
-    assert price_rule.gap_holds_the_day("unsizable") is price_rule.UNSIZABLE_GAP_HOLDS
-    assert price_rule.gap_holds_the_day("unsizable") is False
-    monkeypatch.setattr(price_rule, "UNSIZABLE_GAP_HOLDS", True)
-    assert price_rule.gap_holds_the_day("unsizable") is True

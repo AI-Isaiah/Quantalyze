@@ -53,7 +53,7 @@ END $$;
 
 -- ==========================================================================
 -- Part 2 — functional: two ready failed_retry rows sharing
--- (compute_analytics, strategy_id) are deduped to exactly ONE survivor by a
+-- (compute_analytics_from_csv, strategy_id) are deduped to exactly ONE survivor by a
 -- single batch claim, and exactly one row flips to running with no 23505.
 -- Isolated in a transaction that always rolls back.
 -- ==========================================================================
@@ -83,9 +83,9 @@ BEGIN
   INSERT INTO public.compute_jobs
       (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
     VALUES
-      (gen_random_uuid(), 'compute_analytics', v_strat, 'failed_retry', 'high', 1,
+      (gen_random_uuid(), 'compute_analytics_from_csv', v_strat, 'failed_retry', 'high', 1,
        TIMESTAMPTZ '1970-01-01 00:00:00+00', NULL),
-      (gen_random_uuid(), 'compute_analytics', v_strat, 'failed_retry', 'high', 1,
+      (gen_random_uuid(), 'compute_analytics_from_csv', v_strat, 'failed_retry', 'high', 1,
        TIMESTAMPTZ '1970-01-01 00:00:01+00', NULL);
 
   -- Claim a batch of 5. The RPC RETURNS SETOF compute_jobs, so the returned
@@ -99,7 +99,7 @@ BEGIN
   -- The dedupe must return exactly ONE survivor for this partition AND must
   -- not raise 23505 (a 23505 would have already aborted this DO block).
   IF v_claimed <> 1 THEN
-    RAISE EXCEPTION 'M-1124: expected exactly 1 deduped survivor for (compute_analytics, %), got %',
+    RAISE EXCEPTION 'M-1124: expected exactly 1 deduped survivor for (compute_analytics_from_csv, %), got %',
       v_strat, v_claimed;
   END IF;
 

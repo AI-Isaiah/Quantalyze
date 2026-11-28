@@ -175,7 +175,7 @@ BEGIN
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
   VALUES
-    (v_job_ana, 'compute_analytics', v_warn, 'running', 'normal', 1, now(), v_token_ana),
+    (v_job_ana, 'compute_analytics_from_csv', v_warn, 'running', 'normal', 1, now(), v_token_ana),
     (v_job_sib, 'poll_positions',    v_warn, 'running', 'normal', 1, now(), v_token_sib);
 
   -- Mark the WARNED analytics job first — sibling is still 'running' → branch (a).
@@ -241,7 +241,7 @@ BEGIN
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
   VALUES
-    (v_job_ana, 'compute_analytics', v_warn, 'running', 'normal', 1, now(), v_token_ana),
+    (v_job_ana, 'compute_analytics_from_csv', v_warn, 'running', 'normal', 1, now(), v_token_ana),
     (v_job_sib, 'sync_trades',       v_warn, 'running', 'normal', 1, now(), v_token_sib);
 
   -- 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, D-05): this sibling was a
@@ -319,7 +319,7 @@ BEGIN
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
   VALUES
-    (v_job, 'compute_analytics', v_clean, 'running', 'normal', 1, now(), v_token);
+    (v_job, 'compute_analytics_from_csv', v_clean, 'running', 'normal', 1, now(), v_token);
 
   PERFORM public.mark_compute_job_done(v_job, v_token);
 
@@ -386,7 +386,7 @@ BEGIN
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token)
   VALUES
-    (v_job_ana, 'compute_analytics', v_strat, 'running', 'normal', 1, now(), v_token_ana),
+    (v_job_ana, 'compute_analytics_from_csv', v_strat, 'running', 'normal', 1, now(), v_token_ana),
     (v_job_sib, 'poll_positions',    v_strat, 'running', 'normal', 1, now(), v_token_sib);
 
   -- Analytics job done first, sibling still running → branch (a). With the marker

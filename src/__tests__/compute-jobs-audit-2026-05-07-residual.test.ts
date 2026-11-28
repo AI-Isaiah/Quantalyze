@@ -491,7 +491,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
         // statement.
         const childA = await insertComputeJob(admin, {
           strategy_id: strategyA,
-          kind: "compute_analytics",
+          kind: "compute_analytics_from_csv",
           status: "done_pending_children",
           attempts: 0,
           max_attempts: 3,
@@ -499,7 +499,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
         });
         const childB = await insertComputeJob(admin, {
           strategy_id: strategyB,
-          kind: "compute_analytics",
+          kind: "compute_analytics_from_csv",
           status: "done_pending_children",
           attempts: 0,
           max_attempts: 3,
@@ -563,7 +563,7 @@ describe("audit-2026-05-07 residual — H-0864 set-based fan-in", () => {
         });
         const child = await insertComputeJob(admin, {
           strategy_id: strategyA,
-          kind: "compute_analytics",
+          kind: "compute_analytics_from_csv",
           status: "done_pending_children",
           attempts: 0,
           max_attempts: 3,

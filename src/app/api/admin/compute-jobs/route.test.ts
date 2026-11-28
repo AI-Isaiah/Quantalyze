@@ -218,9 +218,9 @@ describe("GET /api/admin/compute-jobs", () => {
     expect(callsOf("eq")).toEqual([{ method: "eq", args: ["status", "failed_retry"] }]);
 
     state.calls.length = 0;
-    await GET(makeReq({ kind: "compute_analytics", exchange: "okx" }));
+    await GET(makeReq({ kind: "compute_analytics_from_csv", exchange: "okx" }));
     expect(callsOf("eq")).toEqual([
-      { method: "eq", args: ["kind", "compute_analytics"] },
+      { method: "eq", args: ["kind", "compute_analytics_from_csv"] },
       { method: "eq", args: ["exchange", "okx"] },
     ]);
   });

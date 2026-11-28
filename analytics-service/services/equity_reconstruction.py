@@ -7,11 +7,8 @@ helpers), the bodies of both job kinds (``reconstruct_allocator_history``,
 and the bootstrap gate's Python twin. Under D-04 and the founder's go/no-go on plan 11
 (2026-11-01) it also removed the history crawl that only those job bodies used.
 
-The D-04 cap and marker helpers (``_mark_api_key_history_reconstructed``,
-``_fanout_would_still_retry``, ``HISTORY_RECONSTRUCT_ATTEMPT_CAP`` and their closed
-set) stay here inert, byte-identical, pinned by
-``test_the_d04_inert_helpers_stay``; TODOS ``176-RECONSTRUCT-CAP-MARKER-INERT``
-books their removal.
+Phase 224 DEAD-04 then removed the reconstruct cap and marker helpers that Phase 176 D-04
+had left here inert, because nothing calls them; ``test_the_d04_helpers_are_gone`` pins it.
 
 What the module still provides: ``EquityCurveBuilder``, the marked-equity read
 (``read_marked_equity_usd``, ``read_okx_option_exposure``) that the ingestion and
@@ -317,85 +314,6 @@ async def _read_cached_prices(
 # Read helpers
 # ---------------------------------------------------------------------------
 
-def _reconstruct_outcome_completes_the_key(
-    audit_kind: str, *, sibling_lookup_failed: bool, snapshot_lookup_failed: bool,
-) -> bool:
-    """True when this ladder exit may stamp ``api_keys.history_reconstructed_at``.
-
-    ONE rule for what counts as a completed reconstruct, shared with PR 1's
-    backfill (migration 20261014120000, SFH-2), which withholds the marker from
-    an audit row carrying ``sibling_check_failed`` or ``snapshot_lookup_failed``
-    because those are TRANSIENT FAILURES, not outcomes: neither says the key's
-    history was rebuilt, and the next run of the worker may. The marker has no
-    expiry, so stamping them would make a stale curve permanent.
-
-    Not a completion: D-15 ``reconstruct_unexpected_noop``; a failed sibling
-    lookup (the worker fell back to ON CONFLICT DO NOTHING without knowing
-    whether the key is the sole one, so what it persisted may have been dropped
-    by a collision); a failed snapshot-presence lookup (an empty replace refused
-    because the question went unanswered, not because history was confirmed).
-    """
-    return (
-        audit_kind != "allocator.equity.reconstruct_unexpected_noop"
-        and not sibling_lookup_failed
-        and not snapshot_lookup_failed
-    )
-
-
-async def _mark_api_key_history_reconstructed(supabase: Any, api_key_id: str) -> None:
-    """Stamp ``api_keys.history_reconstructed_at`` for ``api_key_id`` (D-04).
-
-    Called by ``run_reconstruct_allocator_history_job`` at its normal completion
-    ladder only, immediately BEFORE the completion audit, and never on a failed
-    reconstruct, the short-circuit, or a D-15 no-op. It RAISES when the UPDATE
-    raises or touches no row: a swallowed failure would let the job end DONE
-    and emit a success audit for a key that is still owed (SC-1), and the daily
-    fan-out would then re-crawl it for ever.
-
-    A plain service-role UPDATE rather than a SECURITY DEFINER RPC: only the
-    marker's NULL-ness is ever read (never its value), so cross-replica clock
-    skew is immaterial, and an RPC would add a function, an ACL and a gate arm
-    for no reader. Re-stamping an already-set marker (a re-crawl) is harmless.
-    """
-    stamp = datetime.now(timezone.utc).isoformat()
-
-    def _upd() -> Any:
-        return (
-            supabase.table("api_keys")
-            .update({"history_reconstructed_at": stamp})
-            .eq("id", api_key_id)
-            .execute()
-        )
-
-    res = await db_execute(_upd)
-    if not getattr(res, "data", None):
-        raise RuntimeError("api_keys marker update matched no row")
-
-
-def _account_marker_key_ids(account_keys: Sequence[Mapping[str, Any]]) -> list[str]:
-    """The ids a forced ACCOUNT rebuild stamps ``history_reconstructed_at`` on, sorted.
-
-    UPNLVENUES D-04 / PD-O. A rebuilt book is ONE aggregate per day, so a key of the account
-    that still looks owed would be re-crawled by the daily fan-out, and its unforced
-    reconstruct on a multi-key allocator persists first-writer-wins: it would fill any day
-    the rebuilt book lacks with that key's value alone. Every ACTIVE key of the account is
-    therefore marked, the job's own and the siblings', including a key that was rebuilt
-    through another member of its exchange account (its account's history is the rebuilt one).
-
-    Left as they were: an INACTIVE key (no reconstruct can run for it, the preflight fails it
-    permanently, so nothing can re-fill the book through it) and a Deribit key (its history is
-    counted as $0 and never rebuilt, so a marker would claim a rebuild that did not happen).
-    ``account_keys`` is the persist-time key re-read, the set the window replace was checked
-    against.
-    """
-    return sorted(
-        str(row["id"])
-        for row in account_keys
-        if row.get("is_active") is True
-        and _key_venue(row) not in _ACCOUNT_ZERO_CONTRIBUTION_VENUES
-    )
-
-
 class ForcedRebuildRefusedError(RuntimeError):
     """Phase 167.2.1.1 PD-H: raised ONLY on the forced path, when the rebuilt curve could not
     be anchored to today's venue equity including open-position uPnL.
@@ -421,121 +339,6 @@ class ForcedRebuildRefusedError(RuntimeError):
         # message: ``_forced_refusal_result`` records it on the refusal's own audit.
         self.opening_check = opening_check
         super().__init__(f"forced rebuild refused ({reason})")
-
-
-# The reconstruct refuses every Deribit key and the daily refresh skips venue deribit, so both
-# allocator writers store a Deribit exchange account as $0. The rebuild counts it, crawls
-# nothing and refuses nothing.
-_ACCOUNT_ZERO_CONTRIBUTION_VENUES: Final[frozenset[str]] = frozenset({"deribit"})
-
-
-def _key_venue(key_row: Mapping[str, Any]) -> str:
-    """The key's exchange, lower-cased and stripped ("" when it is not a string)."""
-    exchange = key_row.get("exchange")
-    return exchange.strip().lower() if isinstance(exchange, str) else ""
-
-
-async def _api_key_already_reconstructed(supabase: Any, api_key_id: str) -> bool:
-    """Per-api_key idempotency check, answered from the MARKER ONLY (D-04).
-
-    True when ``api_keys.history_reconstructed_at`` is set for this key. The
-    marker is the per-key source of truth: it survives the 30-day retention
-    that deletes ``done`` compute_jobs rows, and it is only ever set by a
-    completed reconstruct (never by a D-15 no-op).
-
-    A retained ``done`` reconstruct job is NOT evidence, and is never used to
-    heal the marker (plan-checker B1): a sole-key no-op
-    (``reconstruct_unexpected_noop``) also ends ``done``, so counting that row
-    would wave an unrepaired key through for ever. The accepted cost is one
-    redundant crawl for a key whose reconstruct completed under the old worker
-    after M2's backfill re-run and before this code deployed. This function
-    writes nothing and cannot create success evidence for an unmarked key.
-
-    History: Migration 076 made the check per-api_key (an allocator's first
-    reconstruct rows had blocked every other key from backfilling, because
-    allocator_equity_snapshots aggregates across keys at UPSERT time and cannot
-    answer the per-key question). The key row is the per-key record.
-
-    A failed lookup logs and answers False, as before: pre-existing, and a
-    re-crawl is safe because D-07 limits the replace to true sole keys.
-    """
-    def _sel() -> Any:
-        return (
-            supabase.table("api_keys")
-            .select("history_reconstructed_at")
-            .eq("id", api_key_id)
-            .limit(1)
-            .execute()
-        )
-
-    try:
-        res = await db_execute(_sel)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "api_keys reconstruct-marker lookup failed for api_key=%s: %s",
-            api_key_id, scrub_freeform_string(str(exc)),
-        )
-        return False
-    rows = getattr(res, "data", None) or []
-    return any(r.get("history_reconstructed_at") is not None for r in rows)
-
-
-# Phase 167.1.2 plan 12, review SFH-R2-01: the reconstruct statuses that hold
-# a zero-snapshot book's daily refresh. It is the in-flight half of the list
-# migration 20260927120000's fan-out counts as "bootstrapped" (its `done` is
-# left out on purpose): a done reconstruct already wrote the rows it could, so
-# the refresh may start the book. failed_retry is in flight because the worker
-# claims it again.
-_RECONSTRUCT_IN_FLIGHT_STATUSES: tuple[str, ...] = (
-    "pending", "running", "done_pending_children", "failed_retry",
-)
-
-
-# Phase 167.1.2.1 D-09: the daily fan-out stops retrying a key's reconstruct
-# after this many attempts and raises a loud event instead. THREE twins carry the
-# number: this constant, the SQL `v_reconstruct_attempt_cap` in
-# `enqueue_refresh_allocator_equity_for_all`, and the TypeScript
-# `HISTORY_RECONSTRUCT_ATTEMPT_CAP`. `tests/test_history_reconstruct_cap_twins.py`
-# and `src/__tests__/history-reconstruct-cap-twins.test.ts` pin them equal; this
-# comment does not.
-HISTORY_RECONSTRUCT_ATTEMPT_CAP: Final[int] = 5
-
-# The `sync_status` values after which the fan-out no longer retries a key (the
-# cheap qualifying columns of `enqueue_refresh_allocator_equity_for_all`): the
-# credential is revoked, or the key is in a sign-in or hard-error state. A NULL
-# status still qualifies.
-_NON_RETRYABLE_SYNC_STATUSES: tuple[str, ...] = ("revoked", "sign_in_failed", "error")
-
-
-def _fanout_would_still_retry(key: Mapping[str, Any]) -> bool:
-    """The per-row half of the fan-out's owed predicate (migration
-    20261021120000, the ``rk`` query), which the daily fan-out applies per key:
-    marker NULL, ``history_reconstruct_attempts < HISTORY_RECONSTRUCT_ATTEMPT_CAP``,
-    active, ``sync_status`` not revoked / sign_in_failed / error (NULL allowed),
-    not disconnected, not a Deribit key (Deribit reconstruction is refused
-    permanently).
-
-    Two terms of that query are NOT row columns and are applied elsewhere:
-    the strategy-link filter (``_strategy_linked_key_ids``, review WR-01) and the
-    "no reconstruct in flight" term, which this module inverts on purpose (an
-    in-flight job is waited on, see ``_owed_reconstructs_for_zero_snapshot_book``).
-
-    One deliberate asymmetry: the fan-out treats ``attempts = 0`` as owed, but this
-    predicate requires ``attempts >= 1``. A key no job has ever touched has
-    nothing for the refresh to wait on, and holding on it would freeze a
-    user-driven first refresh until a fan-out run that the 25-book cap may put
-    days away. ``tests/test_fanout_owed_predicate_twins.py`` pins the asymmetry
-    and every other term against the migration's text."""
-    if key.get("history_reconstructed_at") is not None:
-        return False
-    attempts = int(key.get("history_reconstruct_attempts") or 0)
-    return (
-        1 <= attempts < HISTORY_RECONSTRUCT_ATTEMPT_CAP
-        and key.get("is_active") is True
-        and (key.get("sync_status") or "") not in _NON_RETRYABLE_SYNC_STATUSES
-        and key.get("disconnected_at") is None
-        and (key.get("exchange") or "").lower() != "deribit"
-    )
 
 
 async def _read_newest_priced(

@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.133.120.0] - 2026-11-28 — Phase 224 DEADLEFTOVERS PR-1: dead reconstruct, trade-read and manager-side plumbing is deleted, and the generated-types file is gated against the schema
+
+PR-1 of two. It changes code and tests only and carries no migration. PR-2 drops the database objects this PR stops reading, so this PR must be live on Railway and Vercel before PR-2 merges.
+
+### Removed
+- **The reconstruct cap and marker machinery (DEAD-04, `[176-RECONSTRUCT-CAP-MARKER-INERT]`, Python half).** The ten cap and marker helpers in `services/equity_reconstruction.py`, `_capture_history_reconstruct_capped` in `job_worker.py`, `report_orphaned_capped_reconstructs` and its `main_worker` watchdog call, the two `TIMEOUT_PER_KIND` rows and the `main_worker` watchdog override for `reconstruct_allocator_history` and `refresh_allocator_equity_daily`. Both kinds still route to the retired no-op handler under the default timeout, and their registry rows stay (see Notes).
+- **`services/trade_read_store.py`** and `main_worker`'s hourly expiry sweep. Nothing has written the two trade-read tables since Phase 176; PR-2 drops the tables.
+- **Helpers with no caller left:** `perp_quote`, `sort_events_stable`, `is_price_gap_holding`, `close_on_or_before`, `gap_holds_the_day`, and the `opening_agrees` group (`opening_agrees`, `OPENING_TOLERANCE_USD`, `OPENING_TOLERANCE_REL`), with `PRICE_GAP_MAX_DAYS` and `UNSIZABLE_GAP_HOLDS`. `okx_bills_chain`, `read_okx_opening` and the probe scripts that import them stay, because `walletoffset_probe.py` (the action of open `[184-BINANCE-SFOX-OFFSET-WAIT]`) and `derivegaps_probe.py` call them.
+- **The TS reconstruct-note plumbing:** `historyReconstructFailed`, `reconstructCappedKeyIds`, `readReconstructInFlightKeyIds` and the reconstruct constants, plus the two link reads in `getMyAllocationDashboard` that only that note used (two fewer round-trips per dashboard load). The Sentry tags `role_discriminator_read_failed` and `reconstruct_in_flight_read_failed` are no longer emitted, so a saved search on them goes empty by design.
+- **`managerSideKeyIds` and `excludedManagerSide` (DEAD-03, `[176-INERT-LEFTOVERS]`).** Always empty and zero since Phase 176 plan 03. The composer's conservation invariant keeps its other terms.
+- **The `"legacy"` value of `equityCurveSource` (DEAD-03).** The field is `"derived"` or absent, and `EquityChart` prints no provenance line without a derived curve. The old "Broker snapshot history" label had been false since Phase 176, and the widget only mounts in the ready state, where the source is always derived, so nothing visible changes.
+
+### Changed
+- `API_KEY_USER_COLUMNS` and the strict key-row schema no longer name `history_reconstructed_at` or `history_reconstruct_attempts`, so the owner key read survives PR-2's column drop. A sec-005 pin asserts the projection names no column PR-2 drops.
+- **`src/lib/database.types.ts` (DEAD-05, `[164.5-STALE-GENERATED-TYPES]`).** Its header now records the decision: it is a hand-curated partial declaration, not a regeneration target, and a migration that drops a function removes its declaration in the same PR. The stale `create_allocator_connected_strategy` declaration is removed.
+- Test fixtures that inserted the retired `compute_analytics` kind (eight SQL gates, the TS live-DB audit tests, the admin route example and two Python live tests) now use a live kind with the same meaning (`sync_trades` or `compute_analytics_from_csv`), ahead of PR-2 removing the kind from both CHECK constraints.
+
+### Tests
+- New gate `src/__tests__/database-types-functions-have-schema-files.test.ts`: every function `database.types.ts` declares has a `supabase/schema/functions/<name>.sql` file. RED on `create_allocator_connected_strategy` before the fix and on a neutered rename, GREEN after a byte-copy restore.
+- `test_the_d04_inert_helpers_stay` became `test_the_d04_helpers_are_gone`, and `DROPPED_OBJECTS` names the six objects PR-2 drops. `TIMEOUT_PER_KIND` pins move from 16 to 14. The live-DB roster floor stays at 9: the removed trade-read live test was in the skip allowlist, not the roster.
+- PROOF-01: every new or changed gate went RED on pre-fix code or a neutered copy with its named arm, then GREEN after a byte-copy restore (`cmp` clean); the annotated SQL gates were proven per arm on the pg-lane mutation runner. mypy strict clean (150 files); tsc and `npm run lint` clean.
+
+### Notes
+- Two TODOS entries are deleted: `[164.5-STALE-GENERATED-TYPES]` and `[176-INERT-LEFTOVERS]`. `[176-RECONSTRUCT-CAP-MARKER-INERT]`, `[169-DEAD-ADMIN-JOBS-RPC]` and the retired-kinds entry close in PR-2.
+- Founder ruling 2026-11-28 ("Block it, delete later (Recommended)"): the `compute_analytics` registry row stays and PR-2 removes the kind from both CHECK constraints only, because CI's reference-insert audit refuses a DELETE on a replayed table. The registry rows of `compute_analytics`, `reconstruct_allocator_history` and `refresh_allocator_equity_daily` go together in one later change, around 2027-01-21.
+- F-8: `enqueue_poll_positions_for_all_strategies` and its `daily_enqueue_tick` caller are untouched; `poll_positions` jobs still run.
+- Known limits: four unannotated SQL gates and the live-DB arms are bound to CI on this PR's head. `docs/runbooks/marksource-legacy-chain-move-go-live.md` still cites the deleted `UNSIZABLE_GAP_HOLDS` as history.
+- Review: gsd-code-reviewer (0 MEDIUM+) and silent-failure-hunter (one MEDIUM, the roster floor drop, reverted).
+
 ## [0.133.119.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plan 11: an options composite's smoothed pass reuses the cash pass's crawl, so the market-price headline fits the stitch budget
 
 ### Root cause

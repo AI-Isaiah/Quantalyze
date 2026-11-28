@@ -150,13 +150,13 @@ ROLLBACK;
 
 -- ==========================================================================
 -- Part 3 — CROSS-KIND SAFETY (the load-bearing regression). One strategy: a
--- GENUINE compute_analytics failed_final (older created_at) plus a LATER
+-- GENUINE compute_analytics_from_csv failed_final (older created_at) plus a LATER
 -- poll_positions job driven done. A later done of a DIFFERENT kind must NOT mask
 -- the real permanent failure — computation_status must STAY 'failed'. This is
 -- the exact silently-holed-publish the held PR 229d80fa (cross-kind-blind)
 -- would have caused. This block REDDENS if anyone deletes `d.kind = f.kind` from
 -- the migration body (then the poll_positions done would supersede the
--- compute_analytics failure and launder it to complete).
+-- compute_analytics_from_csv failure and launder it to complete).
 -- Isolated in a transaction that always rolls back.
 -- ==========================================================================
 BEGIN;
@@ -164,7 +164,7 @@ DO $$
 DECLARE
   v_user       uuid := gen_random_uuid();
   v_strat      uuid;
-  v_job_fail   uuid := gen_random_uuid();  -- compute_analytics failed_final
+  v_job_fail   uuid := gen_random_uuid();  -- compute_analytics_from_csv failed_final
   v_job_poll   uuid := gen_random_uuid();  -- a LATER poll_positions job (diff kind)
   v_token_poll uuid := gen_random_uuid();
   v_status TEXT;
@@ -180,7 +180,7 @@ BEGIN
   INSERT INTO public.compute_jobs
     (id, kind, strategy_id, status, priority, attempts, next_attempt_at, claim_token, last_error, error_kind, created_at)
   VALUES
-    (v_job_fail, 'compute_analytics', v_strat, 'failed_final', 'normal', 3, now(), NULL, 'real derive failure', 'permanent', now() - interval '1 hour');
+    (v_job_fail, 'compute_analytics_from_csv', v_strat, 'failed_final', 'normal', 3, now(), NULL, 'real derive failure', 'permanent', now() - interval '1 hour');
 
   -- A LATER, DIFFERENT-kind job (poll_positions), still running with a token.
   INSERT INTO public.compute_jobs
@@ -189,16 +189,16 @@ BEGIN
     (v_job_poll, 'poll_positions', v_strat, 'running', 'normal', 1, now(), v_token_poll, now());
 
   -- Drive the poll_positions job done. Its later 'done' is a DIFFERENT kind, so
-  -- it must NOT supersede the compute_analytics failed_final.
+  -- it must NOT supersede the compute_analytics_from_csv failed_final.
   PERFORM public.mark_compute_job_done(v_job_poll, v_token_poll);
 
   SELECT computation_status INTO v_status
     FROM public.strategy_analytics WHERE strategy_id = v_strat;
   IF v_status IS DISTINCT FROM 'failed' THEN
-    RAISE EXCEPTION 'supersede-failed: CROSS-KIND SAFETY BROKEN — a later done of a DIFFERENT kind masked a real compute_analytics failure (computation_status = %, expected failed; the held-PR 229d80fa defect returned)', v_status;
+    RAISE EXCEPTION 'supersede-failed: CROSS-KIND SAFETY BROKEN — a later done of a DIFFERENT kind masked a real compute_analytics_from_csv failure (computation_status = %, expected failed; the held-PR 229d80fa defect returned)', v_status;
   END IF;
 
-  RAISE NOTICE 'Part 3 OK: a later done of a DIFFERENT kind did NOT mask the real compute_analytics failure (stays failed) — cross-kind SAFETY held.';
+  RAISE NOTICE 'Part 3 OK: a later done of a DIFFERENT kind did NOT mask the real compute_analytics_from_csv failure (stays failed) — cross-kind SAFETY held.';
 END $$;
 ROLLBACK;
 

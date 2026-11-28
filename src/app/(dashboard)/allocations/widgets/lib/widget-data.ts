@@ -122,7 +122,7 @@ export const equityChartWidgetDataSchema = z
     // render an honest indicator (derived vs legacy snapshot history). Optional
     // because first-connect / warm-up payloads legitimately omit the equity
     // leaves; the widget defaults to the legacy label when absent.
-    equityCurveSource: z.enum(["derived", "legacy"]).optional(),
+    equityCurveSource: z.literal("derived").optional(),
     derivedCurveComputedAt: z.string().nullable().optional(),
     // Phase 167.2.1.1.1 (NAVMTM) plan 10, D-08: the first day recorded equity
     // begins for the keys the drawn curve includes. Deliberately `z.unknown()`,

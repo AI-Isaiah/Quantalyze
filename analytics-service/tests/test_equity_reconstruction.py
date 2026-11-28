@@ -508,22 +508,6 @@ def _install_fake_preflight(monkeypatch, venue: str, fake_supabase: FakeSupabase
     async def _fake_preflight(job, caller_name):
         # The handler passes its own api_key_id; allow tests to override key
         requested_id = job.get("api_key_id")
-        # Phase 167.1.2.1 D-04: a completed reconstruct stamps its key's
-        # history_reconstructed_at, and that write FAILS the job when it matches
-        # no api_keys row. So the key under reconstruction needs a row in the
-        # store. Reconstruct jobs only (a refresh job would gain a phantom
-        # eligible key), and setdefault, so a row a test seeded itself (a marker
-        # it set, a sibling's fields) is left alone.
-        if job.get("kind") == "reconstruct_allocator_history":
-            _own_id = requested_id or API_KEY_ID_1
-            fake_supabase.store.setdefault(("api_keys", (_own_id,)), {
-                "id": _own_id,
-                "user_id": ALLOCATOR_ID,
-                "exchange": venue,
-                "is_active": True,
-                "history_reconstructed_at": None,
-                "history_reconstruct_attempts": 0,
-            })
         if requested_id and requested_id != API_KEY_ID_1:
             return jw._ExchangeContext(
                 supabase=fake_supabase,

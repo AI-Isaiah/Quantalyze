@@ -686,4 +686,4 @@ class TestTopology:
         # and the follow-on topology must not learn the kind.
         assert "okx_archive_rebuild" not in JOB_CHAIN_FOLLOW_ON
         assert all("okx_archive_rebuild" not in tail for tail in JOB_CHAIN_FOLLOW_ON.values())
-        assert len(TIMEOUT_PER_KIND) == 16
+        assert len(TIMEOUT_PER_KIND) == 14

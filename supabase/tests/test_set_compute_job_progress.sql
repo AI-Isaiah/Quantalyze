@@ -145,13 +145,13 @@ BEGIN
   -- preservation assertions in 2a have something to preserve.
   INSERT INTO public.compute_jobs (id, kind, strategy_id, status, claim_token, metadata)
   VALUES
-    (v_job_match, 'compute_analytics', v_strat1,
+    (v_job_match, 'sync_trades', v_strat1,
        'running', v_token, '{"source":"wizard","correlation_id":"corr-abc"}'::jsonb),
-    (v_job_stale, 'compute_analytics', v_strat2,
+    (v_job_stale, 'sync_trades', v_strat2,
        'running', v_token, '{"source":"wizard","correlation_id":"corr-def"}'::jsonb),
-    (v_job_null,  'compute_analytics', v_strat3,
+    (v_job_null,  'sync_trades', v_strat3,
        'running', NULL,    '{"source":"wizard","correlation_id":"corr-ghi"}'::jsonb),
-    (v_job_done,  'compute_analytics', v_strat4,
+    (v_job_done,  'sync_trades', v_strat4,
        'done',    v_token, '{"source":"wizard","correlation_id":"corr-jkl"}'::jsonb);
 
   -- ---- 2a: matching token on a running row → true + merge -----------------

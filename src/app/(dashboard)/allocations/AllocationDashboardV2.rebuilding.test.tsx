@@ -351,7 +351,6 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
         equityHistoryRebuildReason="awaiting_derivation"
         equityDailyPoints={[]}
         snapshotCount={0}
-        equityCurveSource="legacy"
         holdingsSummary={[] as never}
         hasSyncing
       />,
@@ -379,9 +378,9 @@ describe("AllocationDashboardV2 — 167.1.2 D-02 rebuilding state", () => {
   // every combination of the two history sources, gets the panel with that
   // reason's line, and the warm-up note never renders.
   const HISTORY_SHAPES = [
-    ["0 snapshots, legacy source", 0, "legacy"],
+    ["0 snapshots, no source", 0, undefined],
     ["0 snapshots, derived source", 0, "derived"],
-    ["1 snapshot, legacy source", 1, "legacy"],
+    ["1 snapshot, no source", 1, undefined],
   ] as const;
   it.each(
     REASON_LINES.flatMap(([reason, line]) =>

@@ -62,7 +62,7 @@
 --     SQLSTATE.
 --   * Batch size 1000, the cap every claim body's own input check accepts.
 --   * Seed kinds per partition: api_key poll_allocator_positions, portfolio
---     compute_portfolio, strategy compute_analytics (never
+--     compute_portfolio, strategy compute_analytics_from_csv (never
 --     compute_intro_snapshot for a partition arm), allocator
 --     derive_allocator_equity.
 --   * No completion sentinel is declared, and there is no LANE-ONLY marker:
@@ -327,9 +327,9 @@ BEGIN
     VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
            (v_part2, gen_random_uuid(), 'claimpair-gate');
   INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
-    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
-           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
-           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+    VALUES (v_retry, 'compute_analytics_from_csv', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics_from_csv', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics_from_csv', v_part2, 'pending',      0, now() - interval '1 minute');
   SET LOCAL session_replication_role = origin;
 
   v_err := NULL; v_msg := NULL;
@@ -570,9 +570,9 @@ BEGIN
     VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
            (v_part2, gen_random_uuid(), 'claimpair-gate');
   INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
-    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
-           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
-           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+    VALUES (v_retry, 'compute_analytics_from_csv', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics_from_csv', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics_from_csv', v_part2, 'pending',      0, now() - interval '1 minute');
   SET LOCAL session_replication_role = origin;
 
   v_err := NULL; v_msg := NULL;
@@ -769,7 +769,8 @@ ROLLBACK;
 --            (match 2 of 3). The due failed_retry intro row now sees
 --            its pending intro siblings and is held back, so 2 of the 3 rows
 --            are claimed and this arm's count is its first raise. P5-ST seeds
---            compute_analytics, which the carve-out never covered, so it stays
+--            compute_analytics_from_csv (a live strategy kind that replaced the retired
+--            compute_analytics in Phase 224), which the carve-out never covered, so it stays
 --            green. ⚠️ LAYERED: v_p5_strategy_anchored (its regex pins the
 --            carve-out) is stood down in the same mutation.
 -- RED-UNDER-M: {"arm":"W-INTRO","apply":[{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"OR kind = 'compute_intro_snapshot' OR NOT EXISTS (","replace":"OR NOT EXISTS (","occurrences":3,"nth":2},{"kind":"edit","file":"supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql","find":"IF NOT v_p5_strategy_anchored THEN","replace":"IF FALSE AND NOT v_p5_strategy_anchored THEN","occurrences":1}]}
@@ -1200,9 +1201,9 @@ BEGIN
     VALUES (v_part, gen_random_uuid(), 'claimpair-gate'),
            (v_part2, gen_random_uuid(), 'claimpair-gate');
   INSERT INTO public.compute_jobs (id, kind, strategy_id, status, attempts, next_attempt_at)
-    VALUES (v_retry, 'compute_analytics', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
-           (v_twin,  'compute_analytics', v_part,  'pending',      0, now() - interval '5 minutes'),
-           (v_other, 'compute_analytics', v_part2, 'pending',      0, now() - interval '1 minute');
+    VALUES (v_retry, 'compute_analytics_from_csv', v_part,  'failed_retry', 1, now() - interval '10 minutes'),
+           (v_twin,  'compute_analytics_from_csv', v_part,  'pending',      0, now() - interval '5 minutes'),
+           (v_other, 'compute_analytics_from_csv', v_part2, 'pending',      0, now() - interval '1 minute');
   SET LOCAL session_replication_role = origin;
 
   v_err := NULL; v_msg := NULL;

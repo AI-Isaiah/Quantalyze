@@ -1523,9 +1523,14 @@ class TestReaperThresholdInvariant:
         # follow-on, claimed by the interactive loop; it never holds a
         # strategy_analytics row 'computing'), so JOB_CHAIN_FOLLOW_ON and the
         # reaper ceiling are unchanged.
-        assert len(TIMEOUT_PER_KIND) == 16, (
+        # 14 since Phase 224 DEAD-04: the two retired allocator kinds
+        # (`reconstruct_allocator_history`, `refresh_allocator_equity_daily`) lost
+        # their TIMEOUT_PER_KIND rows (a stray row dispatches to the retired stub
+        # under the 5-minute default); neither is in JOB_CHAIN_FOLLOW_ON, so the
+        # reaper ceiling is unchanged.
+        assert len(TIMEOUT_PER_KIND) == 14, (
             f"TIMEOUT_PER_KIND now has {len(TIMEOUT_PER_KIND)} kinds, not the "
-            "pinned 16 — a job kind was added/removed. Decide consciously "
+            "pinned 14 — a job kind was added/removed. Decide consciously "
             "whether it joins JOB_CHAIN_FOLLOW_ON (it is a chain edge: some "
             "handler enqueues it, or it enqueues a follow-on) or is "
             "chain-terminal, re-derive STRATEGY_ANALYTICS_REAP_THRESHOLD if the "

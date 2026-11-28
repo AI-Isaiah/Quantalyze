@@ -196,18 +196,9 @@ export interface LiveHoldingsSummary {
   unknownStatus: LiveHoldingsPart;
   /** CONTEXT D-20's `$Y`: holdings the contributing-set narrowing dropped from
    *  `total` whose key needs attention (167.1.1 D-02: a soft-disconnected key
-   *  is named here, no longer in `excludedNotConnected`; no number moves), MINUS the keys the payload names as
-   *  manager-side (`managerSideApiKeyIds`). A manager-side key's holdings are
-   *  not the allocator's book, so one the payload names is left out. An
+   *  is named here, no longer in `excludedNotConnected`; no number moves). An
    *  allocator-eligible untrusted key that has no return series yet IS
    *  counted, per D-20.
-   *
-   *  The residual, stated by its predicate (review round 2 WR-03): the payload
-   *  names a manager-side key only while it is in `eligibleApiKeyIds`, which
-   *  `isPerKeyDailiesEligibleKey` restricts to active, non-`revoked`,
-   *  not-disconnected keys. A manager-side key outside `eligibleApiKeyIds`
-   *  (revoked, soft-disconnected or inactive) cannot be told apart, so its
-   *  untrusted holdings may be counted. That over-discloses and never hides.
    *
    *  What `$Y` does NOT carry (review round 2 IN-04): a dropped holding
    *  whose key is missing from `statusByKeyId` has no known status, so it
@@ -226,8 +217,7 @@ export interface LiveHoldingsSummary {
   excludedUntrusted: LiveHoldingsPart;
   /** Review round 3 WR-01 (2026-09-24). Holdings the contributing-set
    *  narrowing dropped from `total` whose `api_key_id` is not in
-   *  `statusByKeyId` at all, minus the keys the payload names as manager-side
-   *  (D-20, as for `excludedUntrusted`). The excludes-side twin of
+   *  `statusByKeyId` at all. The excludes-side twin of
    *  `unknownStatus`, with the same `.has` rule.
    *
    *  WHY IT EXISTS. `getUserApiKeys` drops a key row on an unsupported
@@ -241,8 +231,8 @@ export interface LiveHoldingsSummary {
    *  side. Never added to, or subtracted from, `total` (D-03). */
   excludedUnknownStatus: LiveHoldingsPart;
   /** Phase 167.1.2 SC-4. Holdings the contributing-set narrowing dropped from
-   *  `total` whose key is TRUSTED (present in `statusByKeyId`, not untrusted)
-   *  and not manager-side: an allocator key with no return series yet. Until
+   *  `total` whose key is TRUSTED (present in `statusByKeyId`, not untrusted):
+   *  an allocator key with no return series yet. Until
    *  this part they fell through every branch and landed in no part at all,
    *  so the composer said nothing about them. On the founder's book that is
    *  where a shared account's dollars sat. The composer names it as "excludes
@@ -261,47 +251,6 @@ export interface LiveHoldingsSummary {
    *  caller passes no eligible set, because then the two cannot be told apart.
    *  Never added to, or subtracted from, `total` (D-03). */
   excludedNotConnected: LiveHoldingsPart;
-  /** Phase 167.1.2 SC-4. Holdings the narrowing dropped whose key the payload
-   *  names as manager-side (D-20: not the allocator's book), whatever its
-   *  status. Kept OUT of every disclosure, per D-20's reasoning, but counted,
-   *  so that every toggled-on dollar is in exactly one of `total` or an
-   *  `excluded*` part (the conservation invariant the unit suite generates
-   *  books against). */
-  excludedManagerSide: LiveHoldingsPart;
-}
-
-/**
- * CONTEXT D-20 — the keys the payload itself names as manager-side: in
- * `eligibleApiKeyIds` (per-key-dailies eligible) but not in
- * `allocatorEligibleApiKeyIds` (eligible minus the keys that feed a strategy
- * the owner runs as a manager). It is the difference of two SSR sets, in
- * `eligible` order, and never a re-derivation of either predicate on the
- * client.
- *
- * A pure function next to `summarizeLiveHoldings` rather than inline in the
- * composer (review round 2 WR-01): `excludedUntrusted` renders nowhere until
- * the founder answers D-06, so a wrong direction or a dropped argument here
- * would ship green unless the derivation is pinned where it is written.
- * ⭐ SUPERSEDED 2026-09-24 (D-06 answered (b); review round 3 IN-01): the
- * composer now renders `excludedUntrusted` as "excludes $Y from keys needing
- * attention". The sentence above is kept as lineage. The pin matters more
- * now: a wrong direction here would mis-state a rendered figure.
- *
- * ⛔ A MISSING field yields NO manager-side key (review round 2 WR-06). Reading
- * an absent `allocatorEligibleApiKeyIds` as `[]` would make every eligible key
- * manager-side, and `summarizeLiveHoldings` would then HIDE their untrusted
- * holdings from `$Y`. D-20's direction is over-disclose, never hide, so an
- * unknown difference is treated as empty.
- */
-export function managerSideKeyIds(
-  eligibleApiKeyIds: readonly string[] | undefined,
-  allocatorEligibleApiKeyIds: readonly string[] | undefined,
-): string[] {
-  if (eligibleApiKeyIds === undefined || allocatorEligibleApiKeyIds === undefined) {
-    return [];
-  }
-  const allocatorEligible = new Set(allocatorEligibleApiKeyIds);
-  return eligibleApiKeyIds.filter((id) => !allocatorEligible.has(id));
 }
 
 export function summarizeLiveHoldings(args: {
@@ -309,10 +258,6 @@ export function summarizeLiveHoldings(args: {
   /** 170.4 D-08: every row under a scope ref, from `holdingsByRef`. */
   holdingsByRef: ReadonlyMap<string, readonly DashboardHolding[]>;
   contributingApiKeyIds: readonly string[];
-  /** `eligibleApiKeyIds` minus `allocatorEligibleApiKeyIds`, both read from the
-   *  payload (never re-derived): the keys that feed a strategy the owner runs
-   *  as a manager. Read only to narrow `excludedUntrusted` to D-20's `$Y`. */
-  managerSideApiKeyIds: readonly string[];
   statusByKeyId: ReadonlyMap<string, string | null>;
   /** Phase 167.1.1 D-02: each key's `disconnected_at`, from `keyStateMapsOf`.
    *  REQUIRED, so a caller cannot omit it and silently read a soft-disconnected
@@ -329,7 +274,6 @@ export function summarizeLiveHoldings(args: {
   const contributing = new Set(args.contributingApiKeyIds);
   const eligible =
     args.eligibleApiKeyIds === undefined ? null : new Set(args.eligibleApiKeyIds);
-  const managerSide = new Set(args.managerSideApiKeyIds);
   // ⚠️ The narrowing applies only when there IS a modelled set to narrow TO.
   // An EMPTY contributing set means no per-key row exists, so there is nothing
   // for the AUM to agree with — and narrowing to ∅ would zero it, taking the
@@ -365,7 +309,6 @@ export function summarizeLiveHoldings(args: {
     excludedUnknownStatus: { amount: 0, count: 0, unavailable: 0 },
     excludedTrusted: { amount: 0, count: 0, unavailable: 0 },
     excludedNotConnected: { amount: 0, count: 0, unavailable: 0 },
-    excludedManagerSide: { amount: 0, count: 0, unavailable: 0 },
   };
   const addTo = (part: LiveHoldingsPart, h: DashboardHolding, equity: number) => {
     part.amount += equity;
@@ -393,14 +336,9 @@ export function summarizeLiveHoldings(args: {
         disconnected_at: args.disconnectedAtByKeyId.get(h.api_key_id) ?? null,
       });
       if (narrowToModelledBook && !contributing.has(h.api_key_id)) {
-        // D-20: a manager-side key the payload identifies is not the allocator's
-        // book, so its holdings are not part of what the narrowing excluded from
-        // THEIR AUM. Only the indistinguishable remainder may over-disclose.
         // Phase 167.1.2 SC-4: every branch below lands the holding in a part, so
         // no toggled-on dollar leaves this loop unaccounted for.
-        if (managerSide.has(h.api_key_id)) {
-          addTo(out.excludedManagerSide, h, equity ?? 0);
-        } else if (untrusted) {
+        if (untrusted) {
           addTo(out.excludedUntrusted, h, equity ?? 0);
         } else if (!args.statusByKeyId.has(h.api_key_id)) {
           // Review round 3 WR-01: an ABSENT status is unknown, not trusted,
@@ -412,7 +350,7 @@ export function summarizeLiveHoldings(args: {
           // no return history yet".
           addTo(out.excludedNotConnected, h, equity ?? 0);
         } else {
-          // Trusted, not contributing, not manager-side: a key with no return
+          // Trusted, not contributing: a key with no return
           // series yet. Before 167.1.2 this fell through to `continue` unnamed.
           addTo(out.excludedTrusted, h, equity ?? 0);
         }

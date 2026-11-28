@@ -222,7 +222,6 @@ function makePayload(
       { date: "2026-01-01", value: 100_000 },
       { date: "2026-01-02", value: 101_000 },
     ],
-    equityCurveSource: "legacy",
     derivedCurveComputedAt: null,
     equityHistoryState: "rebuilding",
     equityDailyReturns: [],

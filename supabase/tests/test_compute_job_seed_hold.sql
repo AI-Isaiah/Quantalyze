@@ -90,7 +90,7 @@ BEGIN
   INSERT INTO public.strategies (user_id, name)
     VALUES (v_user, 'sh-strat') RETURNING id INTO v_strat;
   INSERT INTO public.compute_jobs (id, kind, strategy_id, status, claim_token, metadata)
-    VALUES (v_job, 'compute_analytics', v_strat, p_status, p_token, p_meta);
+    VALUES (v_job, 'sync_trades', v_strat, p_status, p_token, p_meta);
   RETURN v_job;
 END
 $f$;

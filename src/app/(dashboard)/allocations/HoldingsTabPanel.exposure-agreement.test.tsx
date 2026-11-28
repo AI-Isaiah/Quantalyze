@@ -796,7 +796,6 @@ describe("167.1.1 SC-1: two keys, one venue and asset, in the AUM, Open Position
       toggleByScopeRef: { [SPOT_REF]: true, [SWAP_REF]: true },
       holdingsByRef: holdingsByRef(book.phase07.holdingsSummary),
       contributingApiKeyIds,
-      managerSideApiKeyIds: [],
       statusByKeyId,
       disconnectedAtByKeyId,
       eligibleApiKeyIds: undefined,

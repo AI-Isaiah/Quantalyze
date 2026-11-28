@@ -208,7 +208,7 @@ class TestMigration086ComputeJobsPriority:
             for sid, priority in zip(strategy_ids, ("normal",) * 3 + ("low",) * 2):
                 cur.execute(
                     "INSERT INTO compute_jobs (strategy_id, kind, priority, status, next_attempt_at) "
-                    "VALUES (%s, 'compute_analytics', %s, 'pending', now())",
+                    "VALUES (%s, 'compute_analytics_from_csv', %s, 'pending', now())",
                     (sid, priority),
                 )
             # Phase 19 / H-5 — pass all three args explicitly (the third
@@ -221,12 +221,12 @@ class TestMigration086ComputeJobsPriority:
             # python job's private lane (LANE_DB_URL) and the claim is SCOPED. The lane holds
             # only this suite's rows, but a database that also carried foreign `normal`
             # backlog would fill a batch of 5 with it and read `priorities.count("normal")`
-            # as 5, so the call uses the 5-arg overload and claims ONLY kind 'compute_analytics'
+            # as 5, so the call uses the 5-arg overload and claims ONLY kind 'compute_analytics_from_csv'
             # (`p_kind_include TEXT[]`, migrations 20260719073701 and 20260927120000).
             # Arg 4 binds a Python list as TEXT[]; arg 5 (`p_kind_exclude`) stays NULL.
             cur.execute(
                 "SELECT * FROM claim_compute_jobs_with_priority(%s, %s, %s, %s::text[], NULL)",
-                (5, "test-worker-phase-16", True, ["compute_analytics"]),
+                (5, "test-worker-phase-16", True, ["compute_analytics_from_csv"]),
             )
             claimed = cur.fetchall()
         priorities = [row["priority"] for row in claimed]

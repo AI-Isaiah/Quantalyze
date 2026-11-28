@@ -140,12 +140,11 @@ def test_an_interior_residual_of_the_allowed_size_still_breaks_the_chain(
 
 
 def test_the_close_bound_and_the_reason_set_are_the_decided_values() -> None:
-    """D-06/D-07 fix the bound and the reason set ("No new reason token"); D-08 (founder 2026-10-28,
-    "Tighten to 2%") fixes the opening tolerance at 0.02. Each changes only by a founder decision
-    recorded first, so a drift in either value, or a seventh token, must be a red test and not a
-    quiet edit."""
+    """D-06/D-07 fix the bound and the reason set ("No new reason token"). Each changes only by a
+    founder decision recorded first, so a drift in either the bound or the set (a seventh token)
+    must be a red test and not a quiet edit. The opening tolerance D-08 also fixed went with
+    ``opening_agrees`` in Phase 224, when nothing called either."""
     assert obal.CLOSE_RESIDUAL_REL_BOUND == Decimal("1e-12")
-    assert obal.OPENING_TOLERANCE_REL == 0.02
     assert obal.OPENING_UNAVAILABLE_REASONS == frozenset(
         {"chain_break", "malformed_balance", "malformed_bills", "page_ceiling", "reach_unproven", "unpriced_ccy"}
     )
