@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.133.119.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plan 11: an options composite's smoothed pass reuses the cash pass's crawl, so the market-price headline fits the stitch budget
+
+### Root cause
+- The post-deploy PROD reading of v0.133.115.0 (2026-11-28, marker query first): both flagged private composites re-stitched through `enqueue_compute_job` and neither promoted; `metrics_json_by_basis` held `cash_settlement` only. The cash pass used about 690 s of the 1200 s `stitch_composite` budget, and the smoothed pass, a third full transaction-log crawl per Deribit member, timed out at its bounded share (0.7 of the remainder, about 357 s) on both jobs. Founder decision 2026-11-28, verbatim "Fix inside 252 first": reuse the cash pass's crawl, as key mode does (Phase 185 `retain_raw_rows`), with no third crawl.
+
+### Changed
+- **`run_stitch_composite_job` crawls each Deribit member's transaction log once.** The cash pass retains each member's raw rows and account-state read (new `retain_cash_crawl` / `reuse_cash_crawl` switches on `_reconstruct_all`, keyed by member seq), and the smoothed pass rebuilds the member's smoothed ledger with `build_deribit_options_basis_ledger` from those rows. A missing retained entry raises; there is no fallback crawl. Retained rows are released after each member's smoothed build, when no smoothed pass will run, at the budget refusal and when the step ends.
+- `build_deribit_options_basis_ledger` gains `exclude_spot_extraction` (default `False`, so key mode is unchanged); the composite passes its own extraction mode. The P3 retention signal is read from the options build's own report.
+- The bounded smoothed timeout, its floor and every budget constant are unchanged. One new INFO line logs the smoothed pass's elapsed seconds against its bound (no ids or amounts beyond the strategy id the sibling lines already log).
+
+### Fixed
+- Review WR-01: an 08:00 UTC Deribit settlement falling between a member's cash-pass account-state read and its smoothed reuse would have failed the settled-book check. The settled option-mark day is stored with the retained crawl, and a changed day raises `DeribitTransientReadError`, so the job retries on earlier attempts and degrades to the cash headline plus the named withhold on the last.
+
+### Tests
+- A tracer on the real ingest code counts transaction-log reads: 4 at HEAD, 2 after (one per member). Each reused smoothed ledger equals a fresh smoothed crawl on the same fixture, in both extraction modes; the evidence-shaped fixture still promotes; release on every path; settlement-straddle retry, last-attempt degrade and unchanged-day promotion. Seven existing smoothed-build assertions were re-pointed at the options builder so they still prove something. PROOF-01 neuters N1-N6 and the WR-01 guard went RED with their cases named and GREEN after a byte-copy restore. The plan's test set read 933 passed; the composite files 298 passed; mypy strict clean (151 files).
+
+### Notes
+- Key mode and single-key are fenced: `run_derive_broker_dailies_job` source hash unchanged, their test files untouched. ccxt members keep their live smoothed re-read; the perp-only MTM pass keeps its own crawl. No migration, no MT5 path.
+- Known limits: the smoothed pass's remaining venue reads (option and index marks) for these members are unmeasured until the new INFO line is read on PROD; peak worker memory now holds each Deribit member's rows from the cash pass into the smoothed pass; whether an in-the-money payout lands on the close day is unmeasured. The two composites move only after a post-deploy re-stitch through the product's job.
+- Review: gsd-code-reviewer and silent-failure-hunter; one fixer round closed WR-01.
+
 ## [0.133.118.3] - 2026-11-28 — records: Phase 257 SEEDHOLD closed (verification passed), and its NAME_SET_RATCHET row deleted after the re-dump
 
 This is a records PR. Apart from one gate allowlist row, it changes no source, test, workflow or migration file.

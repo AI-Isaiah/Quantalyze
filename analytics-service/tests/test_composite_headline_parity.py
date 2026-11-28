@@ -313,10 +313,17 @@ def _patches(
             "services.deribit_ingest.build_deribit_native_ledger",
             new=AsyncMock(return_value=(_stub_ledger(), report)),
         ),
+        # Plan 252-11: the smoothed pass builds each member from the cash pass's retained
+        # crawl, so it calls the options builder (same stub ledger and report) and no
+        # longer the native builder.
+        patch(
+            "services.deribit_ingest.build_deribit_options_basis_ledger",
+            new=AsyncMock(return_value=(_stub_ledger(), report)),
+        ),
         patch("services.deribit_ingest.assert_ledger_complete", new=MagicMock()),
         patch(
             "services.broker_dailies.combine_native_ledger",
-            # Phase 132: has_option_activity=True → the smoothed_mtm THIRD pass re-crawls
+            # Phase 132: has_option_activity=True → the smoothed_mtm THIRD pass visits
             # the SAME members (basis-independent stub output), so repeat the provided
             # combine sequence for that second fan-out.
             new=MagicMock(side_effect=list(combine_returns) + list(combine_returns)),
