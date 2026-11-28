@@ -581,3 +581,258 @@ class TestSeedHoldRetry:
                 column=a2.column_after, job_id="job-r2", token="tok-r2",
             )
             _verdict(label, r2.out, RUN1_WALK_MS)
+
+
+# ---- SC-2: a Bybit read that hits its deadline keeps what it completed --------------------------
+#
+# The real `fetch_raw_trades` (so the worker's entry point is what re-raises) over a windowed fake
+# exchange and a fake clock. Each 7-day window costs two requests (page 1: one fill near the
+# window's end and the cursor "c"; page 2: an empty list and an empty cursor), each request costs
+# 1 s of the fake clock. A 4.5 s budget completes two windows and refuses on window 3's second page
+# (five requests); a 0.5 s budget refuses inside the first window (one request). Hand-typed:
+#
+#   1778108400000  2026-05-06T23:00:00+00:00        effective_since (the seed minus the overlap)
+#   1778713200000  2026-05-13T23:00:00+00:00        window 1 end
+#   1779318000001  2026-05-20T23:00:00.001+00:00    window 2 end, the MARK ("+1 ms" boundary)
+#   1778711400000  2026-05-13T22:30:00+00:00        window 1's fill (its end minus 30 min)
+#   1779316200001  2026-05-20T22:30:00.001+00:00    window 2's fill, the newest persisted fill
+#   1779312600001  2026-05-20T21:30:00.001+00:00    run 2's walk start after the window-2 stop
+MARK_MS = 1779318000001
+MARK_ISO = "2026-05-20T23:00:00.001000+00:00"
+NEWEST_COMPLETED_FILL_ISO = "2026-05-20T22:30:00.001000+00:00"
+RUN2_WALK_AFTER_STOP_MS = 1779312600001
+RUN1_SEED_ISO = "2026-05-07T00:00:00+00:00"
+RUN1_WALK_MINUS_1MS_ISO = "2026-05-06T22:59:59.999000+00:00"  # HEAD's creeping bound
+TWO_WINDOWS_S = 4.5
+FIRST_WINDOW_S = 0.5
+
+
+def _windowed_bybit(clock: list[float]) -> Any:
+    """A fake Bybit execution list. `exchange.calls` counts requests, `exchange.windows` counts the
+    cursor-less (page 1) requests."""
+
+    async def _execution_list(params: dict[str, str]) -> dict[str, Any]:
+        exchange.calls += 1
+        clock[0] += 1.0
+        if "cursor" in params:
+            return {"result": {"list": [], "nextPageCursor": ""}}
+        exchange.windows += 1
+        n = exchange.windows
+        return {
+            "result": {
+                "list": [
+                    {
+                        "execTime": str(int(params["endTime"]) - 1_800_000),
+                        "execId": f"w{n}",
+                        "execType": "Trade",
+                        "execPrice": "50000",
+                        "execQty": "0.1",
+                        "execFee": "0.5",
+                        "feeCurrency": "USDT",
+                        "symbol": "BTCUSDT",
+                        "side": "Buy",
+                        "orderId": f"o{n}",
+                    }
+                ],
+                "nextPageCursor": "c",
+            }
+        }
+
+    exchange = MagicMock()
+    exchange.id = "bybit"
+    exchange.calls = 0
+    exchange.windows = 0
+    exchange.private_get_v5_execution_list = _execution_list
+    return exchange
+
+
+async def _bybit_refusal(
+    monkeypatch: pytest.MonkeyPatch, read_deadline_s: float
+) -> tuple[ex.BybitTradeWindowIncomplete, int]:
+    """The deadline refusal of the REAL `fetch_raw_trades` on a fake clock, and the request count."""
+    clock = [0.0]
+    monkeypatch.setattr(ex, "_monotonic", lambda: clock[0])
+    real_reader = ex._fetch_raw_trades_bybit
+
+    async def _fixed_clock_reader(exchange: Any, since_ms: int | None, **kwargs: Any) -> Any:
+        # A fixed `now_ms`: the wall clock would make RUN1_SEED older than the venue's 730-day
+        # history one day.
+        return await real_reader(exchange, since_ms, now_ms=NOW_MS, **kwargs)
+
+    monkeypatch.setattr(ex, "_fetch_raw_trades_bybit", _fixed_clock_reader)
+    exchange = _windowed_bybit(clock)
+    with pytest.raises(ex.BybitTradeWindowIncomplete) as raised:
+        await ex.fetch_raw_trades(
+            exchange, STRATEGY_ID, MagicMock(), since_ms=RUN1_SEED_MS, read_deadline_s=read_deadline_s
+        )
+    want_calls = 5 if read_deadline_s == TWO_WINDOWS_S else 1
+    assert exchange.calls == want_calls, (
+        f"SEEDHOLD-PREMISE: a {read_deadline_s} s budget must refuse after {want_calls} "
+        f"request(s), got {exchange.calls}"
+    )
+    assert raised.value.reason == "deadline", f"SEEDHOLD-PREMISE: reason {raised.value.reason!r}"
+    return raised.value, exchange.calls
+
+
+def _persisted_ids(rec: _Recorder) -> set[str]:
+    return {row["exchange_fill_id"] for batch in rec.upserted_batches for row in batch}
+
+
+def _bound_iso(bounds: RereadBounds) -> str | None:
+    row = bounds.rows.get(STRATEGY_ID)
+    return None if row is None else row[1]
+
+
+def _stamped_flag(rec: _Recorder) -> Any:
+    return rec.analytics_upserts[-1]["data_quality_flags"].get("phase2_fill_ingestion_failed")
+
+
+class TestBybitDeadlineKeepsWhatItRead:
+    """SC-2 (CONTEXT [Bybit read-through shape], [Bybit stall stays visible]). A window counts as
+    complete only when its page loop ended naturally, so the in-flight window's fills are never
+    persisted (Bybit answers newest first inside a window: a partial window holds its newest fills
+    and misses its oldest). Assertions are equalities: an inequality is trivially GREEN at HEAD for
+    the first-window arm (RESEARCH). The refusal's attributes are read through `getattr`, so HEAD
+    fails on an AssertionError and never on an AttributeError."""
+
+    @pytest.mark.parametrize(
+        "case",
+        [
+            pytest.param("two-windows", marks=RED_AT_HEAD_BYBIT, id="two-windows"),
+            pytest.param("first-window", marks=RED_AT_HEAD_BYBIT, id="first-window"),
+        ],
+    )
+    async def test_the_refusal_carries_what_the_read_completed(
+        self, monkeypatch: pytest.MonkeyPatch, case: str
+    ) -> None:
+        deadline = TWO_WINDOWS_S if case == "two-windows" else FIRST_WINDOW_S
+        refusal, _calls = await _bybit_refusal(monkeypatch, deadline)
+        completed = getattr(refusal, "completed_fills", None)
+        through = getattr(refusal, "read_through_ms", "absent")
+        if case == "two-windows":
+            ids = {f["exchange_fill_id"] for f in (completed or [])}
+            assert ids == {"w1", "w2"} and through == MARK_MS, (
+                f"SEEDHOLD-BYBIT: reader two-windows: completed fill ids {sorted(ids)}, "
+                f"read_through_ms {through!r}; want ['w1', 'w2'] and {MARK_MS}"
+            )
+        else:
+            assert completed == [] and through is None, (
+                f"SEEDHOLD-BYBIT: reader first-window: completed_fills {completed!r}, "
+                f"read_through_ms {through!r}; want [] and None"
+            )
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="stop-after-two-windows-set"),
+            pytest.param(None, marks=RED_AT_HEAD_BYBIT, id="stop-after-two-windows-null"),
+        ],
+    )
+    async def test_a_stop_after_two_windows_persists_them_and_advances(
+        self, monkeypatch: pytest.MonkeyPatch, column: str | None
+    ) -> None:
+        refusal, _calls = await _bybit_refusal(monkeypatch, TWO_WINDOWS_S)
+        bounds, flags = RereadBounds(), {}
+        sb1, rec1 = _make_supabase(trades_rows=DAILY_ONLY_TRADES, bounds=bounds, flags=flags)
+        await _run_job(
+            supabase=sb1, column=column, exchange="bybit", daily_trades=DAILY_TRADES_RUN1,
+            raw_error=refusal,
+        )
+        persisted = _persisted_ids(rec1)
+        assert persisted == {"w1", "w2"}, (
+            f"SEEDHOLD-BYBIT: persisted fill ids {sorted(persisted)}; want the two completed "
+            "windows' fills and never the in-flight window's (w3)"
+        )
+        assert _bound_iso(bounds) == MARK_ISO, (
+            f"SEEDHOLD-BYBIT: bound {_bound_iso(bounds)!r}; want the mark {MARK_ISO}"
+        )
+        stamp = _the_advance(rec1)["p_last_fetched_ts"]
+        assert stamp == NEWEST_COMPLETED_FILL_ISO, (
+            f"SEEDHOLD-BYBIT: stamp {stamp!r}; want the newest persisted fill {NEWEST_COMPLETED_FILL_ISO}"
+        )
+        assert _stamped_flag(rec1) is True, (
+            "SEEDHOLD-BYBIT: a deadline stop must stay flagged phase2_fill_ingestion_failed"
+        )
+        sb2, _rec2 = _make_supabase(
+            trades_rows=[*DAILY_ONLY_TRADES, *_persisted_fills(rec1, STRATEGY_ID)],
+            bounds=bounds, flags=flags,
+        )
+        out2 = await _run_job(
+            supabase=sb2, column=column_after_advance(column, stamp), exchange="bybit"
+        )
+        walk = _two_run_walk_start_ms(out2)
+        assert walk == RUN2_WALK_AFTER_STOP_MS and walk > RUN1_WALK_MS, (
+            f"SEEDHOLD-BYBIT: run 2 walk start {walk}; want {RUN2_WALK_AFTER_STOP_MS} "
+            f"(the newest completed-window fill minus the overlap), later than run 1's {RUN1_WALK_MS}"
+        )
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="stop-inside-first-window-set"),
+            pytest.param(None, marks=RED_AT_HEAD_BYBIT, id="stop-inside-first-window-null"),
+        ],
+    )
+    async def test_a_stop_inside_the_first_window_holds_the_bound_at_the_seed(
+        self, monkeypatch: pytest.MonkeyPatch, column: str | None
+    ) -> None:
+        refusal, _calls = await _bybit_refusal(monkeypatch, FIRST_WINDOW_S)
+        bounds, flags = RereadBounds(), {}
+        sb1, rec1 = _make_supabase(trades_rows=DAILY_ONLY_TRADES, bounds=bounds, flags=flags)
+        await _run_job(
+            supabase=sb1, column=column, exchange="bybit", daily_trades=DAILY_TRADES_RUN1,
+            raw_error=refusal,
+        )
+        persisted = _persisted_ids(rec1)
+        assert persisted == set(), f"SEEDHOLD-BYBIT: persisted {sorted(persisted)}; want nothing"
+        assert _bound_iso(bounds) == RUN1_SEED_ISO, (
+            f"SEEDHOLD-BYBIT: bound {_bound_iso(bounds)!r}; want the seed {RUN1_SEED_ISO} exactly "
+            f"(HEAD creeps to {RUN1_WALK_MINUS_1MS_ISO})"
+        )
+        assert _stamped_flag(rec1) is True, (
+            "SEEDHOLD-BYBIT: a deadline stop must stay flagged phase2_fill_ingestion_failed"
+        )
+        stamp = _the_advance(rec1)["p_last_fetched_ts"]
+        sb2, _rec2 = _make_supabase(
+            trades_rows=[*DAILY_ONLY_TRADES, *_persisted_fills(rec1, STRATEGY_ID)],
+            bounds=bounds, flags=flags,
+        )
+        out2 = await _run_job(
+            supabase=sb2, column=column_after_advance(column, stamp), exchange="bybit"
+        )
+        walk = _two_run_walk_start_ms(out2)
+        assert walk == RUN1_WALK_MS, (
+            f"SEEDHOLD-BYBIT: run 2 walk start {walk}; want run 1's {RUN1_WALK_MS} exactly"
+        )
+
+    @pytest.mark.parametrize(
+        "column",
+        [pytest.param(CURSOR_AHEAD_TS, marks=RED_AT_HEAD_BYBIT, id="persist-fails-after-stop-set")],
+    )
+    async def test_a_persist_failure_after_a_stop_keeps_the_walk_start_bound(
+        self, monkeypatch: pytest.MonkeyPatch, column: str | None
+    ) -> None:
+        # CONTEXT [Bybit read-through shape]: a persist failure still falls back to the walk start
+        # minus 1 ms, because the completed windows' fills did not all land.
+        refusal, _calls = await _bybit_refusal(monkeypatch, TWO_WINDOWS_S)
+        bounds = RereadBounds()
+        sb1, rec1 = _make_supabase(
+            trades_rows=DAILY_ONLY_TRADES, bounds=bounds, flags={}, upsert_fails_on_call=1
+        )
+        await _run_job(
+            supabase=sb1, column=column, exchange="bybit", daily_trades=DAILY_TRADES_RUN1,
+            raw_error=refusal,
+        )
+        assert rec1.upsert_calls >= 1, (
+            "SEEDHOLD-BYBIT: the completed windows' fills were never sent to the upsert"
+        )
+        assert _persisted_ids(rec1) == set(), "SEEDHOLD-BYBIT: the failed upsert persisted a fill"
+        assert _bound_iso(bounds) == RUN1_WALK_MINUS_1MS_ISO, (
+            f"SEEDHOLD-BYBIT: bound {_bound_iso(bounds)!r}; want the walk start minus 1 ms "
+            f"{RUN1_WALK_MINUS_1MS_ISO}"
+        )
+        stamp = _the_advance(rec1)["p_last_fetched_ts"]
+        assert stamp is None, f"SEEDHOLD-BYBIT: stamp {stamp!r}; want None after a failed persist"
+        assert _stamped_flag(rec1) is True, (
+            "SEEDHOLD-BYBIT: a failed persist must stay flagged phase2_fill_ingestion_failed"
+        )
