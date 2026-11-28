@@ -35,7 +35,7 @@ metrics:
   completed: 2026-11-28
 status: complete
 actuals:
-  tokens: 40000
+  tokens: 30024    # chars/4 over `git diff daa550f6d..d9fa81c25` (the three task commits)
   tasks: 3
   commits: 3
 plan_head_before: daa550f6d71b5c8ba47d0db2c9b29d27ce43a6ce
@@ -60,10 +60,10 @@ One additive migration, `public.set_compute_job_seed_hold(p_job_id uuid, p_claim
 
 No database other than the throwaway pg-lane cluster was touched (no Supabase CLI, no linked project, no Docker).
 
-**Pre-migration RED** (apply list minus the new migration; `gate-pre-migration.txt`, exit 3), fails inside arm 1:
+**Pre-migration RED** (apply list minus the new migration; `gate-pre-migration.txt`, exit 3), fails inside arm 1. Re-measured against the COMMITTED gate after the arm 4 restructure (the first measurement quoted `:365:`):
 
 ```
-psql:supabase/tests/test_compute_job_seed_hold.sql:365: ERROR:  P0001: TEST FAILED (1): public.set_compute_job_seed_hold(uuid, uuid, bigint) does not exist - this gate has nothing to test and must not skip
+psql:supabase/tests/test_compute_job_seed_hold.sql:360: ERROR:  P0001: TEST FAILED (1): public.set_compute_job_seed_hold(uuid, uuid, bigint) does not exist - this gate has nothing to test and must not skip
 ```
 
 **GREEN** (full apply list, exit 0): `Migration 20261128120000: set_compute_job_seed_hold installed (catalogue verified: SECDEF, pinned search_path, service_role-only EXECUTE).` then `arm 1 OK` through `arm 9 OK` (nine NOTICE lines).
@@ -127,13 +127,24 @@ Verification: the five census suites are green (369 tests); the directory-readin
 
 ## Deviations from Plan
 
-**1. [Rule 1 - Bug] Arm 4 restructured so arm 9's layered twin can neuter it.** Found during Task 1 step 5: the first `--file` run reported `neuter-missed` for arm 4 because the runner neuters only the first raise per identity. Arm 4's two cases now share one loop (one return-value raise, one unchanged-row raise). Arm 4's own twin still bites first. Commit 07f4a6fce.
+**1. [Plan acceptance not literally achievable] `node scripts/baseline-content-drift-check.mjs` prints `findings 1`, not the plan's `findings 0`, so the plan's own `<verify>` line for Task 2 reads red.** The one finding is `SNAPSHOT_MISSING set_compute_job_seed_hold/3`: the function is in the generated snapshot and not yet in `supabase/schema/baseline.sql`, which the ship step re-dumps after the PROD apply. Every earlier function-adding phase recorded the same state in the `COMPARED_FLOOR` doc block ("EXPECTED until the re-dump, and NO allowlist row was added"), and the gate's own message says an allowlist row is never the clearing action. I followed that convention and added no allowlist row. `dump-sql-functions.ts --check` (the name-set ratchet) is green. The state is recorded in the new MOVED note.
 
-**2. [Plan acceptance not literally achievable] `node scripts/baseline-content-drift-check.mjs` prints `findings 1`, not `findings 0`.** The one finding is `SNAPSHOT_MISSING set_compute_job_seed_hold/3`: the function is in the generated snapshot and not yet in `supabase/schema/baseline.sql`, which the ship step re-dumps after the PROD apply. Every earlier function-adding phase recorded the same state in the `COMPARED_FLOOR` doc block ("EXPECTED until the re-dump, and NO allowlist row was added"; the gate says an allowlist row is never the clearing action). I followed that convention and added no allowlist row. `dump-sql-functions.ts --check` (the ratchet) is green. The state is recorded in the new MOVED note.
+**2. [Rule 1 - Bug] Arm 4 restructured so arm 9's layered twin can neuter it.** Found during Task 1 step 5: the first `--file` run reported `neuter-missed` for arm 4 because the runner neuters only the first raise per identity. Arm 4's two cases now share one loop (one return-value raise, one unchanged-row raise). Arm 4's own twin still bites first. Commit 07f4a6fce.
 
-**3. [Planner-discretion item executed] Arm 9 twinned instead of left untwinned**, via the grammar's `neuter` field (see above); this is allowed by the plan text ("may stay untwinned only if no single edit can make it the FIRST failure") and strictly stronger.
+**3. [Planner-discretion item executed] Arm 9 twinned instead of left untwinned**, via the grammar's `neuter` field; the plan allows an untwinned arm only if no single edit can make it the first failure, and the layered twin is strictly stronger.
+
+**4. [Correction] A stale synthetic value in `mutation-runner-floors.test.ts`.** The GREEN_LOG line `at most 4 for this run's 100 target file(s)` read 100 while the corpus already had 101 annotated files (an earlier phase missed it; the test does not compare it). It now reads 102 to match this plan's annotated count, following the Phase 253 template.
 
 Otherwise the plan executed as written. Decisions (1) to (4) in the plan objective were taken as stated. No auth gates, no package installs, no stubs.
+
+## Verification beyond the plan's own commands (after review)
+
+- **Gate on the real schema.** The gate also runs on CI's local-stack lane, so arm 5's rows (a claim token on `pending`, `failed_retry` and `failed_final` rows, a shape no model gate inserts) were checked against the committed dump (`supabase/schema/baseline.sql`): `compute_jobs` carries no CHECK relating `claim_token` to `status` (the checks are attempts, claimed_by, error_kind, exchange, idempotency_key, kind, kind/target coherence, max_attempts, metadata size at 8192 bytes, priority, status values, target XOR, trade_count), and its only triggers are `compute_jobs_record_orphan_reaped_attempt` (AFTER UPDATE OF status when running becomes failed_final) and `compute_jobs_set_updated_at_trigger` (BEFORE UPDATE). Nothing forbids a token on a non-running row, so the insert shapes are valid there. The local-stack lane itself was NOT run (Docker not started).
+- **Directory-reading sweep accounting.** The grep listed 49 files; vitest ran 48. The 49th, `src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, is listed in `vitest.local-stack-files.ts` (`LOCAL_STACK_LANE_FILES`), which the default run excludes by design; it needs the local-stack lane (Docker). Of the 48 that ran, 8 contain env-gated live-database cases that skip without a database URL: `retention-crons` (16 skipped), `claim-dedupe-done-pending-children-guard` (1), `compare-holding-rls` (4, all), `delete-allocator-api-key-rpc` (4), `log-audit-event-service-rpc` (5), `strategy-verifications-rls` (4), `user-app-roles-backfill` (5), `wizard-rpcs-live-db` (7). This plan must not reach any database, so they stay skipped.
+- **One flake, not caused by this plan.** In a JSON-reporter rerun of the sweep, `drift-check-scripts.test.ts` failed once: `IN-04 ... a failing VAC-08 run leaves no new mktemp directory behind` found `tmp.g1aNCbGzCM` (that test counts new `mktemp` directories under the shared temp directory, and other agents run concurrently). Re-run alone it passed (956 tests). It had also passed in the Task 2 run and in the first sweep.
+- **Tests that read `.planning` and the planning hygiene script, run after the SUMMARY was written:** `check-planning-hygiene`, `baseline-wiring-claim`, `critical-regressions`, `seed-integrity`, `verify-plan-anchors`, `contracts-registry`, `ci-docs-path-filter.contract`, `vac06-mechanism-arms`, `accounttruth-census`: 9 files, 543 tests passed. `scripts/check-planning-hygiene.ts` printed OK on all three rules.
+- **Census readers outside the two globs.** `scripts/check-gdpr-export-coverage.test.ts`, `src/lib/account-share-note`, `closed-sets.cohort-gate-parity`, `display-labels` and `ledger-refresh-marker` tests: 5 files, 174 passed. Python readers of the migrations (run from `analytics-service/`, no cache or bytecode written): `test_compute_job_metadata_merge_parity`, `_privilege`, `test_ledger_refresh_gates`, `_publish_guard`, `_kind_scope_drift`, `_reuse_collision`, `test_trade_read_resume`, `test_compute_jobs_fencing`: 186 passed, 28 skipped (live-database cases).
+- **Docker and processes.** No Docker was started or stopped. Every pg-lane cluster this plan booted was removed by the lane's own exit trap. Two `postgres -D /tmp/.../pgd` processes seen in `ps` (under `oaoc-` and `acs-` temp directories) predate this session and were left alone.
 
 ## Hand-over
 
