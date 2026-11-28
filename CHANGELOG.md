@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.133.113.0] - 2026-11-28 — Phase 260 CIHEADROOM: ci.yml back under GitHub's workflow file size limit, and a size gate outside ci.yml
+
+A CI-only phase. Measured by the Phase 243 agent on 2026-11-27: `ci.yml` was 511,509 bytes on main, and PR #1405 at 512,355 bytes got a CI run that failed at startup with zero jobs ("workflow file issue") on two pushes, while 511,664 bytes started normally. GitHub documents the limit as "500 KB or smaller to trigger a run", which matches 512,000 bytes. Any PR that grew `ci.yml` by about 300 bytes silently got no CI run, and the board then showed only the non-CI checks (the CLAUDE.md "count the checks" trap).
+
+### Changed
+- `.github/workflows/ci.yml`: 511,664 → 406,613 bytes, 105,387 under the hard limit and 54,187 under the new gate's ceiling. 24 YAML-level comment blocks of 2,000 bytes or more (comment-only lines outside any `run:` block, in 10 jobs, 106,368 bytes, 1,458 lines) move verbatim to the new `docs/ci-yml-notes.md`, one `##` section per job, each block under an anchor that names the job and the key or step it preceded. `ci.yml` keeps one `# Rationale: docs/ci-yml-notes.md#<anchor>` pointer where each block stood. Shell comments inside `run:` bodies did not move (the `sql-tests` ARMS_FLOOR derivation table among them), and the `frontend` aggregator job was not touched.
+- No executed YAML changed: the old and new `ci.yml` parse to deep-equal objects (25 jobs, 201 steps), so every job name, step name, `needs:` edge and `run:` body, and the `frontend` aggregator's `needs:` list and result loop, are identical. The old file rebuilds byte for byte from the new one plus the doc.
+- `CLAUDE.md` ("`ci.yml` carries the derivation") and `docs/runbooks/shared-test-db-mutex.md` ("`ci.yml` records that at length") now also name the moved notes.
+- ⛔ Deviation, recorded in `260-CONTEXT.md` and ROADMAP SC-1: the first draft moved the two largest `run:` bodies into scripts. The main session directed the comment move instead, after measuring that removing every YAML-level comment fails none of the tests that read `ci.yml`, while the script move broke about 70 tests in 6 files.
+
+### Added
+- `scripts/check-workflow-size.mjs`: fails when any `.github/workflows/*.yml` or `*.yaml` regular file is strictly above `CEILING` (460,800 bytes, 90 percent of `HARD_LIMIT` 512,000). It prints every file's size and its headroom to both. There is no warning tier. An empty match, an unreadable directory or an unknown flag exits 1. `--self-test` proves a 460,801-byte file goes red and a 460,800-byte file goes green.
+- `.github/workflows/workflow-size.yml` (job `workflow-size`) runs the self-test and then the scan on every pull request to main, every push to main and on dispatch. It has no paths filter, `contents: read`, pinned actions and `persist-credentials: false`. It lives outside `ci.yml` on purpose, so it still fires when `ci.yml` is the oversized file. Run against the old tree it exits 1 with one `::error` naming `ci.yml`.
+
+### Tests
+- `src/__tests__/workflow-size-gate.test.ts`: the gate's verdicts as subprocesses at the exact boundary; the wiring (separate from `ci.yml`, the whole `on:` block shape so a `types:`, `branches:` or `branches-ignore:` narrowing goes red, no paths filter, self-test before the scan); the default scan measures every file in `.github/workflows`; `ci.yml` headroom; and every pointer in `ci.yml` resolves to exactly one anchor in the doc. Each arm was neutered, seen RED, restored from a byte backup and seen GREEN.
+- `src/__tests__/critical-regressions.test.ts`: `workflow-size.yml` joins the exact list of PR/push-triggered workflows.
+
+### Notes
+- Every PR and every main SHA now carries one more check run (`Workflow size`). A red or still-running `workflow-size` on a main SHA blocks that SHA's Railway deploy and makes the next push's predecessor proof run FULL.
+- The merge push of this PR runs one FULL `sql-mutation` pass, because the `changed-paths` and `sql-mutation` job text changed (accepted; a PR touching `ci.yml` already runs FULL).
+- Review: two MEDIUM test-strength findings (WR-01, the trigger shape; SFH-01, the default directory) fixed in one minimal round, re-review clean. Security audit: SECURED, 0 open threats. Verification passed 4/4. No `TODOS.md` entry is opened or closed.
+
 ## [0.133.112.0] - 2026-11-28 — Phase 256 OKXUNITSWITCH PR-2: an OKX account that moved from USDT into BTC is reported in USD up to the switch and in BTC after it, and its frozen derives can end done
 
 The readers and writers that use the `strategy_analytics.unit_segments` column shipped in PR-1 (v0.133.108.0, #1402). That column is applied on PROD, and the baseline re-dump is in (#1406).
