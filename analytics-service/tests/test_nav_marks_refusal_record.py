@@ -103,6 +103,12 @@ class _AedQuery:
     def limit(self, _n: int) -> "_AedQuery":
         return self
 
+    def maybe_single(self) -> "_AedQuery":
+        # Phase 256: an OKX key-mode derive reads its stored ``key_inputs`` row's
+        # ``unit_segments`` (the persisted unit switch) with ``maybe_single``.
+        self._single = True
+        return self
+
     def execute(self) -> _Res:
         db = self._db
         if self._mode == "upsert":
@@ -126,6 +132,8 @@ class _AedQuery:
             for v in matched:
                 del db.rows[(v["allocator_id"], v["kind"])]
             return _Res(matched)
+        if getattr(self, "_single", False):
+            return _Res(matched[0] if matched else None)
         return _Res(matched)
 
 
