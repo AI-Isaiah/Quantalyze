@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.133.114.1] - 2026-11-28 — BASELINE: automated re-dump after the PROD apply of 416a2efb
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46136704462`, after the PROD apply of merge `416a2efb`: sha256 `89693c20…` → `150e7162…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 150 → 151, distinct function names 148 → 149, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127220100_api_keys_insert_fence.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.114.0 → 0.133.114.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=350 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 151 — MATCH 148, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46136704462` succeeded, and this entry was composed and pushed straight to `main` by the `redump-push` job. Run `46136704462` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so the bot does not write it. Every figure above is measured.
+
 ## [0.133.114.0] - 2026-11-28 — Phase 243 DBBACKSTOP PR-C: an api_keys INSERT fence admits only the audited writers
 
 ### Security

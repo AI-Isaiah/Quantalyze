@@ -4851,6 +4851,28 @@ COMMENT ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() IS 'P
 
 
 
+CREATE OR REPLACE FUNCTION "public"."enforce_api_keys_insert_writer_fence"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO 'pg_catalog', 'public'
+    AS $$
+BEGIN
+  IF current_user IN ('postgres', 'supabase_admin') THEN
+    RETURN NEW;
+  END IF;
+
+  RAISE EXCEPTION 'api_keys: INSERT refused for role %: only the audited writer functions may insert (DBACC-02)', current_user
+    USING ERRCODE = 'insufficient_privilege';
+END
+$$;
+
+
+ALTER FUNCTION "public"."enforce_api_keys_insert_writer_fence"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."enforce_api_keys_insert_writer_fence"() IS 'Phase 243 DBACC-02. The api_keys insert fence: passes the row only when current_user IN (postgres, supabase_admin), otherwise raises 42501 naming the role. SECURITY INVOKER ON PURPOSE (inside a DEFINER body current_user is the owner and the fence would admit everyone). An ALLOW-LIST, deny by default. Never a GUC (20260515114310 removed that shape as forgeable). Not an inserter: its body writes no api_keys row.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."enforce_api_keys_published_composite_integrity"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
@@ -17456,6 +17478,14 @@ COMMENT ON TRIGGER "api_keys_account_share_same_owner" ON "public"."api_keys" IS
 
 
 
+CREATE OR REPLACE TRIGGER "api_keys_insert_writer_fence" BEFORE INSERT ON "public"."api_keys" FOR EACH ROW EXECUTE FUNCTION "public"."enforce_api_keys_insert_writer_fence"();
+
+
+
+COMMENT ON TRIGGER "api_keys_insert_writer_fence" ON "public"."api_keys" IS 'Phase 243 DBACC-02 (founder decision 2026-11-26). Refuses an INSERT, ON CONFLICT included, from every role but postgres and supabase_admin. The audited writers (insert_api_key, create_wizard_strategy, add_wizard_composite_key) are postgres-owned SECURITY DEFINER functions, so their inserts pass; a direct service_role, authenticated or anon insert is refused 42501.';
+
+
+
 CREATE OR REPLACE TRIGGER "api_keys_lock_exchange" BEFORE UPDATE OF "exchange" ON "public"."api_keys" FOR EACH ROW EXECUTE FUNCTION "public"."prevent_api_key_venue_change"();
 
 
@@ -19625,6 +19655,11 @@ GRANT ALL ON FUNCTION "public"."enforce_api_key_nav_marks_owner_coherence"() TO 
 
 REVOKE ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."enforce_api_keys_account_share_same_owner"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."enforce_api_keys_insert_writer_fence"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."enforce_api_keys_insert_writer_fence"() TO "service_role";
 
 
 
