@@ -210,7 +210,9 @@ def build_switched_series(
     so S can be older than it. The coin days between S and the window are then NOT rebuilt (their
     P&L is unknown, and zero-return rows would overwrite the stored real ones): the coin segment is
     based on the day before the window and the USD segment, whose P&L lies before it, is not rebuilt
-    either; the stored rows and the carried sidecar points keep those days. A ``split`` day on the
+    either; the stored rows and the carried sidecar points keep those days. The USD side's funding
+    is bounded by the same day (Phase 262): funding older than the window never enters the USD
+    run, the early run or the history verdict. A ``split`` day on the
     wrong side of S raises ``ValueError``.
 
     ``usd_marks`` is the stored realized-basis USD level at the end of each marked day, and
@@ -258,7 +260,13 @@ def build_switched_series(
         day_iso = _funding_iso_day(row.get("timestamp"))
         if day_iso is None:
             continue  # the engine skips an undatable row too; it is in neither segment
+        # Phase 262 D-02: a USD-side funding day older than the bills reach is a day the realized
+        # read never saw, so it must not open the USD run (the whole run, the R2-02 early run and
+        # ``usd_has_history`` all read ``funding_usd_side``: one bound covers all three). Funding ON
+        # the reach day stays, as in the combiner's own ``>=`` rule.
         if day_iso <= last_usd_day:
+            if bills_from_day is not None and day_iso < bills_from_day:
+                continue
             funding_usd_side.append(row)
             continue
         if day_iso <= coin_base_day:
