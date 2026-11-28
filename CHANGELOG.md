@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.133.115.1] - 2026-11-28 — records: Phase 260 CIHEADROOM closed (verification passed)
+
+### Changed
+- Phase 260 records land on `main`: CONTEXT (with the deviation record: the main session directed moving `ci.yml`'s long comments instead of its `run:` bodies), RESEARCH, VALIDATION, the PLAN and SUMMARY (before and after bytes of every workflow file, the lossless-move proof), REVIEW (two MEDIUM test-strength findings fixed, re-review clean), SECURITY (SECURED, 0 open threats) and VERIFICATION (passed 4/4).
+- ROADMAP: Phase 260 booked in v1.23 HARDEN (CI-only, outside the in-flight cap), SC-1 carrying the dated deviation note, ticked complete with its plan and Progress row; STATE records the booking and the close.
+
+### Notes
+- Records only, no code. The code shipped as v0.133.113.0 (#1414); main's CI on the merge commit is green, with the new `Workflow size` check among its 29 check runs. No `TODOS.md` entry is opened or closed.
+
 ## [0.133.115.0] - 2026-11-28 — Phase 252 DERIBITOPTIONS gap plans 09-10: an options composite whose market-price valuation computes headlines on it; otherwise the named withhold stays
 
 ### Added
