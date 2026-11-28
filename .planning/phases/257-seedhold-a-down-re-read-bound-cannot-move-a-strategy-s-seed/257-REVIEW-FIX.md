@@ -86,6 +86,43 @@ parity test are unaffected.
 
 ---
 
+## Round 2 (source: 257-REVIEW-R2.md)
+
+**Fixed at:** 2026-11-28
+**Iteration:** 2
+**Summary:**
+- Findings in scope: 1 (WR-R2-01; IN-R2-01 to IN-R2-05 are Info and never fixed, except the stale text of IN-R2-03 on the lines this fix touches)
+- Fixed: 1
+- Skipped: 0
+
+Verification ran in the phase-257 worktree (`quantalyze-257`, branch `gsd/phase-257-seedhold`), not an isolated temporary worktree and not the main checkout.
+
+### WR-R2-01: The WR-01 reach floor turns one transient hold-read error into a full-reach re-read that never converges
+
+**Files modified:** `analytics-service/services/trade_resume.py`, `analytics-service/services/job_worker.py`, `analytics-service/tests/test_seedhold_bound.py`, `analytics-service/tests/test_okxtrades_cursor.py`
+**Commit:** 235634140 (fixed: requires human verification, logic fix)
+**Applied fix:**
+- `load_strategy_seed_hold` returns `(mark, error, malformed)`. A read error is `(None, err, False)`; a malformed mark is `(None, err, True)`.
+- `run_sync_trades_job`: on a read error (`_hold_err is not None and not _hold_malformed`) it returns `DispatchResult(outcome=FAILED, error_kind="transient", error_message="sync_trades: the seed-hold read failed")`. The return sits where the hold is read, before the provisional bound write and the Phase-1 daily store, inside the existing `try`/`finally` that closes the exchange. Nothing is written before that point. It matches the repo's other transient failure returns (`outcome`, `error_kind="transient"`, a constant `error_message`).
+- The reach-anchor floor from `cf5da34d7` stays for a malformed mark only (the stored one, or the claimed row's own).
+- Stale text reworded (IN-R2-03): the `load_strategy_seed_hold` docstring and its ERROR log (no more "failing OPEN to no hold term"), the `_hold_read_failed` comment, the WR-01 floor comment and the provisional-write-failure comment in `job_worker.py`, and the H5 neuter record in the test module docstring, re-pointed at `_hold_terms.append(_reach_anchor_ms)` with a dated note. H8 (the new early return) is recorded beside it.
+- Tests: `_run_job` in `test_okxtrades_cursor.py` gained `expect_outcome` (default `DONE`, so every other caller is unchanged), because the fixed run ends FAILED. Arm D now asserts the intervening job ends FAILED/transient and that run 2 itself walks at or before run 1's walk start (`_verdict`, the same check as A, B and C). Arm B changes the same way, since it also fails its hold read; both carry a dated `INTENT CHANGE 2026-11-28 (Phase 257 review WR-R2-01)` note. `test_a_failed_hold_read_writes_the_reach_anchor` is adapted to a malformed stored mark (okx and bybit), with the same dated note. New arm `TestSeedHoldMechanism::test_a_hold_read_error_fails_the_attempt_and_moves_nothing` (okx and bybit): one read error on a healthy set-column strategy with a working bound RPC ends FAILED/transient, reads no fills, writes no bound, no seed-hold mark and no daily store, advances no cursor, and the same row's retry seeds at the unblipped seed with no bound left.
+
+**RED/GREEN evidence** (byte backups of the pre-fix and fixed sources in the scratchpad; `cp` back and `cmp` after each):
+- Pre-fix `job_worker.py` and `trade_resume.py` (the committed HEAD versions) copied over the fixed ones: `tests/test_seedhold_bound.py` gave `10 failed, 60 passed, 2 xfailed`. The failures were `HandOff[okx-set-B]`, `[okx-set-D]`, `[okx-first-B]`, `[okx-first-D]` and the four bybit twins (`the job ended DispatchOutcome.DONE, expected DispatchOutcome.FAILED`), and the new arm `[okx]` and `[bybit]`. Restored, `cmp` identical, `70 passed, 2 xfailed`.
+- H8 neuter on the fixed source (`if _hold_err is not None and not _hold_malformed:` becomes `if False:`): the same 10 arms RED. Restored, `cmp` identical.
+- H5 neuter on the fixed source (`_hold_terms.append(_reach_anchor_ms)` becomes `pass`): `5 failed, 65 passed, 2 xfailed`. The failures were `Mech::test_a_failed_hold_read_writes_the_reach_anchor[okx]` and `[bybit]`, and `test_a_malformed_stored_hold_is_ignored[string]`, `[bool]` and `[negative]`. Restored, `cmp` identical.
+- The adapted `test_a_failed_hold_read_writes_the_reach_anchor` is GREEN on the pre-fix source by design (the malformed floor predates this fix); its bite is the H5 neuter above.
+- The reviewer's probes (`test_review257_r2_probe.py`, `test_review257_probe.py`) now fail their blip runs with `the job ended DispatchOutcome.FAILED, expected DispatchOutcome.DONE`: the blip that those probes modelled as a `done` row no longer ends `done`. The no-blip controls still pass.
+
+**Gates** (run in `analytics-service/` after the commit):
+- `python3 -m pytest tests/test_seedhold_bound.py tests/test_nullanchor_bound.py tests/test_binancefills_cursor.py tests/test_okxtrades_cursor.py tests/test_job_worker.py tests/test_sync_trades_store_truth.py tests/test_sync_trades_resume_seed.py -q`: `435 passed, 1 skipped, 2 xfailed`. The 2 xfailed are the `RESIDUAL_DOUBLE_FAULT` arms.
+- `mypy --strict --follow-imports=silent --config-file=pyproject.toml services/ routers/ models/ main.py main_worker.py main_worker_healthz.py sentry_init.py`: `Success: no issues found in 148 source files`.
+
+Not run: SQL gates, vitest, CI. No SQL or migration file changed.
+
+---
+
 _Fixed: 2026-11-28_
 _Fixer: Claude (gsd-code-fixer)_
-_Iteration: 1_
+_Iteration: 2_
