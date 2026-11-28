@@ -2716,6 +2716,7 @@ describe("Critical regression guards", () => {
           `${WORKFLOW_DIR}/mutex-probe.yml`,
           `${WORKFLOW_DIR}/sql-function-snapshot.yml`,
           `${WORKFLOW_DIR}/supabase-migrate.yml`,
+          `${WORKFLOW_DIR}/workflow-size.yml`,
         ]);
       });
       // Parser robustness — synthetic fixtures proving the `on:` classifier
