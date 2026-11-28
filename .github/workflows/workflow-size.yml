@@ -1,0 +1,38 @@
+name: Workflow size
+
+# Phase 260 CIHEADROOM. GitHub starts NO run for a workflow file above 512,000
+# bytes, so a size check inside ci.yml could never fire when ci.yml is the
+# oversized file. This workflow is separate on purpose: it stays small, carries no
+# paths filter (so it is always in a PR's check count) and nothing in ci.yml runs
+# it. The two constants (the hard limit and the 460,800-byte ceiling) live in
+# scripts/check-workflow-size.mjs, which also carries the reasoning.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: workflow-size-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-size:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: 22
+      - name: Self-test - an over-ceiling file goes red and an at-ceiling file goes green
+        run: node scripts/check-workflow-size.mjs --self-test
+      - name: Scan every workflow file against the ceiling
+        run: node scripts/check-workflow-size.mjs

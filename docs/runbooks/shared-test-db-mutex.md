@@ -809,7 +809,7 @@ people's CI writes to — including the apply it is waiting for.
 
 ⛔ **No `needs:` edge was added, and none may be.** The three jobs' `if:`
 conditions diverge and a skipped `needs:` job skips its dependents; `ci.yml`
-records that at length. The ordering IS the wait.
+records that at length; since Phase 260 the text sits verbatim in `docs/ci-yml-notes.md`, sections `test-db-drift-1` and `test-db-drift-3`, behind pointer comments in `ci.yml`. The ordering IS the wait.
 
 It makes two reads per poll — the in-flight FLAG (which is the ONLY signal that
 sees `test-restore-from-baseline.yml`, since a dispatched restore produces no

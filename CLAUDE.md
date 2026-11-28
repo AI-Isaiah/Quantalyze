@@ -383,7 +383,7 @@ the allowlist or relaxing `DETECT_RE`.
 
 **Timeout.** `sql-mutation`'s `timeout-minutes` is **20** — cited BY SYMBOL, not by line: the `sql-mutation:` job key in `.github/workflows/ci.yml` and its own `timeout-minutes:` entry (`grep -n '^  sql-mutation:' .github/workflows/ci.yml`). ⛔ Do not re-introduce line numbers here: this sentence cited `:1259`/`:1069` until 2026-09-11, by which point the job had moved to `:1196` and the timeout to `:1386` — the `[164.7-CITATION-DRIFT-01]` class, whose recorded remedy is to cite by symbol rather than re-number prose that will drift again. It stays there: the rule's one
 permitted raise was taken on 2026-09-05 and 20 is a declared CEILING. A future crossing is
-answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation).
+answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation; since Phase 260, 2026-11-27, its text sits verbatim in `docs/ci-yml-notes.md`, section `sql-mutation-1`, behind a pointer comment on the `sql-mutation` job).
 ⭐ **2026-10-03 (Phase 164.9.6 SUBSETMAIN):** `[REDUNDER-SUBSET-SPLIT]` is now answered by Phase
 164.9.6. A push to `main` mutates a derived subset or nothing, and the full corpus moved to
 `sql-mutation-nightly.yml` under that workflow's own timeout. `sql-mutation`'s 20 stays the
