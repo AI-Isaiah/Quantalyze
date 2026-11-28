@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.133.114.1] - 2026-11-28 — BASELINE: automated re-dump after the PROD apply of 416a2efb
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `46136704462`, after the PROD apply of merge `416a2efb`: sha256 `89693c20…` → `150e7162…`.
+- Shape, old → new: tables 73 → 73, policies 155 → 155, function statements 150 → 151, distinct function names 148 → 149, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261127220100_api_keys_insert_fence.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-11-28` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.133.114.0 → 0.133.114.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=350 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 151 — MATCH 148, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `46136704462` succeeded, and this entry was composed and pushed straight to `main` by the `redump-push` job. Run `46136704462` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so the bot does not write it. Every figure above is measured.
+
+## [0.133.114.0] - 2026-11-28 — Phase 243 DBBACKSTOP PR-C: an api_keys INSERT fence admits only the audited writers
+
+### Security
+- **The `api_keys` INSERT fence (DBACC-02 part (ii), founder decision 2026-11-26).** Migration `20261127220100_api_keys_insert_fence.sql` adds `api_keys_insert_writer_fence`, a BEFORE INSERT row trigger, and its SECURITY INVOKER function `enforce_api_keys_insert_writer_fence()` (pinned `search_path`, EXECUTE revoked from PUBLIC, anon and authenticated). An insert passes only when `current_user IN ('postgres', 'supabase_admin')`, otherwise it raises 42501 naming the role. It is an allow-list (deny by default) and a `current_user` check, never a GUC (mechanism corrected 2026-11-26: migration `20260515114310` removed the GUC shape as forgeable). `INSERT ... ON CONFLICT` is fenced too, because a BEFORE INSERT trigger fires before conflict resolution.
+- Together with PR-A's `user_id` immutability trigger this is the founder's two-part backstop: no client role, service_role and the admin client included, can mint an `api_keys` row except through the three postgres-owned SECURITY DEFINER writers (`insert_api_key`, `create_wizard_strategy`, `add_wizard_composite_key`), migrations and SQL fixtures.
+- Ordering (O-1): PR-B (#1405), which moved the route and every seed to `insert_api_key`, was merged and its Production deployment read `success` before this PR was built. PROD read (marker first): the only functions whose body inserts into `api_keys` are those three writers, all postgres-owned SECURITY DEFINER. The migration's catalogue self-check aborts the apply unless exactly one such trigger exists, BEFORE INSERT ROW (`tgtype = 7`), enabled, INVOKER, with a pinned `search_path` and no anon/authenticated EXECUTE. Manual rollback in `supabase/migrations/down/20261127220100-rollback.sql`.
+
+### Tests
+- `test_api_keys_insert_not_client_writable.sql` grows from 3 to 10 twinned arms: 2s (the fence's shape), 2a (a direct service_role insert refused with the fence's own message, row count unchanged), 2b (`insert_api_key` passes the fence), 2c (an unknown role is refused: deny by default), 2w (the writer set is exactly the three functions, read from comment-stripped `pg_get_functiondef` so BEGIN ATOMIC bodies count), 2w-q (no other spelling of an insert: quoted identifiers, spaces, `MERGE INTO [ONLY]`) and 2w-m (each writer is SECURITY DEFINER and postgres-owned, because an INVOKER or re-owned writer would be refused by the fence and break every connect through it). Arm 6 no longer treats a service_role INSERT grant as required; arm 2b is the INSERT-side positive.
+- `test_api_keys_exchange_not_user_writable.sql`: the 5c scrub-half probe disables the fence around its authenticated insert and a new arm proves it is re-enabled; arm 5 tells the privilege refusal from the fence refusal by message. `test_insert_api_key_rpc.sql` proves the writer passes the fence.
+- Censuses, measured: `ARMS_FLOOR` 1126 -> 1134 (+8 twinned arms), `FILES_FLOOR` 101, `WAIVED_CEILING` 0; `--parse-only` `coverage: files 101/128`, `arms: 0/1134/0`. `ci.yml` is not touched.
+- Generated `supabase/schema/functions/enforce_api_keys_insert_writer_fence.sql`; `scripts/dump-sql-functions.ts` carries one DRIFT-05 `snapshot-only` ratchet row and `scripts/baseline-content-drift-check.mjs` `COMPARED_FLOOR` 150 -> 151. Until the post-apply re-dump, `baseline-content-drift` reports exactly one expected `SNAPSHOT_MISSING enforce_api_keys_insert_writer_fence/0`.
+- Lane runs: the whole `sql-tests` corpus on the local stack reads `files=128 pass=122 fail=0 lane-only=6` both before and after the fence replays; `test:live-db:ledger` failing set equals the standing ledger (7/7), identical to a pre-fence run; the four Python live suites 12 passed with no skip; the api_keys and strategy_analytics gates and the writer, anon and gdpr live files pass under the fence on the 17.6.1.113 image.
+
+### Removed
+- `TODOS.md`: the "ARCHITECTURE DECISION OWED: `api_keys` writes have left the RLS-enforced plane entirely" entry (Phase-160 RLS audit, owned by Phase 243, DBACC-02) is closed and deleted: the database now refuses any insert that is not an audited writer.
+
+### Notes
+- Review: gsd-code-reviewer, silent-failure-hunter, migration-reviewer and rls-policy-auditor. Round 1 found three MEDIUMs, all in the insert gate (arm 6's false outage on the service_role grant, the writers' DEFINER mode and owner unpinned, the writer-set regex missing quoted, MERGE and BEGIN ATOMIC spellings); one fixer round closed them and round 2 is clean on every lane. migration-reviewer and rls-policy-auditor: CLEAN.
+- Recorded, not fixed: on the local-stack image 17.6.1.113, `GRANT <role> TO CURRENT_USER` crashes the backend (signal 11); arm 2c grants by name instead. Whether PROD's image does the same is unmeasured; it sits beside `[164.4.2-PROD-SUPAUTILS-FUNCTION-DENIAL-CRASH]`.
+- Known limits: a postgres-owned SECURITY DEFINER inserter written through dynamic SQL would pass the fence and escape the writer census (recorded in the gate). A future `REVOKE INSERT ... FROM service_role` must re-shape arm 2a, which probes as service_role. `session_replication_role = replica` skips every trigger and only postgres can set it.
+- Pre-existing and not fixed: `src/lib/factsheet/compute.conventions.test.ts` fixtures B and C.
+
+## [0.133.113.0] - 2026-11-28 — Phase 260 CIHEADROOM: ci.yml back under GitHub's workflow file size limit, and a size gate outside ci.yml
+
+A CI-only phase. Measured by the Phase 243 agent on 2026-11-27: `ci.yml` was 511,509 bytes on main, and PR #1405 at 512,355 bytes got a CI run that failed at startup with zero jobs ("workflow file issue") on two pushes, while 511,664 bytes started normally. GitHub documents the limit as "500 KB or smaller to trigger a run", which matches 512,000 bytes. Any PR that grew `ci.yml` by about 300 bytes silently got no CI run, and the board then showed only the non-CI checks (the CLAUDE.md "count the checks" trap).
+
+### Changed
+- `.github/workflows/ci.yml`: 511,664 → 406,613 bytes, 105,387 under the hard limit and 54,187 under the new gate's ceiling. 24 YAML-level comment blocks of 2,000 bytes or more (comment-only lines outside any `run:` block, in 10 jobs, 106,368 bytes, 1,458 lines) move verbatim to the new `docs/ci-yml-notes.md`, one `##` section per job, each block under an anchor that names the job and the key or step it preceded. `ci.yml` keeps one `# Rationale: docs/ci-yml-notes.md#<anchor>` pointer where each block stood. Shell comments inside `run:` bodies did not move (the `sql-tests` ARMS_FLOOR derivation table among them), and the `frontend` aggregator job was not touched.
+- No executed YAML changed: the old and new `ci.yml` parse to deep-equal objects (25 jobs, 201 steps), so every job name, step name, `needs:` edge and `run:` body, and the `frontend` aggregator's `needs:` list and result loop, are identical. The old file rebuilds byte for byte from the new one plus the doc.
+- `CLAUDE.md` ("`ci.yml` carries the derivation") and `docs/runbooks/shared-test-db-mutex.md` ("`ci.yml` records that at length") now also name the moved notes.
+- ⛔ Deviation, recorded in `260-CONTEXT.md` and ROADMAP SC-1: the first draft moved the two largest `run:` bodies into scripts. The main session directed the comment move instead, after measuring that removing every YAML-level comment fails none of the tests that read `ci.yml`, while the script move broke about 70 tests in 6 files.
+
+### Added
+- `scripts/check-workflow-size.mjs`: fails when any `.github/workflows/*.yml` or `*.yaml` regular file is strictly above `CEILING` (460,800 bytes, 90 percent of `HARD_LIMIT` 512,000). It prints every file's size and its headroom to both. There is no warning tier. An empty match, an unreadable directory or an unknown flag exits 1. `--self-test` proves a 460,801-byte file goes red and a 460,800-byte file goes green.
+- `.github/workflows/workflow-size.yml` (job `workflow-size`) runs the self-test and then the scan on every pull request to main, every push to main and on dispatch. It has no paths filter, `contents: read`, pinned actions and `persist-credentials: false`. It lives outside `ci.yml` on purpose, so it still fires when `ci.yml` is the oversized file. Run against the old tree it exits 1 with one `::error` naming `ci.yml`.
+
+### Tests
+- `src/__tests__/workflow-size-gate.test.ts`: the gate's verdicts as subprocesses at the exact boundary; the wiring (separate from `ci.yml`, the whole `on:` block shape so a `types:`, `branches:` or `branches-ignore:` narrowing goes red, no paths filter, self-test before the scan); the default scan measures every file in `.github/workflows`; `ci.yml` headroom; and every pointer in `ci.yml` resolves to exactly one anchor in the doc. Each arm was neutered, seen RED, restored from a byte backup and seen GREEN.
+- `src/__tests__/critical-regressions.test.ts`: `workflow-size.yml` joins the exact list of PR/push-triggered workflows.
+
+### Notes
+- Every PR and every main SHA now carries one more check run (`Workflow size`). A red or still-running `workflow-size` on a main SHA blocks that SHA's Railway deploy and makes the next push's predecessor proof run FULL.
+- The merge push of this PR runs one FULL `sql-mutation` pass, because the `changed-paths` and `sql-mutation` job text changed (accepted; a PR touching `ci.yml` already runs FULL).
+- Review: two MEDIUM test-strength findings (WR-01, the trigger shape; SFH-01, the default directory) fixed in one minimal round, re-review clean. Security audit: SECURED, 0 open threats. Verification passed 4/4. No `TODOS.md` entry is opened or closed.
+
 ## [0.133.112.0] - 2026-11-28 — Phase 256 OKXUNITSWITCH PR-2: an OKX account that moved from USDT into BTC is reported in USD up to the switch and in BTC after it, and its frozen derives can end done
 
 The readers and writers that use the `strategy_analytics.unit_segments` column shipped in PR-1 (v0.133.108.0, #1402). That column is applied on PROD, and the baseline re-dump is in (#1406).

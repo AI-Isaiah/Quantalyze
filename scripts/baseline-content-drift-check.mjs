@@ -406,17 +406,28 @@ export const SNAPSHOT_FILE = "supabase/schema/baseline.sql";
  * then, and any other finding is a defect. Raising this floor records the functions joining the corpus; it
  * does NOT suppress any finding.
  *
- * MOVED 2026-11-28 (Phase 257 SEEDHOLD, plan 02), 150 -> 151: one ADDITION, not a parser gain.
+ * MOVED 2026-11-27 (Phase 243 DBBACKSTOP, plan 10), 150 -> 151: one ADDITION, not a parser gain.
+ * `public.enforce_api_keys_insert_writer_fence()` enters the chain via forward migration
+ * 20261127220100_api_keys_insert_fence.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs` on
+ * this tree: `functions compared 151 - MATCH 147, DRIFT 3, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0,
+ * UNCOMPARABLE 0`, `findings 1`. The one SNAPSHOT_MISSING finding is exactly
+ * `enforce_api_keys_insert_writer_fence/0`, whose migration is not on PROD yet (recorded as a dated
+ * `snapshot-only` row in NAME_SET_RATCHET in scripts/dump-sql-functions.ts). It is EXPECTED until the re-dump
+ * of supabase/schema/baseline.sql taken after PR-C's apply, and NO allowlist row was added for it; the CI
+ * baseline-content-drift step is red with exactly that one finding until then, and any other finding is a
+ * defect. Plan 05's two SNAPSHOT_MISSING findings are already cleared (that re-dump landed as v0.133.105.1).
+ * Raising this floor records the function joining the corpus; it does NOT suppress any finding.
+ * MOVED 2026-11-28 (Phase 257 SEEDHOLD, plan 02, re-based on Phase 243 plan 10), 151 -> 152: one ADDITION, not a parser gain.
  * `public.set_compute_job_seed_hold(uuid, uuid, bigint)` enters the chain via forward migration
  * 20261128120000_compute_job_seed_hold.sql. MEASURED by `node scripts/baseline-content-drift-check.mjs`
- * on this tree: `functions compared 151 - MATCH 147, DRIFT 3, SNAPSHOT_MISSING 1, SNAPSHOT_ONLY 0,
- * UNCOMPARABLE 0`, `findings 1`. The one SNAPSHOT_MISSING finding is `set_compute_job_seed_hold/3`,
+ * on this tree after the merge of origin/main: `functions compared 152 - MATCH 148, DRIFT 3, SNAPSHOT_MISSING 1,
+ * SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `findings 1`. The one SNAPSHOT_MISSING finding is `set_compute_job_seed_hold/3`,
  * whose migration is not on PROD yet (recorded as a dated `snapshot-only` row in NAME_SET_RATCHET in
  * scripts/dump-sql-functions.ts, cleared by the re-dump taken after the apply). It is EXPECTED until
  * that re-dump, and NO allowlist row was added for it; any other finding is a defect. Raising this
  * floor records the function joining the corpus; it does NOT suppress any finding.
  */
-export const COMPARED_FLOOR = 151;
+export const COMPARED_FLOOR = 152;
 export const CHAIN_DIR = "supabase/schema/functions";
 
 /** Statuses that are a FINDING unless a row pins them exactly. */
