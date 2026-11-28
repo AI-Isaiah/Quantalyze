@@ -6,8 +6,8 @@
 - ✅ **v1.20 Backlog Burndown** — Phases 158–191 (shipped 2026-11-06)
 - ✅ **v1.19 JOB/RATE** — Phases 143–146, 146.1, 146.2 (shipped 2026-08-20)
 - ✅ **v1.18 MT5-VERIFY & founder confirmations** — Phases 155, 155.1, 207–220 (shipped 2026-11-23; 155.2's remaining work, 157 and 221–225 moved to v1.22 2026-11-23, then 221 and 224 to v1.23 by F-10, and 155.2 and 157 to v1.23 2026-11-25)
-- 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226–241 (started 2026-11-23)
-- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 242–249, 254, 255, 256, 257, 260 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25)
+- 🚧 **v1.22 TRUTH — data you can trust** — Phases 222, 223, 225, 226, 227, 229, 231–241, 250–253 (started 2026-11-23; 228 and 230 moved to v1.23 2026-11-27)
+- 📋 **v1.23 HARDEN — security, alerting, tooling** — Phases 155.2, 157, 221, 224, 228, 230, 242–249, 254, 255, 256, 257, 260 (planned; starts after v1.22, founder 2026-11-23; 155.2 and 157 moved in from v1.22 2026-11-25, 228 and 230 on 2026-11-27)
 - ✅ **v1.17 MT5 — ingested, wizardable, surfaced** — Phases 147–154, 156 (shipped 2026-08-14)
 - ✅ **v1.16 Production Resilience & Reliability** — Phases 140–142 (shipped 2026-08-14)
 - Earlier milestones: see "Shipped Milestones" below.
@@ -98,9 +98,9 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 ## Current position
 
-🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below.
+🚧 **v1.22 TRUTH — data you can trust — STARTED 2026-11-23, roadmapped.** 22 phases: the carried 222, 223 and 225, the new 226–241, and 250–252 booked later; 10 of them are complete (see the Progress table). ⛔ **CORRECTED 2026-11-25 (founder ruling in chat): 155.2 and 157 moved to v1.23 HARDEN.** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Until then this paragraph read "no new phase started", counted 21 phases with 155.2 and 157 in, and named 226 MT5SOAK (since shipped) as the first phase to plan. The order, the seam owners, the 155.2 freeze window (which still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs) and the milestone-wide rules are in the v1.22 section below. ⛔ **CORRECTED 2026-11-27 (founder ruling in chat): 228 KEYANSWERS and 230 MT5NIGHTLY moved to v1.23 HARDEN.** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". v1.22 now holds 21 phases: 222, 223, 225, 226, 227, 229, 231–241 and 250–253. 20 of them have verification `passed`, and the one still open is 252 DERIBITOPTIONS. The ruling's second half (close v1.22 after 252, then start v1.23) is not done by this move. Until this correction the paragraph counted 22 phases with 10 complete, which was stale before the move.
 
-📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"), and 257 SEEDHOLD the same day (founder: "Fix both in a follow-up (Recommended)"). 260 CIHEADROOM, a CI-only phase, was booked into it the same day from Phase 243's measurement that `ci.yml` had reached GitHub's workflow file size limit. Its section follows v1.22's.
+📋 **v1.23 HARDEN — security, alerting, tooling** is planned and starts after v1.22 closes (founder ruling 2026-11-23, "Yes, split into two milestones"). It holds the carried 221 and 224, the new 242–249, and 155.2 LIVEPARITY and 157 FOUNDER-CONFIRM, moved here from v1.22 on 2026-11-25 (founder: "We will Move 157 and 155.2 into the next milestone"). 254 OPENINGDEPOSIT was booked into it on 2026-11-26 (founder: "Exempt it, book for v1.23"), and 255 NULLANCHOR the same day (founder: "Keep it on, fix records"). 256 OKXUNITSWITCH was booked into it on 2026-11-27 (founder: "USD before 11-15, BTC after"), and 257 SEEDHOLD the same day (founder: "Fix both in a follow-up (Recommended)"). 260 CIHEADROOM, a CI-only phase, was booked into it the same day from Phase 243's measurement that `ci.yml` had reached GitHub's workflow file size limit. 228 KEYANSWERS and 230 MT5NIGHTLY moved here from v1.22 on 2026-11-27 (founder: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"). Its section follows v1.22's.
 
 ⛔ **Do not advertise MT5 until Phase 155.2 passes.** Carried from v1.17 and v1.18 and unchanged by the close. No surface, copy or badge advertises MT5 or calls it verified before 155.2 passes (`milestones/v1.18-REQUIREMENTS.md` Out of Scope).
 
@@ -110,16 +110,18 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 ## 🚧 Current Milestone: v1.22 TRUTH — data you can trust
 
-**Goal:** Every number, label and alert we show is correct, or it fails loudly. Started 2026-11-23. Requirements: [`REQUIREMENTS.md`](REQUIREMENTS.md), 71 for v1.22 and 45 planned for v1.23 (116 in all; 155.2's and 157's 10 moved to v1.23 on 2026-11-25), bound by founder decisions F-1..F-10 and the D-A..D-E carry. Research: [`research/v1.22/`](research/v1.22/SUMMARY.md). The top-level `research/SUMMARY.md` is v1.18's and stale.
+**Goal:** Every number, label and alert we show is correct, or it fails loudly. Started 2026-11-23. Requirements: [`REQUIREMENTS.md`](REQUIREMENTS.md), 67 for v1.22 and 49 planned for v1.23 (116 in all; 155.2's and 157's 10 moved to v1.23 on 2026-11-25, and 228's and 230's 4 on 2026-11-27), bound by founder decisions F-1..F-10 and the D-A..D-E carry. Research: [`research/v1.22/`](research/v1.22/SUMMARY.md). The top-level `research/SUMMARY.md` is v1.18's and stale.
 
 **Founder ruling 2026-11-23, "Yes, split into two milestones" (F-10).** v1.22 keeps the data-integrity and user-facing tiers. v1.23 HARDEN takes security, alerting and tooling, in the section after this one. ⭐ **One exception:** SECR-01 and SECR-02 stay in v1.22 as Phase 241 DEMOCREDS: deleting the two demo accounts and removing their committed passwords (`158-OPS-03`). They stay because `158-OPS-03` is the only HIGH item in scope. SECR-03/04 go to v1.23. The carried 221 SENTRYSCRUB2 and 224 DEADLEFTOVERS moved to v1.23 with their tiers. 155.2 and 157 came from v1.18 by founder rulings on 2026-11-23 ("Move to next milestone: Your broker statements for 155.2, then its Gate B run and final verification."; "delay 157 into next milestone. Cannot do that now"), and 221–225 were moved the same day ("Move them too (Recommended)").
 
 ⭐ **155.2 and 157 moved to v1.23 HARDEN, 2026-11-25 (founder ruling in chat; recorded here, in v1.23's section, in `155.2-CONTEXT.md` and `157-CONTEXT.md`, and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Their phase sections and Progress rows moved to v1.23's section, unchanged apart from a dated note, and their requirements (MT5-07..10, MT5-15 and MT5-GOAL-01 on 155.2; FCONF-01..04 on 157) are mapped to v1.23. v1.22 now holds 22 phases. Two rules do not move with them: the 155.2 freeze window below still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs, and MT5 stays unadvertised until 155.2 passes.
 
+⭐ **228 and 230 moved to v1.23 HARDEN, 2026-11-27 (founder ruling in chat; recorded here, in v1.23's section, in `228-CONTEXT.md` and `230-CONTEXT.md`, and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". Their phase sections and Progress rows moved to v1.23's section, unchanged apart from a dated note each (and 228's stale Progress row and plan ticks, corrected from its SUMMARY files), and their requirements (CONN-02 and CONN-04 on 228; MT5D-02 and MT5D-03 on 230) are mapped to v1.23. Both phases have shipped, and both keep their open human items: 228's live MT5 reconnect with a changed investor password, and 230's seven clean nights and the coordinator's capture and replay. v1.22 now holds 21 phases. The ruling's second half, closing v1.22 once 252 closes and then starting v1.23, is not done by this move. 230's conditional place in the 155.2 freeze window below is unchanged.
+
 **Order** (founder F-1: data integrity, then user-facing, then security). Within a tier, the order follows the research's seams and waves (`research/v1.22/ARCHITECTURE.md` § Suggested build order). Real dependencies are in each phase's Depends-on line. The rest is priority, and phases without a shared seam may run in parallel.
 
 1. **Wave 0, now and in parallel:** 226 MT5SOAK, the independent MT5 oracle, which lands before any `nav_twr.py` edit. Beside it runs the read-only Deribit diagnosis, a `/gsd-debug` session and not a phase: it owns no requirement and writes nothing. Its verdict is what 233 DERIBITTRUTH plans FRESH-01 from.
-2. **Data integrity:** 227 JOBLEDGER (S3) → 225 ONEACCOUNTONCE (S4) → 228 KEYANSWERS (its sibling, right after it) → 229 MT5DERIVE2 → 230 MT5NIGHTLY (once 227's records hold real nights) → the venue reads 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH (after 229) → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH (after 225) → 236 FIGUREMATH.
+2. **Data integrity:** 227 JOBLEDGER (S3) → 225 ONEACCOUNTONCE (S4) → 228 KEYANSWERS (its sibling, right after it) → 229 MT5DERIVE2 → 230 MT5NIGHTLY (once 227's records hold real nights) → the venue reads 231 BYBITREADS ‖ 232 OKXTRADES ‖ 223 FLOWKINDS → 233 DERIBITTRUTH (after 229) → 234 NOCAPITAL ‖ 235 HOLDINGSTRUTH (after 225) → 236 FIGUREMATH. ⭐ 2026-11-27: 228 and 230 moved to v1.23 HARDEN (founder: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"); this item is kept as lineage.
 3. **User-facing:** 237 FACTSHEETHONEST → 238 NEVERCOMPUTED ‖ 239 SURFACECACHE ‖ 240 CONNECTTRUTH ‖ 222 ALERTTRUTH.
 4. **Security, by exception:** 241 DEMOCREDS. It shares no seam with any phase, so the founder may pull it forward without a conflict.
 5. **Outside the order:** 155.2, which runs statements → plan 11 → plan 12's recapture → plans 13 and 14, under the freeze window below. 157 runs in the same founder sitting, and its password rotation comes after 155.2's last live read. ⭐ 2026-11-25: both moved to v1.23 HARDEN (founder: "We will Move 157 and 155.2 into the next milestone"); this item is kept as lineage, and v1.23's Order carries it now.
@@ -128,10 +130,10 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 
 | Seam | Owner | Also touched, strictly after the owner |
 |---|---|---|
-| S1 Derive writer: `run_derive_broker_dailies_job` and its key-mode exits, `_native_key_usd_writer_basis`, `nav_twr.py` | 229 MT5DERIVE2 | 230 (if its fix lands here), 233 (the key-mode exits), v1.23's 155.2 (its fixes; moved 2026-11-25) |
+| S1 Derive writer: `run_derive_broker_dailies_job` and its key-mode exits, `_native_key_usd_writer_basis`, `nav_twr.py` | 229 MT5DERIVE2 | 230 (if its fix lands here; v1.23's since 2026-11-27), 233 (the key-mode exits), v1.23's 155.2 (its fixes; moved 2026-11-25) |
 | S2 Compose reader: `run_derive_allocator_equity_job`'s no-capital machinery, `allocator_equity_derive.py`, `equity_reconstruction.py` | 234 NOCAPITAL | 229 edits `read_writer_basis` first, because the writer and reader of one contract change together (HOLD-03); 233 if `out_of_window_flow` gets a named reason |
-| S3 Job lifecycle: the claim, reset, reclaim and mark-failed RPCs, the dropped-enqueue sweep, `enqueue_poll_positions_for_all_strategies`, `main_worker.py` | 227 JOBLEDGER | 230 (if the second-attempt cause lands here); v1.23's 224 |
-| S4 Account identity: `create-with-key/route.ts`, `account_identity.py`, `api_keys.venue_account_id` | 225 ONEACCOUNTONCE | 228 (right after 225), 235 (reads); v1.23's 243 (DBACC-02) |
+| S3 Job lifecycle: the claim, reset, reclaim and mark-failed RPCs, the dropped-enqueue sweep, `enqueue_poll_positions_for_all_strategies`, `main_worker.py` | 227 JOBLEDGER | 230 (if the second-attempt cause lands here; v1.23's since 2026-11-27); v1.23's 224 |
+| S4 Account identity: `create-with-key/route.ts`, `account_identity.py`, `api_keys.venue_account_id` | 225 ONEACCOUNTONCE | 228 (right after 225; v1.23's since 2026-11-27), 235 (reads); v1.23's 243 (DBACC-02) |
 | S5 Ops-alert SQL: `ops_staleness_check()`, `cron_sync_tick()` | none in v1.22, unless 233 puts FRESH-02 there | v1.23's 242, then 246, each re-based on whichever S5 migration merged last |
 
 **Milestone-wide rules** (every phase's criteria rely on them):
@@ -153,6 +155,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
   - Each of these phases records which side of the window it merged on.
   - Research schedules plan 12's recapture after 225 and 229 deploy, so their fixes are inside the verdict.
   - ⭐ **2026-11-25: 155.2 is now in v1.23 HARDEN** (founder ruling in chat: "We will Move 157 and 155.2 into the next milestone"). The rule is unchanged, and it still binds the v1.22 phases above until 155.2 plan 12's recapture actually runs. The move neither opens nor closes the window. The plan counts above are 155.2's as of the move.
+  - ⭐ **2026-11-27: 230 is in v1.23 HARDEN too** (founder ruling in chat: "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one"). Its conditional binding above is unchanged: if its fix or replay moves those numbers, it still merges on one side of the window.
 - **TODOS closure.** Each phase deletes the `TODOS.md` entries its requirements close (the `(covers: …)` ids in `REQUIREMENTS.md`) in its ship PR, and names them in the CHANGELOG entry (CLAUDE.md, rule b).
 - **Founder rulings at plan time** are taken in discuss-phase. Each requirement that needs one says so, and is written so that it can be met either way.
 - ⛔ **MT5 stays unadvertised until 155.2 passes.** The repo is public: account labels only.
@@ -164,9 +167,7 @@ Full detail: [`milestones/v1.16-ROADMAP.md`](milestones/v1.16-ROADMAP.md).
 - [x] **Phase 225: ONEACCOUNTONCE — a user cannot connect the same exchange account more than once, and one account shared across users stays allowed** - Per-owner duplicate account refusal; shared keys across users stay allowed; founder decision 2026-11-23; also the seam S4 owner: server-qualified MT5 identity, the draft-clash answer, the failing-holder rule (completed 2026-11-27)
 - [x] **Phase 226: MT5SOAK — the MT5 soak checks what it claims, independently of the code it checks** - Wave 0: BTC-unit floors, NaN and implausible timed days, an independent per-day attribution walk; lands before any nav_twr.py edit (completed 2026-11-24)
 - [x] **Phase 227: JOBLEDGER — a failed job attempt keeps its cause, and no strategy is stranded by a dropped, reset or reclaimed job** - Seam S3 owner: per-attempt failure record, first-hop drop, batch-mate reset, readmit ceiling signal, reclaim provenance, private strategies polled; migrations (completed 2026-11-24)
-- [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
 - [x] **Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently** - nav_twr.py empty-cohort refund, day-0 P&L and the D-15 band, basis-silent keys, writer-basis values; moves MT5 numbers (155.2 freeze) (completed 2026-11-25)
-- [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
 - [x] **Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name** - Census first; all-coin anchor, USDC and inverse positions, full trade window, on-chain deposit verdict; the static egress IP is a founder action (completed 2026-11-25)
 - [x] **Phase 232: OKXTRADES — an OKX read converts or refuses a non-USDT bill, completes a long window and never runs ahead of stored trades** - Mixed-currency daily bills, page-cap truncation, the trade cursor (completed 2026-11-24)
 - [x] **Phase 233: DERIBITTRUTH — a Deribit key's returns reach its newest flow, every book day is explained or withheld, and stale series page on every venue** - From the wave-0 diagnosis: stale-returns root fix, per-venue freshness check, correction classifier, book cumulative (completed 2026-11-26)
@@ -379,32 +380,6 @@ Plans:
 **Wave 5** *(blocked on Wave 4 completion)*
 - [x] 227-11-PLAN.md — The migrations-schedule-nothing census, the operator runbook, the validation map and the ship records
 
-### Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key
-
-**Goal:** A reconnect with a rotated or mistyped MT5 password and an orphaned key each get an answer that names the key and matches what was stored; these are the two remaining answers of `create-with-key/route.ts`.
-- **Rotated or mistyped password.** Reconnecting an MT5 account with a rotated or mistyped password gets a named answer that matches what was stored. Today `resolveByVenueIdentity` short-circuits on `venue_account_id` before `validateKey`, so the reconnect reports success and stores nothing. Validating and storing the new password, or refusing by name, is a founder ruling at plan time.
-- **Orphaned key.** The `KEY_ORPHANED` copy tells an allocator-role owner which key to Disconnect; `keyOrphanedResponse()` takes no parameters today. The archived-composite case is out (F-2).
-
-This phase is 225's sibling on seam S4, ordered right after it. 225 kept the identity members that must ship with its refusal; nine requirements would not fit one phase's criteria (see 225).
-**Requirements**: CONN-02, CONN-04
-**Depends on:** Phase 225 merged. The same file and seam are involved: `resolveByVenueIdentity` and `keyOrphanedResponse`. Founder ruling at plan time on CONN-02.
-**Founder ruling (2026-11-26, CONN-02):** "Validate and update in place". On the MT5 same-account arms, a reconnect with a new password is validated, and on success the stored key's secret is rotated through the rotate-secret seam and the answer names the key. The founder accepted the trade-off: the up-to-120 s validation returns on those arms, which reverses 212-03 SC5 for MT5, and a connect request now changes an existing key. Recorded in `228-CONTEXT.md`.
-**Success Criteria** (what must be TRUE):
-1. Reconnecting an MT5 account with a rotated password gets a named answer, and what the answer says matches what `api_keys` holds afterwards. A mistyped password is never reported as success. (CONN-02)
-2. An allocator-role owner who hits `KEY_ORPHANED` is told, by name, which key to Disconnect; a test drives the allocator and manager roles. (CONN-04)
-3. PROOF-01: each test goes RED on a neutered copy of the route arm it guards, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
-**Plans:** 4 plans
-**UI hint**: yes
-
-Plans:
-**Wave 1**
-- [ ] 228-01-PLAN.md — The rotate seam reports `secret_changed` (probe-then-compare, UTF-8 constant-time), and its seam call (`rotateKeySecret`) and owner-scoped persist (`persistRotatedMt5Secret`) are shared, with rotate-secret byte-identical (CONN-02)
-- [ ] 228-02-PLAN.md — The connect step renders the password outcome notice from `key_secret`, the F6 fallback strip stops claiming the credentials are connected, and KEY_ORPHANED's Disconnect bullet names the key (CONN-02, CONN-04)
-- [ ] 228-04-PLAN.md — The seam-budget census declares the create-with-key `mt5-rotate` branch and pins that it fits the browser deadline (CONN-02)
-
-**Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 228-03-PLAN.md — An MT5 reconnect whose fence picks the caller's own working holder on the exact server is validated and rotated in place and named; failures write nothing; KEY_ORPHANED is the same named answer for every role (CONN-02, CONN-04)
-
 ### Phase 229: MT5DERIVE2 — an MT5 key's return chain keeps every day it should, and a key with no writer basis never composes silently
 
 **Goal:** An MT5 key's return chain keeps every day it should, and a timed key with no writer basis never composes silently: the seam-S1 money-math gaps are fixed at their root, which moves published MT5 returns.
@@ -437,34 +412,6 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 229-06-PLAN.md — Phase gate on the merged head, PROOF-01 ledger, and the founder's live soak recorded as verdict lines (closing)
-
-### Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason
-
-**Goal:** Once 227's per-attempt record holds real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root. Then, over seven consecutive nights, every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause (`202-MT5-CLOCK-LEAD-01`). This phase is data-gated: its fix cannot be planned before the records exist. The suspected cause is a lease heartbeat shared with HEAL-02, a hypothesis and not a finding. It may land in S3 or S1, and wherever it lands it re-bases on that seam owner's merged bodies.
-**Requirements**: MT5D-02, MT5D-03
-**Depends on:** Phase 227 deployed, with its per-attempt record holding real nightly MT5 runs (the number of nights is set at plan time from the data); 229 must be merged first if the fix lands in S1. 155.2 freeze, conditional: if the fix or the replay's outcome changes stored values for MM2, MM3 or FX-AI_V, it merges before 155.2 plan 12's recapture or after plan 14, never in between. Research first: read the records. ⭐ 2026-11-25: 155.2 moved to v1.23 HARDEN; this freeze rule still holds until 155.2 plan 12's recapture actually runs (see the milestone-wide rule).
-- 2026-11-25, research (`230-DISCUSSION-LOG.md`): the named cause is cross-process contention for the one shared MT5 terminal. The backfill worker's nightly derive and the API process's `poll_allocator_positions` log it into different accounts at once, and the MT5CONC-02 login bracket refuses the read. The HEAL-02 hypothesis is refuted.
-- 2026-11-25, founder rulings (AskUserQuestion, relayed by the coordinator, verbatim in `230-CONTEXT.md`). D-01: "Database lease (Recommended)", option text: "One lease row per terminal in the database (with an expiry and an owner token), taken by every MT5 terminal user: derive, holdings poll, balance sync, key validation. A caller that finds it busy waits or gets the existing 'terminal busy' answer. The runbook already calls for this. It needs a small migration and changes no stored values." D-02: "I run it (Recommended)": the coordinator runs the read-only ledger capture on the Railway worker outside 00:40 to 01:40 UTC and replays it with `mt5offset_dry_run`, counts only in records. The seven clean nights count from the lease fix's deploy.
-- 2026-11-26, review rounds 1-2 (`230-REVIEW.md`, recorded in `230-CONTEXT.md`): the heal and liveness arms now catch lease-unavailable ahead of busy (SF-M1), and a missing renew RPC mid-hold now self-fences at the loss deadline instead of ending the renew loop (SF-M4, superseding plan 04's "renew stops without bumping the epoch").
-- 2026-11-26, shipped as v0.133.91.0 (#1358). The migration was re-stamped at ship to `20261126140000_mt5_terminal_lease.sql`, so it sorts after 238's `20261126130000`. `supabase-migrate.yml` run 45807605366 applied it to TEST and PROD, and the baseline re-dump is v0.133.91.1 (#1365). The status stays `human_needed`: plan 09 needs seven clean nights counted from the first 00:40Z derive after both services carry the lease, and plan 10 needs the coordinator's capture and replay. Neither plan has a SUMMARY yet.
-**Success Criteria** (what must be TRUE):
-1. The cause of MT5 second attempts is named from 227's per-attempt records over real nights before any fix is planned, and the fix lands at that cause.
-2. After the fix, seven consecutive nights show every MT5 derive `done` with `attempts=1`, read from stored job rows and recorded with their dates. No retry budget or watchdog threshold was raised. (MT5D-02)
-3. Each MT5 derive value that moved without explanation is replayed under both server-clock settings and attributed to the clock switch or to another named cause. The repo's record of the setting alone is not a replay. (MT5D-03)
-4. PROOF-01: a test that drives the named cause goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
-**Plans:** 8/10 plans executed
-
-Plans:
-- [x] 230-01-PLAN.md — the terminal lease table and its three token-fenced RPCs, proven on the pg-lane (MT5D-02)
-- [x] 230-02-PLAN.md — mt5_terminal_lease takes the database lease; two processes never share the terminal, PROOF-01 on production code (MT5D-02)
-- [x] 230-03-PLAN.md — the dry run's --days-out flag and the clock-replay runbook with the capture contract (MT5D-03)
-- [x] 230-04-PLAN.md — a missing lease RPC degrades loudly, every other database error fails closed (MT5D-02)
-- [x] 230-05-PLAN.md — the transient classify arm, the holdings sync-error arm and the two validate arms (MT5D-02)
-- [x] 230-06-PLAN.md — the SQL, function and gate-file censuses moved to measured values (MT5D-02)
-- [x] 230-07-PLAN.md — [BLOCKING] the migration on the local-stack lane, the live PostgREST test, every suite green (MT5D-02)
-- [x] 230-08-PLAN.md — re-stamp rehearsal, the lease runbook, the corrected single-replica note, ship records (MT5D-02, MT5D-03)
-- [ ] 230-09-PLAN.md — the nightly evidence proven on the lane, then seven nights after both deploys (MT5D-02, human-gated)
-- [ ] 230-10-PLAN.md — the capture hand-off proven offline, then the coordinator's replay and the per-scope attribution (MT5D-03, human-gated)
 
 ### Phase 231: BYBITREADS — a Bybit read covers every coin, settle type, window and deposit exactly once, or refuses by name
 
@@ -953,9 +900,7 @@ Plans:
 | 225. ONEACCOUNTONCE | 21/21 | Complete (PR-1 #1315, PR-2 #1324, PR-2b-1, PR-2b-2, PR-2c0, PR-2c #1344, PR-3 #1368 and plan 21 #1374 shipped; plan 18 founder control passed 2026-11-26; plan 21 post-deploy poll read PASSED 2026-11-27; verification passed) | 2026-11-27 |
 | 226. MT5SOAK | 5/5 | Complete (shipped v0.133.64.0, #1319) | 2026-11-24 |
 | 227. JOBLEDGER | 11/11 | Complete (shipped v0.133.67.0, #1325; HEAL-01 sweep registered on PROD) | 2026-11-24 |
-| 228. KEYANSWERS | 0/? | Not started | - |
 | 229. MT5DERIVE2 | 6/6 | Complete (shipped v0.133.69.0, #1328; founder's live soak exit 0 and the 155.2 freeze check recorded 2026-11-25) | 2026-11-25 |
-| 230. MT5NIGHTLY | 8/10 | Shipped v0.133.91.0 (#1358; migration 20261126140000 applied to TEST and PROD in supabase-migrate run 45807605366); verification human_needed (plan 09: seven clean nights after both services carry the lease; plan 10: the coordinator's capture and replay) | - |
 | 231. BYBITREADS | 6/6 | Complete (plans 01-05 shipped v0.133.61.6 #1314 and v0.133.65.0 #1321; plan 06 shipped v0.133.73.0 #1333 after Phase 229) | 2026-11-25 |
 | 232. OKXTRADES | 4/4 | Complete (shipped v0.133.70.0, #1330) | 2026-11-24 |
 | 233. DERIBITTRUTH | 7/7 | Complete (shipped v0.133.83.0, #1360; verification passed 5/5; book B's out_of_window_flow handed to Phase 234) | 2026-11-26 |
@@ -978,6 +923,8 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 
 ⭐ **155.2 LIVEPARITY and 157 FOUNDER-CONFIRM moved here from v1.22, 2026-11-25 (founder ruling in chat; recorded here, in v1.22's section, in each phase's CONTEXT.md and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-25): "We will Move 157 and 155.2 into the next milestone". Their sections and Progress rows are below, unchanged apart from a dated note. Their 10 requirements (MT5-07..10, MT5-15, MT5-GOAL-01, FCONF-01..04) are mapped to v1.23 in `REQUIREMENTS.md`'s traceability table, which makes 45 for v1.23. Their text stays under its "Carried" headings in `REQUIREMENTS.md`'s v1.22 part, with a dated pointer. Both phases are in progress. The ruling names only the milestone. Nothing else was ruled on, and the earlier records stand. v1.22's 155.2 freeze window still binds v1.22's number-moving phases until 155.2 plan 12's recapture actually runs. The milestone starts with `/gsd-new-milestone` after v1.22 closes, when its requirements and these sections are re-read. PROOF-01, the migration lane and the TODOS closure rule from v1.22 apply unchanged.
 
+⭐ **228 KEYANSWERS and 230 MT5NIGHTLY moved here from v1.22, 2026-11-27 (founder ruling in chat; recorded here, in v1.22's section, in each phase's CONTEXT.md and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". Their sections and Progress rows are below, unchanged apart from a dated note each. Their 4 requirements (CONN-02, CONN-04, MT5D-02, MT5D-03) are mapped to v1.23 in `REQUIREMENTS.md`'s traceability table, which makes 49 for v1.23. Their text stays under its v1.22 headings in `REQUIREMENTS.md`, with a dated pointer. Both have shipped and wait only on their human items.
+
 **Order** (founder F-1, then the research's waves):
 1. **Security:** 242 SECRETSHYGIENE (its S5 narrowing is the first S5 migration), 243 DBBACKSTOP, 244 ACCESSGUARDS and 221 SENTRYSCRUB2.
 2. **The rest:** 245 ALERTPAGE; 246 ALERTREADERS, after 242's S5 migration; 247 SENTRYHELD, after 221; 224 DEADLEFTOVERS; 248 SQLGATES2; 249 TESTLANES.
@@ -989,6 +936,8 @@ Planned by founder ruling 2026-11-23, "Yes, split into two milestones" (F-10 in 
 - [ ] **Phase 157: FOUNDER-CONFIRM — the observations only the founder can make are made** - Wizard resume, the amber recomputing block and the four 153.7 copy members seen in a real wizard; the spike password rotated after the live reads and gate 1 re-checked; same sitting as the 155.2 session
 - [ ] **Phase 221: SENTRYSCRUB2 — no Sentry event carries PostgREST details or hint from any capture site, and browser captures actually report** - Sentry scrub at the last hop for direct capture sites, then client Sentry init; independent of the MT5 parity phases
 - [ ] **Phase 224: DEADLEFTOVERS — dead SQL, retired job kinds still enqueued and inert plumbing are retired** - Dead SQL, the retired compute_analytics enqueue and kind rows, and inert plumbing, with a migration; the poll_positions enqueue stays live (F-8)
+- [ ] **Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key** - Sibling of 225 on seam S4, right after it: the rotated MT5 password reconnect and the KEY_ORPHANED copy for allocators
+- [ ] **Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason** - Data-gated on the JOBLEDGER records: the second-attempt cause fixed at its root, seven clean nights, the clock-switch replay
 - [x] **Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts** - Scheduled full-history scan; the S5 wildcard closed in both cron functions, first of the S5 migrations
 - [x] **Phase 243: DBBACKSTOP — anon reads only named metric keys, an api_keys write must belong to its caller, and a client role cannot hold a table lock** - Database-level backstops by migration; the lock timeout measured on TEST first
 - [x] **Phase 244: ACCESSGUARDS — an owner read without its key id fails to compile, every route writes its audit row, and the watchlist RLS runs in CI** - Application and CI guards, no migration expected
@@ -1113,6 +1062,66 @@ Trigger: founder decisions 2026-11-23, "Book phases: SENTRYSCRUB2, ALERTTRUTH, F
 
 Plans:
 - [ ] TBD — plans not listed yet
+
+### Phase 228: KEYANSWERS — a reconnect with a changed password and an orphaned key each get an answer that names the key
+
+**Goal:** A reconnect with a rotated or mistyped MT5 password and an orphaned key each get an answer that names the key and matches what was stored; these are the two remaining answers of `create-with-key/route.ts`.
+- **Rotated or mistyped password.** Reconnecting an MT5 account with a rotated or mistyped password gets a named answer that matches what was stored. Today `resolveByVenueIdentity` short-circuits on `venue_account_id` before `validateKey`, so the reconnect reports success and stores nothing. Validating and storing the new password, or refusing by name, is a founder ruling at plan time.
+- **Orphaned key.** The `KEY_ORPHANED` copy tells an allocator-role owner which key to Disconnect; `keyOrphanedResponse()` takes no parameters today. The archived-composite case is out (F-2).
+
+This phase is 225's sibling on seam S4, ordered right after it. 225 kept the identity members that must ship with its refusal; nine requirements would not fit one phase's criteria (see 225).
+**Requirements**: CONN-02, CONN-04
+**Depends on:** Phase 225 merged. The same file and seam are involved: `resolveByVenueIdentity` and `keyOrphanedResponse`. Founder ruling at plan time on CONN-02.
+**Founder ruling (2026-11-26, CONN-02):** "Validate and update in place". On the MT5 same-account arms, a reconnect with a new password is validated, and on success the stored key's secret is rotated through the rotate-secret seam and the answer names the key. The founder accepted the trade-off: the up-to-120 s validation returns on those arms, which reverses 212-03 SC5 for MT5, and a connect request now changes an existing key. Recorded in `228-CONTEXT.md`.
+
+⭐ **Moved to v1.23 HARDEN, 2026-11-27 (founder ruling in chat; recorded here, in both milestone sections, in `228-CONTEXT.md` and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". This section moved from v1.22's section with its content unchanged, apart from the plan ticks and the plan count, which still read as unstarted although 228 shipped as v0.133.98.0 (#1377) with four plan SUMMARYs. Verification stays `human_needed`: the founder reconnects a live MT5 key with a changed investor password (`228-VERIFICATION.md`).
+
+**Success Criteria** (what must be TRUE):
+1. Reconnecting an MT5 account with a rotated password gets a named answer, and what the answer says matches what `api_keys` holds afterwards. A mistyped password is never reported as success. (CONN-02)
+2. An allocator-role owner who hits `KEY_ORPHANED` is told, by name, which key to Disconnect; a test drives the allocator and manager roles. (CONN-04)
+3. PROOF-01: each test goes RED on a neutered copy of the route arm it guards, with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY.
+**Plans:** 4/4 plans complete
+**UI hint**: yes
+
+Plans:
+**Wave 1**
+- [x] 228-01-PLAN.md — The rotate seam reports `secret_changed` (probe-then-compare, UTF-8 constant-time), and its seam call (`rotateKeySecret`) and owner-scoped persist (`persistRotatedMt5Secret`) are shared, with rotate-secret byte-identical (CONN-02)
+- [x] 228-02-PLAN.md — The connect step renders the password outcome notice from `key_secret`, the F6 fallback strip stops claiming the credentials are connected, and KEY_ORPHANED's Disconnect bullet names the key (CONN-02, CONN-04)
+- [x] 228-04-PLAN.md — The seam-budget census declares the create-with-key `mt5-rotate` branch and pins that it fits the browser deadline (CONN-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 228-03-PLAN.md — An MT5 reconnect whose fence picks the caller's own working holder on the exact server is validated and rotated in place and named; failures write nothing; KEY_ORPHANED is the same named answer for every role (CONN-02, CONN-04)
+
+### Phase 230: MT5NIGHTLY — every MT5 nightly derive ends done on its first attempt, for a named reason
+
+**Goal:** Once 227's per-attempt record holds real nightly runs, the named cause of MT5 `derive_broker_dailies` second attempts is fixed at its root. Then, over seven consecutive nights, every MT5 derive ends `done` with `attempts=1`. Raising retries or a watchdog threshold is not a close. The MT5 derive values that moved without explanation are replayed under both server-clock settings, and each moved value is attributed to the clock switch or to another named cause (`202-MT5-CLOCK-LEAD-01`). This phase is data-gated: its fix cannot be planned before the records exist. The suspected cause is a lease heartbeat shared with HEAL-02, a hypothesis and not a finding. It may land in S3 or S1, and wherever it lands it re-bases on that seam owner's merged bodies.
+**Requirements**: MT5D-02, MT5D-03
+**Depends on:** Phase 227 deployed, with its per-attempt record holding real nightly MT5 runs (the number of nights is set at plan time from the data); 229 must be merged first if the fix lands in S1. 155.2 freeze, conditional: if the fix or the replay's outcome changes stored values for MM2, MM3 or FX-AI_V, it merges before 155.2 plan 12's recapture or after plan 14, never in between. Research first: read the records. ⭐ 2026-11-25: 155.2 moved to v1.23 HARDEN; this freeze rule still holds until 155.2 plan 12's recapture actually runs (see the milestone-wide rule).
+- 2026-11-25, research (`230-DISCUSSION-LOG.md`): the named cause is cross-process contention for the one shared MT5 terminal. The backfill worker's nightly derive and the API process's `poll_allocator_positions` log it into different accounts at once, and the MT5CONC-02 login bracket refuses the read. The HEAL-02 hypothesis is refuted.
+- 2026-11-25, founder rulings (AskUserQuestion, relayed by the coordinator, verbatim in `230-CONTEXT.md`). D-01: "Database lease (Recommended)", option text: "One lease row per terminal in the database (with an expiry and an owner token), taken by every MT5 terminal user: derive, holdings poll, balance sync, key validation. A caller that finds it busy waits or gets the existing 'terminal busy' answer. The runbook already calls for this. It needs a small migration and changes no stored values." D-02: "I run it (Recommended)": the coordinator runs the read-only ledger capture on the Railway worker outside 00:40 to 01:40 UTC and replays it with `mt5offset_dry_run`, counts only in records. The seven clean nights count from the lease fix's deploy.
+- 2026-11-26, review rounds 1-2 (`230-REVIEW.md`, recorded in `230-CONTEXT.md`): the heal and liveness arms now catch lease-unavailable ahead of busy (SF-M1), and a missing renew RPC mid-hold now self-fences at the loss deadline instead of ending the renew loop (SF-M4, superseding plan 04's "renew stops without bumping the epoch").
+- 2026-11-26, shipped as v0.133.91.0 (#1358). The migration was re-stamped at ship to `20261126140000_mt5_terminal_lease.sql`, so it sorts after 238's `20261126130000`. `supabase-migrate.yml` run 45807605366 applied it to TEST and PROD, and the baseline re-dump is v0.133.91.1 (#1365). The status stays `human_needed`: plan 09 needs seven clean nights counted from the first 00:40Z derive after both services carry the lease, and plan 10 needs the coordinator's capture and replay. Neither plan has a SUMMARY yet.
+
+⭐ **Moved to v1.23 HARDEN, 2026-11-27 (founder ruling in chat; recorded here, in both milestone sections, in `230-CONTEXT.md` and in `REQUIREMENTS.md`, per the deviation policy).** Founder (2026-11-27): "let's then move 228 & 230 to the next milestone and after 252 close the current one and start the next one". This section moved from v1.22's section with its content unchanged. Verification stays `human_needed`: plan 09's seven clean nights (the soak runs to about 2026-12-03) and plan 10's capture and replay.
+
+**Success Criteria** (what must be TRUE):
+1. The cause of MT5 second attempts is named from 227's per-attempt records over real nights before any fix is planned, and the fix lands at that cause.
+2. After the fix, seven consecutive nights show every MT5 derive `done` with `attempts=1`, read from stored job rows and recorded with their dates. No retry budget or watchdog threshold was raised. (MT5D-02)
+3. Each MT5 derive value that moved without explanation is replayed under both server-clock settings and attributed to the clock switch or to another named cause. The repo's record of the setting alone is not a replay. (MT5D-03)
+4. PROOF-01: a test that drives the named cause goes RED on pre-fix code or a neutered copy with its named arm first. It is restored from a byte backup (`cp` back, `cmp`) and goes GREEN, recorded verbatim in the plan SUMMARY. Any migration passes migration-reviewer and rls-policy-auditor with no MEDIUM+ finding, in the one serial migration lane.
+**Plans:** 8/10 plans executed
+
+Plans:
+- [x] 230-01-PLAN.md — the terminal lease table and its three token-fenced RPCs, proven on the pg-lane (MT5D-02)
+- [x] 230-02-PLAN.md — mt5_terminal_lease takes the database lease; two processes never share the terminal, PROOF-01 on production code (MT5D-02)
+- [x] 230-03-PLAN.md — the dry run's --days-out flag and the clock-replay runbook with the capture contract (MT5D-03)
+- [x] 230-04-PLAN.md — a missing lease RPC degrades loudly, every other database error fails closed (MT5D-02)
+- [x] 230-05-PLAN.md — the transient classify arm, the holdings sync-error arm and the two validate arms (MT5D-02)
+- [x] 230-06-PLAN.md — the SQL, function and gate-file censuses moved to measured values (MT5D-02)
+- [x] 230-07-PLAN.md — [BLOCKING] the migration on the local-stack lane, the live PostgREST test, every suite green (MT5D-02)
+- [x] 230-08-PLAN.md — re-stamp rehearsal, the lease runbook, the corrected single-replica note, ship records (MT5D-02, MT5D-03)
+- [ ] 230-09-PLAN.md — the nightly evidence proven on the lane, then seven nights after both deploys (MT5D-02, human-gated)
+- [ ] 230-10-PLAN.md — the capture hand-off proven offline, then the coordinator's replay and the per-scope attribution (MT5D-03, human-gated)
 
 ### Phase 242: SECRETSHYGIENE — the full history is scanned on a schedule, and the cron service key goes only to named hosts
 
@@ -1460,6 +1469,8 @@ Plans:
 | 157. FOUNDER-CONFIRM | 1/3 | In progress | - |
 | 221. SENTRYSCRUB2 | 0/? | Planned for v1.23 | - |
 | 224. DEADLEFTOVERS | 0/? | Planned for v1.23 | - |
+| 228. KEYANSWERS | 4/4 | Shipped v0.133.98.0 (#1377); verification human_needed (a live MT5 reconnect with a changed investor password, `228-VERIFICATION.md`); moved from v1.22 2026-11-27 | - |
+| 230. MT5NIGHTLY | 8/10 | Shipped v0.133.91.0 (#1358; migration 20261126140000 applied to TEST and PROD in supabase-migrate run 45807605366); verification human_needed (plan 09: seven clean nights after both services carry the lease; plan 10: the coordinator's capture and replay); moved from v1.22 2026-11-27 | - |
 | 242. SECRETSHYGIENE | 6/6 | Complete | 2026-11-27 |
 | 243. DBBACKSTOP | 10/10 | Complete | 2026-11-28 |
 | 244. ACCESSGUARDS | 4/4 | Complete (shipped v0.133.102.0, #1391; verification passed, SC-1 met as narrowed by founder decision 2026-11-27; SECURITY 0 open) | 2026-11-27 |

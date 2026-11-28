@@ -436,7 +436,7 @@ Details are in `202-REVIEW.md` Round 3 and `202-REVIEW-DISPOSITION.md`.
 
 **What closing it means.** (1) and (2) are fixed with a RED self-test case each. (3) and (4) are printed by the gate: written versus finished, and the unjobbed scopes by name.
 
-### 202-MT5-CLOCK-LEAD-01 — confirm or rule out the MT5 server-clock switch as the cause of the (d) values Phase 202 left unexplained (booked 2026-11-07, Phase 202) (owned by Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-03; tagged 2026-11-23)
+### 202-MT5-CLOCK-LEAD-01 — confirm or rule out the MT5 server-clock switch as the cause of the (d) values Phase 202 left unexplained (booked 2026-11-07, Phase 202) (owned by Phase 230 MT5NIGHTLY, v1.23 since 2026-11-27, moved from v1.22 by founder ruling; REQUIREMENTS.md MT5D-03; tagged 2026-11-23)
 
 **Why it is open.** Phase 202 (RESIDCHURN) left s6, s9 and s10 (72 of 188's 1214 moved values, b0 to b1) and s2, s5, s8 and s13 (87 values, c0 to c1) in bucket (d), unexplained. Founder decision D-16 ("Don't widen; book it") kept them in (d) under the rule as fixed. Plan 05 and plan 07 measured a lead that is not a code commit: the worker's MT5 server-clock setting (`resolve_mt5_server_clock()`, `mt5_server_clock.py`), recorded as a fixed offset from 2026-11-01 and switched to the US rule on 2026-11-03. In both pairs, the set of MT5 strategies re-derived across the switch equals the set that moved, and the changed days fall in US-rule summer. The winter control is not clean: 29 winter rows vanished from s9 (b0 to b1) and from s2 (c0 to c1), the same 29 days. The lead comes from the repo's record of the setting, not a read of the Railway variables, and no derive was replayed.
 
@@ -1244,7 +1244,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
   - Two `failed_final` jobs (`attempts=3`), both created 2026-11-18 (00:25Z and 00:40Z), carry `MT5 server clock does not match the configured rule (rule=us expected=+2h measured=+0h)`. One has no `api_key_id` (it does not join to a key), the other is an MT5 key. 2026-11-18 is the day Phase 217 SERVERRULE shipped the per-server rule; no clock-configuration `last_error` appears on any job created since 2026-11-19.
   **Data integrity:** a derive that needs a retry rewrites the same account's published dailies, and nothing tells us whether the first attempt wrote anything or why it failed.
   **Owner / Trigger:** unrouted, founder to assign. Trigger: now (it recurs daily since 2026-11-20). First make the first attempt's failure readable (the cause is lost when the retry succeeds), then fix it at its root. **Closed when:** seven consecutive nightly MT5 derives are all `done` with `attempts=1`, or the retry cause is named and fixed with a test.
-      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; Phase 230 MT5NIGHTLY, v1.22; REQUIREMENTS.md MT5D-01, MT5D-02; tagged 2026-11-23.**
+      ⭐ **Owned by Phase 227 JOBLEDGER, v1.22; Phase 230 MT5NIGHTLY, v1.23 since 2026-11-27 (moved from v1.22 by founder ruling); REQUIREMENTS.md MT5D-01, MT5D-02; tagged 2026-11-23.**
   - 2026-11-24: Phase 227 JOBLEDGER shipped the per-attempt record (`compute_job_attempt_failures`, all four cause classes: error, watchdog_reset, stall_reclaim, orphan_reaped). Phase 230 MT5NIGHTLY owns the close: real nights of these records read and explained.
   - 2026-11-26: Phase 230 MT5NIGHTLY shipped the cross-process MT5 terminal lease (v0.133.91.0, #1358). Plan 09 owns the close, after seven clean nights counted from night 1 (docs/runbooks/mt5-terminal-lease.md sections 5(a) and 6).
 
