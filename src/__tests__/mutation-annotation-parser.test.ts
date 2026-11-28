@@ -1133,7 +1133,9 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 05): `armsSeen` 1085 -> 1099, the 14 twinned arms of the two NEW gates test_insert_api_key_rpc.sql (R1 to R8) and test_api_keys_user_id_immutable.sql (1a, 1b, 2a, 2b, 3, 4), migration 20261127120100. MEASURED: `--parse-only` printed `arms: 0/1099/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `armsSeen` 1099 -> 1100, +1 twinned arm (R9 in test_insert_api_key_rpc.sql). MEASURED: `--parse-only` printed `arms: 0/1100/0`.
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `armsSeen` 1110 -> 1119, the 9 twinned arms of the NEW gate test_strategy_analytics_unit_segments.sql.
-    expect(armsSeen).toBe(1126);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 10): `armsSeen` 1126 -> 1132, +6 twinned arms (2s, 2a, 2b, 2c, 2w in test_api_keys_insert_not_client_writable.sql, '5c fence restored' in test_api_keys_exchange_not_user_writable.sql). MEASURED: `--parse-only` printed `arms: 0/1132/0`.
+    // ⭐ CURRENCY 2026-11-28 (Phase 243 DBBACKSTOP, plan 10 fix round 1, WR-02 + RLS-M1): `armsSeen` 1132 -> 1134, +2 twinned arms (2w-m, 2w-q) in test_api_keys_insert_not_client_writable.sql, both `sql` steps, so `stepsSeen` and `needles.length` do not move. MEASURED: `--parse-only` printed `arms: 0/1134/0`.
+    expect(armsSeen).toBe(1134);
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `armsSeen` 1100 -> 1109, the 9 twinned arms (1a, 1b, 1c, 2, 3, 4, 5a, 5b, 6) of the NEW gate test_strategy_analytics_unit_segments.sql. MEASURED: `--parse-only` printed `arms: 0/1109/0` and `coverage: files 100/127`; the --file diagnostic run printed `arms: 9/9/0`, `biting: 9`.
     // RE-BASED onto Phase 256 OKXUNITSWITCH (origin/main) 2026-11-27, combined counts are the code values beside this line: ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 09): `armsSeen` 1110 -> 1117, the 7 twinned arms of the NEW gate test_strategy_analytics_anon_grants.sql (GRANT 1, GRANT 2, GRANT 3, GRANT 4, WRITE 1, WRITE 2, KEEP 1). MEASURED: `--parse-only` printed `arms: 0/1117/0`.
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
@@ -1203,7 +1205,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `stepsSeen` 1242 -> 1243, +1 `edit` file step (R9's twin swaps two credential parameters in the INSERT's VALUES list).
     // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `stepsSeen` 1243 -> 1252, +9 file steps, MEASURED off the failing assertion (`expected 1252 to be 1243`), never summed.
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `stepsSeen` 1252 -> 1254, +2 `edit` file steps in test_strategy_analytics_unit_segments.sql.
-    expect(stepsSeen).toBe(1254);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 10): `stepsSeen` 1254 -> 1258, +4 `edit` file steps (2a, 2b, 2c in test_api_keys_insert_not_client_writable.sql and '5c fence restored' in test_api_keys_exchange_not_user_writable.sql; 2s and 2w are `sql` steps). MEASURED off the failing assertion (`expected 1258 to be 1254`), never summed.
+    expect(stepsSeen).toBe(1258);
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `stepsSeen` 1243 -> 1245, +2 file steps in the NEW gate test_strategy_analytics_unit_segments.sql (the two `edit` twins of arms 2 and 3; the other seven twins are `sql` steps). MEASURED: this file run read `expected 1245 to be 1243` on needles.length.
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
@@ -2188,7 +2191,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-11-27 (Phase 242 SECRETSHYGIENE, plan 05, re-based onto Phase 243): `needles.length` 1243 -> 1252, the same +9 `edit` needles as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, review fix WR-02): `needles.length` 1242 -> 1243, the same +1 file step as `stepsSeen`.
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02, re-based onto Phase 242): `needles.length` 1252 -> 1254, the same +2 file steps.
-    expect(needles.length).toBe(1254);
+    // ⭐ CURRENCY 2026-11-27 (Phase 243 DBBACKSTOP, plan 10): `needles.length` 1254 -> 1258, +4 `edit` needles (2a, 2b, 2c in test_api_keys_insert_not_client_writable.sql and '5c fence restored' in test_api_keys_exchange_not_user_writable.sql; 2s and 2w are `sql` steps). MEASURED off the failing assertion (`expected 1258 to be 1254`), never summed.
+    expect(needles.length).toBe(1258);
     // ⭐ CURRENCY 2026-11-27 (Phase 256 OKXUNITSWITCH, plan 02): `needles.length` 1243 -> 1245, the same +2 file steps as `stepsSeen`. MEASURED: this file run read `expected 1245 to be 1243`.
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
