@@ -33,6 +33,11 @@ from tests.fixtures.deribit_option_round_trip import (
     cash_round_trip_ledger,
     options_round_trip_ledger,
 )
+from tests.test_deribit_nav_twin import (
+    _EXTRACTION_DAY as _TWIN_EXTRACTION_DAY,
+    _stub as _twin_stub,
+    _wire as _twin_wire,
+)
 from tests.test_smoothed_mtm_core import (
     _IN_RET_CHARTS,
     _IN_RET_INSTR,
@@ -544,3 +549,54 @@ def test_round_trip_fixture_options_pair_gives_the_research_oracle() -> None:
     assert d3 == pytest.approx(0.9586, abs=5e-4)
     assert float((1 + returns.fillna(0.0)).prod() - 1) == pytest.approx(1.2994, abs=5e-4)
     assert "flow_timing_day_level_large" not in meta
+
+
+# ===========================================================================
+# Plan 252-11 (gap G252-MTM-PROMOTION, founder decision 2026-11-28) - the composite stitch
+# assembles a member's smoothed ledger from its cash pass's crawl, in the composite's
+# extraction mode. A configured (allocated) composite crawls with exclude_spot_extraction
+# True, so the rebuilt ledger must be assembled the same way.
+# ===========================================================================
+
+
+def test_same_crawl_smoothed_ledger_equals_an_independent_build_in_allocated_mode(
+    monkeypatch: Any,
+) -> None:
+    """The smoothed ledger rebuilt from the cash build's retained rows, in allocated mode
+    (exclude_spot_extraction True), equals a fresh smoothed crawl built in allocated mode,
+    and the crawl counter reads 1 after the cash build and the reuse together. Anti-vacuity:
+    the same reuse in NAV mode differs, because the net-extraction day sits in BTC native P&L
+    only there. If this goes red a configured composite's promoted smoothed headline is
+    assembled in a different extraction mode than the cash basis stored beside it (Bug B:
+    extraction legs counted as P&L)."""
+    crawls = _twin_wire(monkeypatch)
+    stub = _twin_stub()
+
+    async def _go() -> tuple[Any, Any, Any, int]:
+        _cash, report = await di.build_deribit_native_ledger(
+            stub, pnl_basis=di.DEFAULT_PNL_BASIS, exclude_spot_extraction=True,
+            retain_raw_rows=True,
+        )
+        state = await di.fetch_deribit_native_account_state(stub)
+        reused_alloc, _r1 = await di.build_deribit_options_basis_ledger(
+            stub, report=report, account_state=state, pnl_basis="smoothed_mtm",
+            exclude_spot_extraction=True,
+        )
+        reused_nav, _r2 = await di.build_deribit_options_basis_ledger(
+            stub, report=report, account_state=state, pnl_basis="smoothed_mtm",
+        )
+        after_reuse = crawls["crawl"]
+        fresh, _r3 = await di.build_deribit_native_ledger(
+            stub, pnl_basis="smoothed_mtm", exclude_spot_extraction=True,
+        )
+        return reused_alloc, reused_nav, fresh, after_reuse
+
+    reused_alloc, reused_nav, fresh, after_reuse = asyncio.run(_go())
+    assert after_reuse == 1, "the cash build crawls once; the reuse adds no crawl"
+    _assert_ledgers_equal(reused_alloc, fresh)
+    assert _TWIN_EXTRACTION_DAY not in reused_alloc.native_pnl["BTC"].index
+    # Anti-vacuity: NAV mode keeps the extraction legs, so the reuse is not mode-blind.
+    assert _TWIN_EXTRACTION_DAY in reused_nav.native_pnl["BTC"].index
+    assert set(reused_alloc.native_pnl) != set(reused_nav.native_pnl) or not (
+        reused_alloc.native_pnl["BTC"].equals(reused_nav.native_pnl["BTC"])
+    )

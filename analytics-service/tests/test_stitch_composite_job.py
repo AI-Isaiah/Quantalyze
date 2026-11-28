@@ -6002,3 +6002,158 @@ async def test_g252_crawl_once_smoothed_ledger_comes_from_the_cash_crawl(
         if r.levelno == logging.INFO and "built from the cash pass's crawl" in r.getMessage()
     ]
     assert len(lines) == 1, lines
+
+
+# --- Plan 252-11, Task 2: per-member identity in both extraction modes, release on every path
+
+#: A returns_denominator_config (allocated-capital): the composite then crawls with
+#: exclude_spot_extraction True and builds the NAV twin on the cash pass (D-14).
+_G252_ALLOC_CONFIG: dict[str, Any] = {
+    "denominator": "allocated_capital",
+    "pnl_basis": "cash_settlement",
+    "capital_schedule": [{"effective_from": "2026-01-01", "capital_usd": 1_000_000}],
+    "metrics_basis": "calendar_day",
+    "cumulative_method": "simple",
+}
+
+
+def _g252_kept_rows() -> tuple[dict[str, Any], ...]:
+    """A non-None retained-rows tuple (synthetic; only its presence is read)."""
+    return ({"type": "trade", "instrument_name": "BTC-1JAN30-100000-C", "change": 0.01},)
+
+
+def _g252_member_ctxs() -> list[MagicMock]:
+    """One ctx per member, each with its OWN exchange object, so a crawl or a state read
+    that crosses members is visible by identity."""
+    ctxs = []
+    for _ in range(2):
+        ctx = _ctx()
+        ctx.exchange = AsyncMock()
+        ctxs.append(ctx)
+    return ctxs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unconfigured", "configured"])
+async def test_g252_crawl_once_each_member_is_rebuilt_from_its_own_crawl(
+    mode: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each member's smoothed ledger is built from ITS OWN cash-pass report, ITS OWN account
+    state and ITS OWN exchange, in the extraction mode the composite's cash crawl used
+    (False unconfigured, True configured); the state is read once per member (it was read
+    twice before 252-11), and every retained row set is released afterwards. If this goes
+    red the smoothed headline is built from another member's crawl or from a different
+    moment than the cash basis beside it, or a configured composite's smoothed ledger
+    silently switches extraction mode, or retained amounts outlive their use."""
+    configured = mode == "configured"
+    ctxs = _g252_member_ctxs()
+    _ctx_iter = iter(ctxs + ctxs)  # cash pass m1, m2 then smoothed pass m1, m2
+    cash_reports: list[CompletenessReport] = []
+    states: list[Any] = []
+
+    async def _native(exchange: Any, *, account_state: Any, pnl_basis: str,
+                      exclude_spot_extraction: bool, nav_twin: bool = False,
+                      retain_raw_rows: bool = False) -> Any:
+        rep = CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=True,
+        )
+        rep.raw_rows = _g252_kept_rows()
+        cash_reports.append(rep)
+        return (_stub_ledger(), rep)
+
+    async def _state(_exchange: Any) -> Any:
+        st = MagicMock(balance_error=False, native_equity={"BTC": 1.0})
+        states.append(st)
+        return st
+
+    async def _options(exchange: Any, *, report: Any, account_state: Any, pnl_basis: str,
+                       exclude_spot_extraction: bool = False) -> Any:
+        return (_stub_ledger(), CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=True,
+        ))
+
+    native_spy, options_spy, state_spy = (
+        AsyncMock(side_effect=_native), AsyncMock(side_effect=_options),
+        AsyncMock(side_effect=_state),
+    )
+    strategy_row = dict(_G252_STRATEGY_ROW)
+    if configured:
+        strategy_row["returns_denominator_config"] = dict(_G252_ALLOC_CONFIG)
+    extra = [
+        patch("services.job_worker._allocator_key_preflight",
+              new=AsyncMock(side_effect=lambda *_a, **_k: next(_ctx_iter))),
+        patch("services.deribit_ingest.fetch_deribit_native_account_state", new=state_spy),
+        patch(_NATIVE_BUILD, new=native_spy),
+        patch(_OPTIONS_BUILD, new=options_spy),
+        patch("services.job_worker.read_key_marks", new=MagicMock(return_value=[])),
+    ]
+    fake, result, _ = await _g252_run(
+        monkeypatch, strategy_row=strategy_row, extra_patches=extra,
+    )
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert native_spy.await_count == 2 and options_spy.await_count == 2
+    assert state_spy.await_count == 2, "the account state is read once per member"
+    for i in range(2):
+        cash_call, options_call = native_spy.await_args_list[i], options_spy.await_args_list[i]
+        assert cash_call.kwargs["retain_raw_rows"] is True
+        assert cash_call.kwargs["pnl_basis"] == "cash_settlement"
+        assert cash_call.kwargs["exclude_spot_extraction"] is configured
+        assert options_call.kwargs["pnl_basis"] == "smoothed_mtm"
+        assert options_call.kwargs["report"] is cash_reports[i]
+        assert options_call.kwargs["account_state"] is cash_call.kwargs["account_state"]
+        assert options_call.kwargs["account_state"] is states[i]
+        assert options_call.kwargs["exclude_spot_extraction"] is configured
+        assert options_call.args[0] is cash_call.args[0] is ctxs[i].exchange
+    assert states[0] is not states[1] and cash_reports[0] is not cash_reports[1]
+    assert [r.raw_rows for r in cash_reports] == [None, None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["budget_refusal", "no_option_activity"])
+async def test_g252_crawl_once_unused_retained_rows_are_released(
+    case: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The retained crawls are released when the smoothed pass will not use them: a budget
+    refusal skips it, and a no-option composite never runs it. The options builder is never
+    awaited and every report's rows are gone after the run. If this goes red raw instruments
+    and amounts stay alive in the worker for the rest of the stitch (the MTM pass's own
+    crawl, the persists)."""
+    active = case == "budget_refusal"
+    reports: list[CompletenessReport] = []
+
+    async def _native(exchange: Any, *, account_state: Any, pnl_basis: str,
+                      exclude_spot_extraction: bool, nav_twin: bool = False,
+                      retain_raw_rows: bool = False) -> Any:
+        rep = CompletenessReport(
+            total_return_rows=2, indexable_currencies=frozenset({"BTC"}),
+            has_option_activity=active,
+        )
+        if retain_raw_rows:
+            rep.raw_rows = _g252_kept_rows()
+        reports.append(rep)
+        return (_stub_ledger(), rep)
+
+    options_spy = AsyncMock(side_effect=AssertionError("the smoothed pass must not run"))
+    c1, c2 = _g252_cash()
+    kwargs: dict[str, Any] = {
+        "extra_patches": [
+            patch(_NATIVE_BUILD, new=AsyncMock(side_effect=_native)),
+            patch(_OPTIONS_BUILD, new=options_spy),
+        ],
+    }
+    if case == "budget_refusal":
+        kwargs["extra_patches"].append(
+            patch.object(_jw, "_MTM_SECOND_PASS_MIN_SECONDS", 1e9)
+        )
+    else:
+        kwargs.update(
+            has_option_activity=False,
+            combine_seq=[(c1, {}), (c2, {}), (c1, {}), (c2, {})],  # cash + MTM passes
+        )
+    _fake, result, _ = await _g252_run(monkeypatch, **kwargs)
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert options_spy.await_count == 0
+    kept = [r for r in reports if r.raw_rows is not None]
+    assert len(reports) >= 2 and kept == [], "every retained row set must be released"
