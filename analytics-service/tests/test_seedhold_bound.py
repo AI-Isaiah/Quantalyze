@@ -72,7 +72,9 @@ from __future__ import annotations
 import contextlib
 import copy
 import itertools
+import logging
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any, NamedTuple
 from unittest.mock import MagicMock, patch
 
@@ -80,6 +82,7 @@ import pytest
 
 from services import exchange as ex
 from services import job_worker as jw
+from services import trade_resume as tr
 from services.job_worker import run_sync_trades_job as _real_run_sync_trades_job
 from tests._binance_fills import RereadBounds, column_after_advance
 from tests.test_binancefills_cursor import _persisted_fills, _two_run_walk_start_ms
@@ -574,6 +577,197 @@ class TestSeedHoldRetry:
                 column=a2.column_after, job_id="job-r2", token="tok-r2",
             )
             _verdict(label, r2.out, RUN1_WALK_MS)
+
+
+# ---- the mechanism pins (plan 04): when a mark is written, what it carries, what is ignored ----
+
+SNAPSHOT_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "supabase" / "schema" / "functions" / "set_compute_job_seed_hold.sql"
+)
+HOLD_LOGGER = "quantalyze.analytics.job_worker"
+SET_SEED_MS = 1778112000000  # 2026-05-07T00:00:00Z, the seed on a set column (the daily seed)
+OKX_FIRST_SEED_MS = 1776081600000  # 2026-04-13T12:00:00Z, the OKX reach anchor under the pinned clock
+
+
+def _seed_hold_errors(caplog: pytest.LogCaptureFixture) -> list[Any]:
+    return [
+        r for r in caplog.records
+        if r.levelname == "ERROR"
+        and r.getMessage().startswith("sync_trades: could not write the seed-hold mark for strategy")
+    ]
+
+
+_PARITY_NAMES = [jw.SEED_HOLD_RPC, tr.SEED_HOLD_KEY, "p_job_id", "p_claim_token", "p_floor_ms"]
+
+
+def _names_missing_from(sql: str, names: list[str]) -> list[str]:
+    return [n for n in names if n not in sql]
+
+
+class TestSeedHoldMechanism:
+    @pytest.mark.parametrize("venue", ["binance", "okx", "bybit", "deribit"])
+    async def test_a_clean_run_writes_no_seed_hold(self, venue: str) -> None:
+        # SC-3: the mark exists only when the bound could not be recorded.
+        rows, column = _rows_and_column("set")
+        jobs = JobsStore()
+        r1 = await _run(
+            venue=venue, jobs=jobs, bounds=FlakyBounds(0), flags={}, rows=rows, column=column,
+            job_id="job-clean", token="tok-clean", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert r1.out is not None and r1.out.fetch_raw.call_count == 1, (
+            f"SEEDHOLD-MECHANISM: {venue}: the premise is a run whose bound write succeeded and "
+            "whose fills read ran"
+        )
+        assert jobs.rpc_calls == [], (
+            f"SEEDHOLD-MECHANISM: {venue}: a run whose bound write succeeded wrote a seed-hold "
+            f"mark: {jobs.rpc_calls}"
+        )
+
+    async def test_an_orphan_answer_writes_no_seed_hold(self) -> None:
+        rows, column = _rows_and_column("set")
+        bounds, jobs = FlakyBounds(0), JobsStore()
+        bounds.owned = False
+        r1 = await _run(
+            venue="okx", jobs=jobs, bounds=bounds, flags={}, rows=rows, column=column,
+            job_id="job-orphan", token="tok-orphan", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert r1.out is not None and r1.out.fetch_raw.call_count == 0, (
+            "SEEDHOLD-MECHANISM: the premise is an orphan answer that skipped the fills read"
+        )
+        assert jobs.rpc_calls == [], (
+            "SEEDHOLD-MECHANISM: an orphan answer means the re-claiming worker owns the strategy; "
+            f"this run must write no mark: {jobs.rpc_calls}"
+        )
+
+    async def test_a_failed_seed_hold_write_is_logged_and_the_run_finishes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        rows, column = _rows_and_column("set")
+        jobs, flags = JobsStore(), {}
+        jobs.rpc_error = RuntimeError("secret-detail-from-the-database")
+        with caplog.at_level(logging.WARNING, logger=HOLD_LOGGER):
+            r1 = await _run(
+                venue="okx", jobs=jobs, bounds=FlakyBounds(PERSISTENT), flags=flags, rows=rows,
+                column=column, job_id="job-df", token="tok-df", daily_trades=DAILY_TRADES_RUN1,
+            )
+        # `_run_job` asserts DispatchOutcome.DONE, so the run finished.
+        assert r1.out is not None
+        assert flags.get("phase2_fill_ingestion_failed") is True
+        errors = _seed_hold_errors(caplog)
+        assert len(errors) == 1, (
+            f"SEEDHOLD-MECHANISM: want exactly one seed-hold write ERROR, got {len(errors)}"
+        )
+        text = errors[0].getMessage()
+        assert "RuntimeError" in text and STRATEGY_ID in text
+        assert "secret-detail-from-the-database" not in text, (
+            "SEEDHOLD-MECHANISM: the log names the exception class only, never its text"
+        )
+
+    async def test_a_false_answer_is_logged_as_an_orphan_and_the_run_finishes(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The fake fence answers False when the running row's token is not the one the run carries.
+        rows, column = _rows_and_column("set")
+        jobs, flags = JobsStore(), {}
+        jobs.start("job-fence", "tok-other")  # the row's token differs from the run's `tok-run`
+        with caplog.at_level(logging.WARNING, logger=HOLD_LOGGER):
+            r1 = await _run(
+                venue="okx", jobs=jobs, bounds=FlakyBounds(PERSISTENT), flags=flags, rows=rows,
+                column=column, job_id="job-fence", token="tok-run", start=False,
+                daily_trades=DAILY_TRADES_RUN1,
+            )
+        assert r1.out is not None and len(jobs.rpc_calls) == 1
+        assert not _seed_hold_errors(caplog)
+        orphan = [
+            r for r in caplog.records
+            if r.levelname == "WARNING"
+            and r.getMessage().startswith("worker_orphan_write_blocked: set_compute_job_seed_hold")
+        ]
+        assert len(orphan) == 1 and "job-fence" in orphan[0].getMessage()
+        assert SEED_HOLD_KEY_NAME not in jobs.row("job-fence")["metadata"]
+
+    @pytest.mark.parametrize("venue", ["okx", "bybit"])
+    async def test_a_failed_hold_read_writes_the_reach_anchor(self, venue: str) -> None:
+        # The read failed, so an earlier mark may be hidden: the write carries min(reach, seed).
+        rows, column = _rows_and_column("set")
+        jobs = JobsStore()
+        jobs.read_error = RuntimeError("compute_jobs read blip")
+        await _run(
+            venue=venue, jobs=jobs, bounds=FlakyBounds(PERSISTENT), flags={}, rows=rows,
+            column=column, job_id="job-fr", token="tok-fr", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert len(jobs.rpc_calls) == 1
+        call = jobs.rpc_calls[0]
+        assert call["p_floor_ms"] == REACH_ANCHOR_MS[venue], (
+            f"SEEDHOLD-MECHANISM: {venue}: a failed hold read must write the reach anchor "
+            f"{REACH_ANCHOR_MS[venue]}, wrote {call['p_floor_ms']}"
+        )
+        assert call["p_job_id"] == "job-fr" and call["p_claim_token"] == "tok-fr"
+
+    @pytest.mark.parametrize(
+        "state,want_ms",
+        [
+            pytest.param("set", SET_SEED_MS, id="okx-set"),
+            pytest.param("first", OKX_FIRST_SEED_MS, id="okx-first"),
+        ],
+    )
+    async def test_a_seed_hold_write_carries_the_seed(self, state: str, want_ms: int) -> None:
+        rows, column = _rows_and_column(state)
+        jobs = JobsStore()
+        await _run(
+            venue="okx", jobs=jobs, bounds=FlakyBounds(PERSISTENT), flags={}, rows=rows,
+            column=column, job_id="job-seed", token="tok-seed", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert [c["p_floor_ms"] for c in jobs.rpc_calls] == [want_ms], (
+            f"SEEDHOLD-MECHANISM: okx {state}: the mark must carry the run's seed {want_ms}"
+        )
+
+    @pytest.mark.parametrize(
+        "bad", [pytest.param("abc", id="string"), pytest.param(True, id="bool"), pytest.param(-5, id="negative")]
+    )
+    async def test_a_malformed_stored_hold_is_ignored(self, bad: Any) -> None:
+        rows, column = _rows_and_column("set")
+
+        def _store() -> JobsStore:
+            jobs = JobsStore()
+            jobs.add_row("job-old", "done", {SEED_HOLD_KEY_NAME: bad})
+            return jobs
+
+        # (1) bound RPC working: the malformed mark lowers nothing.
+        ok = await _run(
+            venue="okx", jobs=_store(), bounds=FlakyBounds(0), flags={}, rows=rows, column=column,
+            job_id="job-m1", token="tok-m1", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert ok.out is not None
+        assert ok.out.fetch_raw.call_args.kwargs["since_ms"] == SET_SEED_MS, (
+            "SEEDHOLD-MECHANISM: a malformed stored mark must lower no seed"
+        )
+        # (2) bound RPC down: the malformed mark counts as a failed read, so the write is the reach.
+        jobs2 = _store()
+        await _run(
+            venue="okx", jobs=jobs2, bounds=FlakyBounds(PERSISTENT), flags={}, rows=rows,
+            column=column, job_id="job-m2", token="tok-m2", daily_trades=DAILY_TRADES_RUN1,
+        )
+        assert [c["p_floor_ms"] for c in jobs2.rpc_calls] == [REACH_ANCHOR_MS["okx"]], (
+            "SEEDHOLD-MECHANISM: a malformed stored mark is a failed read; the write must carry "
+            "the OKX reach anchor"
+        )
+
+    def test_parity_with_the_generated_snapshot(self) -> None:
+        missing = _names_missing_from(SNAPSHOT_PATH.read_text(), _PARITY_NAMES)
+        assert missing == [], (
+            f"SEEDHOLD-MECHANISM: {missing} are not in {SNAPSHOT_PATH.name}: the Python and SQL "
+            "names have diverged"
+        )
+
+    def test_parity_detects_a_misspelled_copy(self) -> None:
+        # The pin can fail: a copy with one letter altered is reported missing, for every name.
+        sql = SNAPSHOT_PATH.read_text()
+        misspelled = [n[:-1] + "x" for n in _PARITY_NAMES]
+        assert _names_missing_from(sql, misspelled) == misspelled, (
+            "SEEDHOLD-MECHANISM: a misspelled name satisfied the parity check, so the pin cannot go red"
+        )
 
 
 # ---- SC-2: a Bybit read that hits its deadline keeps what it completed --------------------------
