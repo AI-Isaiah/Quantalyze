@@ -2573,6 +2573,12 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         _hold_terms = [
                             t for t in (_hold_ms, _own_hold_ms) if t is not None
                         ]
+                        if _hold_read_failed and _reach_anchor_ms is not None:
+                            # Review WR-01: an earlier mark may be hidden (a read blip or a
+                            # malformed mark), and a clean epilogue would then clear the bound
+                            # and bury it for good. Put the floor on the SEED, so the
+                            # provisional bound row records it whether or not the RPC works.
+                            _hold_terms.append(_reach_anchor_ms)
                         if _hold_terms and min(_hold_terms) < fills_since_ms:
                             fills_since_ms = min(_hold_terms)
                             if _fills_cursor_ms is None:
@@ -2655,18 +2661,13 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                         )
                         # Phase 257 SEEDHOLD: the bound is unrecorded, so leave the seed on the
                         # job's own row. Fail-safe (research V3): when the hold read failed, an
-                        # earlier mark may be hidden, so the floor is the reach anchor too (an
-                        # over-fetch, never a skipped span). Best-effort: a raise (22023 on a bad
-                        # floor, 23514 on the metadata size cap, a blip) is the double-fault
-                        # residual; a False answer is an orphan claim token. Neither changes the
-                        # job outcome. The claim token goes unconditionally: the SQL fence needs a
-                        # non-NULL one, so gating it on WORKER_FENCE_V2 would switch the mark off
-                        # with the kill switch.
-                        _hold_floor_ms = (
-                            min(_reach_anchor_ms, _provisional_unread_ms)
-                            if _hold_read_failed
-                            else _provisional_unread_ms
-                        )
+                        # earlier mark may be hidden, so the seed itself was lowered to the reach
+                        # anchor above (review WR-01; an over-fetch, never a skipped span).
+                        # Best-effort: a raise (22023 on a bad floor, 23514 on the metadata
+                        # size cap, a blip) is the double-fault residual; a False answer is an
+                        # orphan claim token. Neither changes the job outcome. The claim token
+                        # goes unconditionally: the SQL fence needs a non-NULL one, so gating it
+                        # on WORKER_FENCE_V2 would switch the mark off with the kill switch.
 
                         def _write_seed_hold() -> bool:
                             res = ctx.supabase.rpc(
@@ -2674,7 +2675,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
                                 {
                                     "p_job_id": job["id"],
                                     "p_claim_token": job.get("claim_token"),
-                                    "p_floor_ms": _hold_floor_ms,
+                                    "p_floor_ms": _provisional_unread_ms,
                                 },
                             ).execute()
                             return bool(res.data)

@@ -522,15 +522,19 @@ _HANDOFF_PARAMS = [
     pytest.param("okx", "set", "A", id="okx-set-A"),
     pytest.param("okx", "set", "B", id="okx-set-B"),
     pytest.param("okx", "set", "C", marks=RESIDUAL_DOUBLE_FAULT, id="okx-set-C"),
+    pytest.param("okx", "set", "D", id="okx-set-D"),
     pytest.param("okx", "first", "A", id="okx-first-A"),
     pytest.param("okx", "first", "B", id="okx-first-B"),
     pytest.param("okx", "first", "C", id="okx-first-C"),
+    pytest.param("okx", "first", "D", id="okx-first-D"),
     pytest.param("bybit", "set", "A", id="bybit-set-A"),
     pytest.param("bybit", "set", "B", id="bybit-set-B"),
     pytest.param("bybit", "set", "C", marks=RESIDUAL_DOUBLE_FAULT, id="bybit-set-C"),
+    pytest.param("bybit", "set", "D", id="bybit-set-D"),
     pytest.param("bybit", "first", "A", id="bybit-first-A"),
     pytest.param("bybit", "first", "B", id="bybit-first-B"),
     pytest.param("bybit", "first", "C", id="bybit-first-C"),
+    pytest.param("bybit", "first", "D", id="bybit-first-D"),
 ]
 
 
@@ -555,10 +559,13 @@ class TestSeedHoldHandOff:
         if shape == "A":
             jobs.add_row("job-mid", "failed_final", {})
         else:
-            # An intervening real run with the bound RPC still down. B: its `compute_jobs` read
-            # fails. C: its seed-hold write fails (the named double fault).
-            bounds.fail_next = PERSISTENT
-            if shape == "B":
+            # An intervening real run. B: the bound RPC still down and its `compute_jobs` read
+            # fails. C: the bound RPC still down and its seed-hold write fails (the named double
+            # fault). D (review WR-01): the bound RPC has RECOVERED and its `compute_jobs` read
+            # fails once, so it writes no mark of its own and its clean epilogue would clear the
+            # bound: the seed itself must drop to the reach anchor.
+            bounds.fail_next = 0 if shape == "D" else PERSISTENT
+            if shape in ("B", "D"):
                 jobs.read_error = RuntimeError("compute_jobs read blip")
             else:
                 jobs.rpc_error = RuntimeError("seed hold write failed")
@@ -579,7 +586,19 @@ class TestSeedHoldHandOff:
             rows=[*carried_rows, *_persisted_fills(r1.rec, STRATEGY_ID)],
             column=carried_column, job_id="job-run2", token="tok-run2",
         )
-        _verdict(label, r2.out, _run1_walk_ms(venue, state))
+        if shape == "D":
+            # D: the intervening run is itself a full run, so it may read the span and clear the
+            # bound honestly; run 2 then rightly walks on. The invariant is that the span gets
+            # read by SOME run: the intervening one or run 2. Before the WR-01 fix neither walked back.
+            assert mid.out is not None and r2.out is not None
+            walk = min(_two_run_walk_start_ms(mid.out), _two_run_walk_start_ms(r2.out))
+            assert walk <= _run1_walk_ms(venue, state), (
+                f"SEEDHOLD-WALK-START: {label}: neither the intervening run nor run 2 walked "
+                f"from at or before run 1's walk start {_run1_walk_ms(venue, state)} "
+                f"(earliest walk start {walk}): run 1's unread span is skipped"
+            )
+        else:
+            _verdict(label, r2.out, _run1_walk_ms(venue, state))
 
 
 # ---- the retry arms: a re-claimed attempt keeps attempt 1's hold --------------------------------
@@ -791,14 +810,23 @@ class TestSeedHoldMechanism:
             jobs.add_row("job-old", "done", {SEED_HOLD_KEY_NAME: bad})
             return jobs
 
-        # (1) bound RPC working: the malformed mark lowers nothing.
+        # (1) bound RPC working: the malformed mark is a failed read, so the seed is lowered to
+        # the reach anchor (a hidden earlier mark must not be buried by this run's clean bound
+        # clear).
+        # INTENT CHANGE 2026-11-28 (Phase 257 review WR-01): this arm used to assert
+        # `since_ms == SET_SEED_MS` ("a malformed stored mark must lower no seed"). That was the
+        # fail-open the review measured: with the RPC up, a run that could not read the mark kept
+        # the seed past the hidden span, cleared the bound, and ended `done` without the mark.
+        # The seed now drops to the reach anchor whenever the hold read failed, over-fetching and
+        # never skipping a span.
         ok = await _run(
             venue="okx", jobs=_store(), bounds=FlakyBounds(0), flags={}, rows=rows, column=column,
             job_id="job-m1", token="tok-m1", daily_trades=DAILY_TRADES_RUN1,
         )
         assert ok.out is not None
-        assert ok.out.fetch_raw.call_args.kwargs["since_ms"] == SET_SEED_MS, (
-            "SEEDHOLD-MECHANISM: a malformed stored mark must lower no seed"
+        assert ok.out.fetch_raw.call_args.kwargs["since_ms"] == REACH_ANCHOR_MS["okx"], (
+            "SEEDHOLD-MECHANISM: a malformed stored mark is a failed read; the seed must drop to "
+            "the OKX reach anchor"
         )
         # (2) bound RPC down: the malformed mark counts as a failed read, so the write is the reach.
         jobs2 = _store()
